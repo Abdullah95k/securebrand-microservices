@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -48,21 +49,12 @@ func (r *Runner) Capture(ctx context.Context, page, dir, name string) ([]string,
 	date := time.Now().UTC().Format("20060102")
 	var written []string
 	write := func(query, file string, body []byte, meta map[string]any) error {
-		d := filepath.Join(dir, query, date+"_"+name)
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			return err
-		}
-		if err := os.WriteFile(filepath.Join(d, file), body, 0o644); err != nil {
-			return err
-		}
 		meta["source"] = "capture"
-		meta["captured_at"] = time.Now().UTC()
-		mb, _ := json.MarshalIndent(meta, "", "  ")
-		if err := os.WriteFile(filepath.Join(d, "meta.json"), mb, 0o644); err != nil {
-			return err
+		d, err := writeFixture(dir, query, date+"_"+name, file, body, meta, keep)
+		if d != "" {
+			written = append(written, d)
 		}
-		written = append(written, d)
-		return fixtures.ScrubDir(d, keep)
+		return err
 	}
 	if err := write("page_html", "response.html", pl.HTML, map[string]any{"page_id": pg.PageId}); err != nil {
 		return written, err
@@ -100,6 +92,24 @@ func (r *Runner) Capture(ctx context.Context, page, dir, name string) ([]string,
 	return written, err
 }
 
+// writeFixture writes body and meta.json to root/<query>/<caseName>/ and
+// scrubs them; ids in keep (the page id) survive the scrub.
+func writeFixture(root, query, caseName, file string, body []byte, meta map[string]any, keep []string) (string, error) {
+	d := filepath.Join(root, query, caseName)
+	if err := os.MkdirAll(d, 0o755); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(d, file), body, 0o644); err != nil {
+		return "", err
+	}
+	meta["captured_at"] = time.Now().UTC()
+	mb, _ := json.MarshalIndent(meta, "", "  ")
+	if err := os.WriteFile(filepath.Join(d, "meta.json"), mb, 0o644); err != nil {
+		return "", err
+	}
+	return d, fixtures.ScrubDir(d, keep)
+}
+
 // errNotOK is reported when a response came back but was not OK.
 var errNotOK = errors.New("response not ok")
 
@@ -118,29 +128,17 @@ func classOf(r *graphql.Response) string {
 }
 
 var (
-	scriptSrc   = regexp.MustCompile(`https:(?:\\/\\/|//)static\.[a-z0-9.\-]*fbcdn\.net(?:\\/|/)rsrc\.php(?:\\/|/)[^"'\s]+?\.js[^"'\s]*`)
+	// Bundle URLs appear in script tags and, JSON-escaped, in inline data.
+	scriptSrc   = regexp.MustCompile(`(?:https?:)?(?:\\/\\/|//)[A-Za-z0-9.\-:]+(?:\\/|/)rsrc\.php(?:\\/|/)[^"'\s<>]+?\.js[^"'\s<>]*`)
 	relayOp     = regexp.MustCompile(`__d\("([A-Za-z0-9_]+)_facebookRelayOperation"[^{]*\{[^}]*?exports\s*=\s*"(\d+)"`)
 	relayOpLoad = regexp.MustCompile(`"([A-Za-z0-9_]+Query)"\s*,\s*\{?\s*"?(?:queryID|id)"?\s*:\s*"(\d{8,})"`)
 )
 
-// DocIDs loads a page and scans its JS bundles for Relay operation ids
-// (friendly_name -> doc_id). Bundles are fetched with httpClient (direct
-// egress; they are static and immutable).
-func (r *Runner) DocIDs(ctx context.Context, page string, maxBundles int) (map[string]string, int, error) {
-	ref, err := task.NormalizeRef(page)
-	if err != nil {
-		return nil, 0, err
-	}
-	id, err := r.Pool.Acquire(ctx, r.Opt.Tier)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer r.Pool.Release(id)
-	u, _ := id.Base.Parse(task.RefPath(ref))
-	pl, err := r.Loader.Load(ctx, id, u.String())
-	if err != nil {
-		return nil, 0, err
-	}
+// DocIDs loads pages and scans them and their JS bundles for Relay
+// operation ids (friendly_name -> doc_id). Bundles are static and immutable,
+// so they are fetched over direct egress (r.HTTP), and only from Facebook's
+// CDN or the page's own host. It fails only when no page could be loaded.
+func (r *Runner) DocIDs(ctx context.Context, pages []string, maxBundles int) (map[string]string, int, error) {
 	out := map[string]string{}
 	scan := func(b []byte) {
 		for _, re := range []*regexp.Regexp{relayOp, relayOpLoad} {
@@ -149,27 +147,75 @@ func (r *Runner) DocIDs(ctx context.Context, page string, maxBundles int) (map[s
 			}
 		}
 	}
-	scan(pl.HTML)
 	seen := map[string]bool{}
-	n := 0
-	for _, m := range scriptSrc.FindAll(pl.HTML, -1) {
-		src := strings.ReplaceAll(string(m), `\/`, "/")
-		if seen[src] || n >= maxBundles {
-			continue
-		}
-		seen[src] = true
-		n++
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, src, nil)
+	n, loaded := 0, 0
+	var lastErr error
+	for _, page := range pages {
+		pl, pageURL, err := r.load(ctx, page)
 		if err != nil {
+			lastErr = err
 			continue
 		}
-		resp, err := r.HTTP.Do(req)
-		if err != nil {
-			continue
+		loaded++
+		scan(pl)
+		for _, m := range scriptSrc.FindAll(pl, -1) {
+			src := strings.ReplaceAll(string(m), `\/`, "/")
+			if strings.HasPrefix(src, "//") {
+				src = pageURL.Scheme + ":" + src
+			}
+			u, err := url.Parse(src)
+			if err != nil || seen[src] || n >= maxBundles {
+				continue
+			}
+			if !strings.HasSuffix(u.Hostname(), "fbcdn.net") && u.Host != pageURL.Host {
+				continue
+			}
+			seen[src] = true
+			n++
+			if b, err := r.get(ctx, src); err == nil {
+				scan(b)
+			}
 		}
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 20<<20))
-		_ = resp.Body.Close()
-		scan(b)
+	}
+	if loaded == 0 {
+		if lastErr == nil {
+			lastErr = ErrNoPages
+		}
+		return nil, n, lastErr
 	}
 	return out, n, nil
+}
+
+func (r *Runner) load(ctx context.Context, page string) ([]byte, *url.URL, error) {
+	ref, err := task.NormalizeRef(page)
+	if err != nil {
+		return nil, nil, err
+	}
+	id, err := r.Pool.Acquire(ctx, r.Opt.Tier)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer r.Pool.Release(id)
+	u, _ := id.Base.Parse(task.RefPath(ref))
+	pl, err := r.Loader.Load(ctx, id, u.String())
+	if err != nil {
+		return nil, nil, err
+	}
+	return pl.HTML, u, nil
+}
+
+func (r *Runner) get(ctx context.Context, src string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, src, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := r.HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("spike: %s: status %d", src, resp.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, 20<<20))
 }

@@ -4,3 +4,7 @@
 spike-results.jsonl
 /coverage*
 .env
+# Phase 0: credentials, your page list and results stay local.
+/phase0/proxies.yaml
+/phase0/pages.csv
+/phase0/out*/

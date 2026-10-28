@@ -1,96 +1,235 @@
-# Phase 0: validation spike against real Facebook
+# Phase 0: measure logged-out Facebook before scaling up
 
-Goal: measure what logged-out Facebook actually serves **before** scaling up,
-and replace the placeholder doc_ids in `configs/queries.seed.yaml`. The spike
-needs only proxies and a Linux box: no Kafka, Postgres or Redis.
+Phase 0 answers four questions with real data before any money goes into
+scale:
 
-## 1. Proxies
+1. Does a plain HTTP client get a working logged-out session (bootstrap)?
+2. How many comments does logged-out Facebook actually serve, per ordering?
+3. Which proxy tier stays under a 5% block rate at production pacing, and
+   what would it cost per month?
+4. How far back do logged-out timelines go?
 
-Create `spike.yaml`:
+It also replaces the placeholder doc_ids in `configs/queries.seed.yaml` and
+captures real response fixtures so the parsers can be checked against
+Facebook's current shapes.
 
-```yaml
-fb:
-  proxy:
-    tiers:
-      - name: residential
-        kind: gateway
-        gateway: "http://gw.provider.example:7777"
-        username: "USER"
-        password: "PASS"
-        username_template: "{user}-country-{country}-session-{session}-sesstime-{ttl_min}"
-        sticky_ttl: 10m
-        country: us
-      - name: isp
-        kind: static_list
-        endpoints: ["http://USER:PASS@203.0.113.10:8000", "http://USER:PASS@203.0.113.11:8000"]
-```
+Everything runs from one command, `fbs-spike phase0`, on one machine. No
+Kafka, Postgres or Redis is needed. The result is a per-tier verdict and a
+bundle to send back.
 
-Run each tier separately (`--tier residential`, `--tier isp`) so block rates
-can be compared.
+**Get legal sign-off before you start.** The plan's legal items (Facebook
+ToS review, legitimate-interest assessment, DPIA) also cover this
+measurement, because it collects public comments by real people.
 
-## 2. Current doc_ids
+## What you need
 
-```bash
-go run ./cmd/fbs-spike docids --config spike.yaml --tier residential --page https://www.facebook.com/<any-public-page>
-```
-
-It loads the page, scans the JS bundles and prints the doc_ids it found for
-the registry's friendly names (`ProfileCometTimelineFeedRefetchQuery`,
-`CommentsListComponentsPaginationQuery`, `Depth1CommentsListPaginationQuery`).
-Put them in a copy of `configs/queries.seed.yaml` and pass it with
-`--registry`. If a friendly name is missing, record a HAR in a logged-out
-Chrome (scroll the page, open a post, choose "All comments", expand replies)
-and read `fb_api_req_friendly_name`, `doc_id` and `variables` from the
-`/api/graphql/` requests; the variable shapes may also have changed.
-
-## 3. Capture fixtures
-
-```bash
-go run ./cmd/fbs-spike capture --config spike.yaml --registry my-seed.yaml --tier residential \
-  --page https://www.facebook.com/<page> --name brand_a
-go test ./internal/fb/parse -run TestGolden        # expect failures on new shapes
-```
-
-`capture` scrubs names, person ids and signed URLs. Review the files, adjust
-the parsers until the new fixtures parse with no missing required fields, then
-`make golden` and commit fixtures plus `expected.json`.
-
-## 4. Measure
-
-Prepare `pages.txt` with ~150 pages stratified by size (small to mega),
-category (brand, news, creator, government), region (US, EU with the consent
-wall, APAC) and language.
-
-```bash
-go run ./cmd/fbs-spike run --config spike.yaml --registry my-seed.yaml --tier residential \
-  --pages pages.txt --out spike-residential.jsonl --rps 0.3 --concurrency 4
-go run ./cmd/fbs-spike report --in spike-residential.jsonl
-```
-
-Keep `--rps` at or below 0.3 per identity. The report prints:
-
-* HTTP bootstrap success and which tokens were found
-* block rate (rate limits, login walls, checkpoints) for the tier
-* timeline depth (posts, days) and how timelines ended (end, wall, max pages)
-* comment completeness per ordering (median, p10), plus walls
-* bytes per query (feed these into the proxy cost estimate)
-* cursor portability across identities, CDN download success and URL expiry
-
-## 5. Go / no-go
-
-Go if all hold:
-
-| Check | Threshold |
+| | |
 |---|---|
-| Median comment completeness (best ordering) | ≥ 0.70 |
-| HTTP bootstrap success | ≥ 0.90 |
-| Block rate on some tier | < 5% at the chosen pacing |
-| Timeline depth | reaches `max_age` (or a reduced default you accept) |
+| A machine | Linux or macOS, with Go 1.27+, or Docker, or a static binary (`make spike-bin`) |
+| Proxies | Credentials for every tier you want to compare, for example static ISP IPs and a rotating residential gateway |
+| Pages | About 150 public pages, ideally the ones you will monitor |
+| Time | With the defaults: about 200 requests per page, 4 pages in parallel at 0.3 requests/second each, so roughly **7 hours per tier for 150 pages**. The smoke step prints an estimate for your pages before the long run starts. |
+| Traffic | Roughly 1 to 2 GB per tier for 150 pages (about 35 KB per request). At $4/GB of residential traffic, that is single-digit dollars. The smoke step prints this too. |
 
-Otherwise re-scope: shorter default backfill (`limits.max_age_days`), more
-pacing (lower `fb.identity_rps`), a different tier mix, the browser fallback
-(Phase 2), or alternative surfaces. Record the measured values in
-`configs/default.yaml` (pacing, `crawler.*`) and `docs/runbooks/operations.md`.
+## 0. Rehearse against fakefb (about a minute, no proxies)
+
+```bash
+make phase0-dryrun
+```
+
+This starts a local fakefb whose doc_ids have "rotated" away from the
+placeholders, then runs every step against it: preflight, doc_id discovery,
+capture and the fixture check, smoke, the measurement run, the report and
+the bundle. It must end with `OVERALL: GO`. If it doesn't, the kit is
+broken on your machine; fix that before spending proxy traffic. The output
+goes to `phase0/out-dryrun/`.
+
+## 1. Fill in the two files
+
+```bash
+cp phase0/proxies.example.yaml phase0/proxies.yaml
+```
+
+```bash
+chmod 600 phase0/proxies.yaml
+```
+
+```bash
+cp phase0/pages.example.csv phase0/pages.csv
+```
+
+**`phase0/proxies.yaml`:** one entry per tier.
+- `static_list` is for ISP or datacenter IPs. Each endpoint is one exit.
+- `gateway` is for rotating residential. The session id in the user name pins the exit for `sticky_ttl`. The example file lists common user name formats; check your provider's.
+- Set `cost_per_gb_usd` on each tier so the report can project monthly cost. Per-IP plans can leave it at 0.
+- The file is git-ignored and never copied into the bundle.
+
+**`phase0/pages.csv`:** one page per row (URL, vanity or `profile.php?id=`), plus label columns.
+- The header `page,size,category,region,language` is a suggestion; any columns work. The report breaks every result down by each label.
+- Aim for a stratified sample: small to mega pages; brands, news, creators and government; US, EU (cookie consent wall) and APAC.
+- **Put a few busy pages first.** The first rows also feed doc_id discovery (3 pages), fixture capture (2) and the smoke run (3).
+
+## 2. Run
+
+```bash
+make phase0 PHASE0_TIERS=isp,residential
+```
+
+`PHASE0_TIERS` names the tiers in `proxies.yaml` to measure, side by side.
+Extra flags go in `PHASE0_ARGS`. Without Go:
+
+```bash
+docker run --rm -it --user "$(id -u)" -v "$PWD/phase0:/phase0" --entrypoint fbs-spike fbs:dev \
+  phase0 --config /phase0/proxies.yaml --pages /phase0/pages.csv --tiers isp,residential --out-dir /phase0/out
+```
+
+(build the image with `make docker`), or with a static binary built by
+`make spike-bin`:
+
+```bash
+bin/fbs-spike-linux-amd64 phase0 --config phase0/proxies.yaml --pages phase0/pages.csv --tiers isp,residential
+```
+
+The steps, in order. Each prints what it found, and the output goes to `phase0/out/`:
+
+| Step | What it does | Writes | Stops when |
+|---|---|---|---|
+| `preflight` | Checks each tier's exits through an IP echo service: the IP stays the same within a session, and different sessions get different IPs. Then loads the first page through each tier. Also checks the config file permissions. | `preflight.json` | any FAIL line (wrong credentials, non-sticky sessions, a login wall) |
+| `docids` | Loads the first 3 pages, scans their JS bundles for the registry's queries and writes a registry with the current doc_ids | `docids.json`, `registry.yaml` | a query is not found. Use the [HAR fallback](#3-har-fallback-when-doc_ids-are-missing). |
+| `capture` | Records the page HTML, a timeline page, a comments page and a replies page of the first 2 pages; scrubs names, person ids and signed URLs; runs the parsers over them | `fixtures/`, `fixtures.json` | a parser does not understand a response: Facebook's shapes changed. Send the bundle. |
+| `smoke` | Measures the first 3 pages per tier at reduced limits, then prints an estimate of the full run's time, traffic and cost | `smoke-<tier>.jsonl` | no bootstrap, blocks above 50%, or the timeline parser finds no posts |
+| `run` | The measurement, per tier. It can be resumed: pages already finished are skipped. | `run-<tier>.jsonl` | none |
+| `report` | The go/no-go report | `report.txt`, `report.json` | none |
+| `bundle` | Packs everything to send back, then checks that it contains no proxy credentials | `phase0-bundle.tar.gz` | a credential is found |
+
+When a step stops because something needs your action, the bundle is still
+written.
+
+**Exit codes:** 0 GO, 3 NO-GO, 4 action needed (missing doc_ids, parser drift, smoke findings), 1 error, 130 interrupted.
+
+**Interrupting:** Ctrl-C is safe. Pages that were in progress are measured again. To resume the long run without repeating the earlier steps:
+
+```bash
+make phase0 PHASE0_TIERS=isp,residential PHASE0_ARGS="--from run"
+```
+
+**Tuning:** the defaults suit about 150 pages. `fbs-spike phase0 -h` lists every flag.
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--rps` | 0.3 | Requests per second per identity. Keep it at or below 0.33, the pipeline's production pacing; faster understates blocks. |
+| `--concurrency` | 4 | Pages measured in parallel, each on its own exit |
+| `--posts-per-page` | 3 | Posts per page measured for comment completeness |
+| `--max-post-comments` | 300 | Prefers posts small enough to count completely; bigger ones are only used to fill up |
+| `--threads-per-post`, `--comment-pages` | 100, 40 | Limits per measurement. Measurements cut by these limits are marked and left out of the median (see below). |
+| `--orderings`, `--compare-posts` | all three, 1 | The first ordering ("All comments") is measured on every sampled post; the others on one post per page, for comparison |
+| `--timeline-pages` | 60 | About 600 posts. Raise it for pages that post many times a day. |
+| `--min-days` | 365 | The backfill window you need. Use a lower value if you accept a shorter default. |
+| `--req-per-day` | 16M | Production volume for the cost projection (the README sizing) |
+| `--ip-echo-url` | api.ipify.org | Any service that returns the caller's IP. Pass an empty value to skip the exit checks. |
+
+## 3. HAR fallback, when doc_ids are missing
+
+The bundle scan can miss queries that Facebook loads lazily. A browser
+recording of a logged-out session has them all:
+
+1. Open a **private window, logged out**, then open DevTools → Network. Tick "Preserve log" and filter on `graphql`.
+2. Open a busy public page and scroll down a few screens.
+3. Open a post with many comments. Switch the comment filter to **"All comments"**, then to "Newest". Click "View more comments" and "View N replies" a few times.
+4. Right-click the request list → **Save all as HAR** (recent Chrome versions export a sanitized HAR, without cookies, by default). The tool never reads headers or cookies either way, and never writes them anywhere.
+
+Then:
+
+```bash
+go run ./cmd/fbs-spike har --in session.har --write-registry phase0/out/registry.yaml \
+  --fixtures-dir phase0/out/fixtures --name brand_a
+```
+
+```bash
+make phase0 PHASE0_TIERS=isp,residential PHASE0_ARGS="--registry phase0/out/registry.yaml --from capture"
+```
+
+`har` also prints, for each query, the variables Facebook now sends that
+the registry template lacks, and the template variables Facebook no longer
+sends. If either list is non-empty, send the bundle: the templates need
+updating.
+
+## 4. Reading the report
+
+`report.txt` starts with a comparison of the tiers, then the details of
+each tier:
+
+```
+== Phase 0 report ==
+tier           pages bootstrap  blocks  comments   days      $/month  verdict
+isp              150       97%    7.9%      0.93    365         4200    NO-GO
+residential      150       98%    1.2%      0.93    365        19800       GO
+
+-- residential --
+...
+comments [comments]: 450 posts, median 0.93, p10 0.71, walls 2
+comments [comments_newest]: 150 posts, median 0.90, p10 0.64, walls 1
+comments [comments_relevant]: 150 posts, median 0.41, p10 0.12, walls 0
+bytes [comments]: n=3120 on the wire mean=31.0 KB p95=58.2 KB, decoded mean=212.4 KB
+...
+by region:
+  value          pages bootstrap  blocks   days  comments
+  eu                50       93%    1.9%    365      0.91
+...
+PASS median comment completeness 0.93 (comments) >= 0.70
+...
+OVERALL: GO (recommended tier: residential)
+```
+
+(These numbers are illustrative.)
+
+| Line | Meaning |
+|---|---|
+| `bootstrap success`, `tokens` | Share of page loads that yielded a usable session, and which tokens were found. `consent walls` counts EU cookie walls that were handled. |
+| `block rate`, `classes` | Share of GraphQL requests that were rate limited, hit a login wall or a checkpoint. `classes` shows every outcome. |
+| `timeline` | Posts and days reached per page, and why timelines ended: `end` (no older posts), `wall` (login wall), `max_pages` (the `--timeline-pages` limit), `blocked:*`, `drift` |
+| `comments [<ordering>]` | Collected ÷ reported comments per post. The median and p10 leave out measurements cut short by the spike's own limits; when there are any, the line also gives their count and the median including them, which is a lower bound. `walls` counts measurements that hit a login wall. |
+| `bytes [<query>]` | Response sizes: on the wire (compressed, what proxies bill) and decoded |
+| `cursor portability` | Whether a timeline cursor still works on a fresh identity. Low values mean cursors are tied to the session, so tasks need session affinity (`SessionSnapshot` in the task envelope). |
+| `media success`, `median media expiry` | CDN downloads over direct egress, and how long signed media URLs stay valid. Expiry sets how fast the media downloader must work. |
+| `traffic`, `cost` | Traffic of this run, and a projection to `--req-per-day` at the tier's `cost_per_gb_usd` |
+| `by <label>` | The same numbers for each value of each pages-file column |
+
+The verdict: a tier is GO when all four checks pass. Phase 0 is GO when at
+least one tier is. The recommended tier is the cheapest passing one.
+
+| Check | Threshold | If it fails |
+|---|---|---|
+| Median comment completeness, best ordering | ≥ 0.70 | Compare the orderings and their walls. If even "All comments" is low, logged-out access hides comments: plan the browser fallback (Phase 2) or other surfaces. |
+| HTTP bootstrap success | ≥ 0.90 | Look at the region table (EU consent wall) and the tokens found; try another `fb.fingerprint_profile` or another tier |
+| Block rate | < 5% | Lower `--rps`, add exits (more static endpoints or gateway sessions), or use another tier. Mixing tiers in production (`fb.proxy.routing`) is an option. |
+| Timeline depth | median ≥ `--min-days`, or no login walls | Timelines stop early behind login walls: lower `limits.max_age_days`, or accept partial backfills |
+
+## 5. Sending the results back
+
+`phase0/out/phase0-bundle.tar.gz` holds:
+- the reports;
+- the preflight, docids and fixture checks;
+- the discovered registry;
+- the run records: per request the query, outcome class, sizes and timing, with no content;
+- the scrubbed fixtures;
+- `meta.json` (versions and flags).
+
+It never holds `proxies.yaml`. Before writing it, the tool checks that no
+configured proxy user name or password, and no URL with credentials,
+appears in it.
+
+**Share it privately. Never commit it to this repository, which is public.**
+The fixtures are scrubbed of names, person ids and signed URLs, but they
+still contain real public posts and comment text.
+
+To get the parsers and doc_ids updated, start a Claude Code session on this
+repository and attach the bundle, or share it with whoever maintains the
+parsers. With it, they can:
+- adjust the parsers to the real shapes;
+- update `configs/queries.seed.yaml` with the discovered doc_ids and variables;
+- set the pacing and proxy defaults (`fb.identity_rps`, `fb.proxy.routing`, `limits.max_age_days`) to the measured values;
+- regenerate the golden files (`make golden`).
 
 ## 6. Update the registry in a running deployment
 
@@ -101,3 +240,39 @@ curl -X PUT https://fbs/v1/admin/queries/timeline -H "Authorization: Bearer $ADM
 
 Crawlers reload the registry within `fb.registry_refresh` (30s). The previous
 entry becomes the fallback.
+
+## Reference: the steps as separate commands
+
+`phase0` runs these for you; each also works on its own. Add
+`--config phase0/proxies.yaml` to each.
+
+```bash
+fbs-spike preflight --tiers isp,residential --page https://www.facebook.com/<page>
+```
+
+```bash
+fbs-spike docids --tier residential --page <page>,<page> --write-registry my-seed.yaml
+```
+
+```bash
+fbs-spike har --in session.har --write-registry my-seed.yaml --fixtures-dir testdata/fb --name brand_a
+```
+
+```bash
+fbs-spike capture --tier residential --registry my-seed.yaml --page <page> --name brand_a --dir testdata/fb
+```
+
+```bash
+fbs-spike check-fixtures --dir testdata/fb
+```
+
+```bash
+fbs-spike run --tier residential --registry my-seed.yaml --pages phase0/pages.csv --out run-residential.jsonl
+```
+
+```bash
+fbs-spike report --in run-isp.jsonl,run-residential.jsonl
+```
+
+`run` and `capture` refuse placeholder doc_ids when `fb.base_url` is
+Facebook, so no traffic is spent on requests that cannot succeed.

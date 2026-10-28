@@ -22,7 +22,7 @@ It runs self-hosted, on Kubernetes or Docker Compose, and is built for hundreds 
 
 | Verified in this repository | Not verified yet |
 |---|---|
-| Full pipeline (API → crawler → Kafka → persister → Postgres, finaliser, media download/ack/delete, TTL sweep, incremental re-scrape, erasure that survives re-scrapes, retries on blocked identities) end to end against **fakefb**, a synthetic Facebook, with real Postgres 18, Redpanda and Valkey (`make e2e`), and as a Docker Compose stack | Behaviour against **real Facebook**. `configs/queries.seed.yaml` contains **placeholder doc_ids**, and response shapes are modelled on publicly observed structures. Run the [Phase 0 spike](docs/runbooks/phase0-spike.md) with your proxies first. |
+| Full pipeline (API → crawler → Kafka → persister → Postgres, finaliser, media download/ack/delete, TTL sweep, incremental re-scrape, erasure that survives re-scrapes, retries on blocked identities) end to end against **fakefb**, a synthetic Facebook, with real Postgres 18, Redpanda and Valkey (`make e2e`), and as a Docker Compose stack | Behaviour against **real Facebook**. `configs/queries.seed.yaml` contains **placeholder doc_ids**, and response shapes are modelled on publicly observed structures. Run [Phase 0](docs/runbooks/phase0-spike.md) (`make phase0`) with your proxies first. |
 | Parsers against golden fixtures, including handcrafted variant shapes | Real fixtures (capture them with `fbs-spike capture`) |
 | Helm chart lint/render | A real cluster deployment |
 
@@ -47,7 +47,7 @@ fbs-crawler --stages page ─PostTask─▶ post ─ThreadTask─▶ thread     
 | `fbs-persister` | Writes `fb.*` topics into partitioned Postgres (COPY + no-op upserts) |
 | `fbs-media-downloader` / `fbs-media-janitor` | Temporary media lifecycle ([contract](docs/contracts/media-handoff.md)) |
 | `fbctl` | Migrations, topics, API keys, registry, DLQ replay, fixture scrub, dev media acks |
-| `fbs-spike` | Phase 0 measurement harness against real Facebook (no infrastructure needed) |
+| `fbs-spike` | Phase 0 harness against real Facebook: `phase0` runs everything; also `preflight`, `docids`, `har`, `capture`, `check-fixtures`, `run`, `report` (no infrastructure needed) |
 | `fakefb`, `devs3` | Synthetic Facebook and in-memory S3, for development and tests |
 
 Design decisions: [ADR 0001](docs/adr/0001-logged-out-graphql-scraping.md) (scraping approach), [0002](docs/adr/0002-kafka-postgres-valkey.md) (Kafka, Postgres, Valkey), [0003](docs/adr/0003-temporary-media.md) (temporary media).
@@ -147,11 +147,27 @@ Settings that matter most:
 
 ### Phase 0, before scraping real Facebook at volume
 
-1. Get current doc_ids: `fbs-spike docids --page ...`.
-2. Capture and scrub real fixtures, then adjust the parsers: `fbs-spike capture`.
-3. Measure coverage, blocking and bytes on ~150 pages per proxy tier: `fbs-spike run`, then `fbs-spike report`. The report gives a go/no-go verdict.
+One command measures logged-out Facebook through your proxies. It produces a go/no-go verdict per proxy tier, with a cost projection, and a bundle to send back so the doc_ids and parsers can be fixed.
 
-See [docs/runbooks/phase0-spike.md](docs/runbooks/phase0-spike.md).
+```bash
+make phase0-dryrun     # rehearse against a local fakefb first (about a minute)
+```
+
+```bash
+cp phase0/proxies.example.yaml phase0/proxies.yaml && chmod 600 phase0/proxies.yaml
+```
+
+```bash
+cp phase0/pages.example.csv phase0/pages.csv
+```
+
+```bash
+make phase0 PHASE0_TIERS=isp,residential
+```
+
+It runs these steps in order: preflight (proxy exits, a test page load), doc_id discovery, fixture capture with a parser check, a smoke run with a time and cost estimate, the measurement run (resumable), the report and the bundle.
+
+See [docs/runbooks/phase0-spike.md](docs/runbooks/phase0-spike.md), including how to read the report.
 
 ### Running in Kubernetes
 
@@ -204,7 +220,8 @@ Commenter data is personal data.
 | `make golden` | Regenerate parser `expected.json` after an intended change |
 | `make fixtures` | Regenerate the synthetic fakefb fixtures |
 | `make generate` | Regenerate protobuf Go code (`buf generate`) |
-| `go run ./cmd/fakefb --pages 5 --posts 30 --rate-limit-every 10 --login-wall-after 200` | Synthetic Facebook with injected faults |
+| `go run ./cmd/fakefb --pages 5 --posts 30 --rate-limit-every 10 --login-wall-after 200` | Synthetic Facebook with injected faults (`--docids rotated` to exercise doc_id discovery) |
+| `make phase0-dryrun` | The Phase 0 kit end to end against fakefb |
 
 ### Repository layout
 
@@ -216,4 +233,5 @@ internal/crawl         task envelope, stages, worker, checkpoints, job accountin
 internal/{api,dispatch,persist,scheduler,media,gdpr,spike,fakefb,store,platform}
 migrations             goose SQL              testdata/fb      parser fixtures (+ expected.json)
 deploy/{docker,compose,helm/fbs}             docs/{adr,contracts,runbooks}
+phase0                 Phase 0 kit: proxy and page templates, dry run
 ```

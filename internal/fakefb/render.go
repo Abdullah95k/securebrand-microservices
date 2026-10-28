@@ -320,6 +320,7 @@ func (r *renderer) pageHTML(p *Page, lsd, datr string, consent bool) []byte {
 	fmt.Fprintf(&b, `<meta property="og:title" content="%s"/>`, html.EscapeString(p.Name))
 	fmt.Fprintf(&b, `<meta property="og:url" content="%s"/>`, r.pageURL(p))
 	fmt.Fprintf(&b, `<meta property="al:android:url" content="fb://page/%d"/>`, p.ID)
+	fmt.Fprintf(&b, `<script src="%s/rsrc.php/v3/relay.js" async crossorigin="anonymous"></script>`, r.base)
 	b.WriteString("</head><body>")
 	if consent {
 		b.WriteString(`<div data-cookiebanner="banner"><form action="/cookie/consent/" method="post"></form></div>`)

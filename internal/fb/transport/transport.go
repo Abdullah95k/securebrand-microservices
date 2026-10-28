@@ -130,13 +130,19 @@ func (d *tlsDoer) Do(ctx context.Context, r *Request) (*Response, error) {
 	for k, v := range resp.Header {
 		h[k] = v
 	}
+	in, out := bt.GetReadBytes()-in0, bt.GetWriteBytes()-out0
+	if in == 0 && out == 0 && req.URL.Scheme == "http" {
+		// tls-client only meters TLS connections; plain HTTP (fakefb in
+		// development) falls back to the payload sizes.
+		in, out = int64(len(b)), int64(len(r.Body))
+	}
 	return &Response{
 		Status:   resp.StatusCode,
 		Header:   h,
 		Body:     b,
 		Location: resp.Header.Get("Location"),
-		BytesIn:  bt.GetReadBytes() - in0,
-		BytesOut: bt.GetWriteBytes() - out0,
+		BytesIn:  in,
+		BytesOut: out,
 		Elapsed:  time.Since(start),
 	}, nil
 }
