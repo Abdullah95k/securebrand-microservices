@@ -31,10 +31,11 @@ jobs:
       - name: Proto breaking changes
         if: github.event_name == 'pull_request'
         run: |
-          if git ls-tree -d "origin/${{ github.base_ref }}" api/proto >/dev/null 2>&1; then
+          # git ls-tree exits 0 for missing paths; cat-file -e does not.
+          if git cat-file -e "origin/${{ github.base_ref }}:buf.yaml" 2>/dev/null; then
             buf breaking --against ".git#branch=origin/${{ github.base_ref }}"
           else
-            echo "no protos on the base branch yet"
+            echo "no buf module on the base branch yet"
           fi
       - name: Fixtures contain no real signed URLs
         run: |
