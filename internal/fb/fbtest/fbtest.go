@@ -35,6 +35,9 @@ type Options struct {
 	Faults      fakefb.Faults
 	IdentityRPS float64
 	UseTLS      bool // use the fingerprinted tls-client transport (default std)
+	// RotateDocIDs makes fakefb accept only rotated doc_ids, so the seed
+	// registry is stale until the ids are rediscovered.
+	RotateDocIDs bool
 }
 
 // New starts fakefb and builds the client stack. It is closed via t.Cleanup.
@@ -57,6 +60,9 @@ func New(t testing.TB, o Options) *Env {
 	docs := map[string][]string{}
 	for _, q := range seed.Queries {
 		docs[q.FriendlyName] = append(docs[q.FriendlyName], q.DocID)
+	}
+	if o.RotateDocIDs {
+		docs = fakefb.RotatedDocs(docs)
 	}
 	w := fakefb.NewWorld(o.Spec)
 	fs := fakefb.NewServer(w, fakefb.Options{Docs: docs, InlineReply: true, Faults: o.Faults})

@@ -114,6 +114,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.admin(w, r)
 	case strings.HasPrefix(r.URL.Path, "/media/"):
 		s.media(w, r)
+	case strings.HasPrefix(r.URL.Path, "/rsrc.php/"):
+		s.bundle(w)
 	case r.URL.Path == "/api/graphql/" && r.Method == http.MethodPost:
 		s.graphql(w, r)
 	case r.URL.Path == "/cookie/consent/" && r.Method == http.MethodPost:
@@ -604,6 +606,48 @@ func contains(xs []string, x string) bool {
 		}
 	}
 	return false
+}
+
+// bundle serves a static JS bundle that declares the accepted doc_ids as
+// Relay operation modules, the way Facebook's bundles do, so doc_id
+// discovery (fbs-spike docids) can be exercised end to end.
+func (s *Server) bundle(w http.ResponseWriter) {
+	s.mu.Lock()
+	names := make([]string, 0, len(s.opts.Docs))
+	for name, ids := range s.opts.Docs {
+		if len(ids) > 0 {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	for _, name := range names {
+		fmt.Fprintf(&b, "__d(\"%s_facebookRelayOperation\",[],(function(a,b,c,d,e,f){e.exports=\"%s\"}),null);\n",
+			name, s.opts.Docs[name][0])
+	}
+	s.mu.Unlock()
+	w.Header().Set("Content-Type", "application/javascript")
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	_, _ = io.WriteString(w, b.String())
+}
+
+// RotatedDocs returns docs with every doc_id replaced by a different,
+// deterministic one, as after a Facebook deploy. Clients still using the
+// original ids get PersistedQueryNotFound until they rediscover them.
+func RotatedDocs(docs map[string][]string) map[string][]string {
+	out := make(map[string][]string, len(docs))
+	for name, ids := range docs {
+		for _, id := range ids {
+			r := "7316" + id
+			if len(id) > 4 {
+				r = "7316" + id[4:]
+			}
+			if !contains(out[name], r) {
+				out[name] = append(out[name], r)
+			}
+		}
+	}
+	return out
 }
 
 // DocsFromSeed builds the accepted doc_id map from registry seed queries.

@@ -2,6 +2,7 @@ package registry
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/abdullah95k/securebrand-microservices/configs"
@@ -49,5 +50,45 @@ func TestFallbackOrdering(t *testing.T) {
 	fb, ok := reg.Fallback("q", "new")
 	if !ok || fb.DocID != "old" {
 		t.Fatalf("fallback = %v %v", fb.DocID, ok)
+	}
+}
+
+func TestSeedRoundTripAndPlaceholders(t *testing.T) {
+	b, err := configs.FS.ReadFile("queries.seed.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := ParseSeed(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := PlaceholderQueries(s); len(got) != len(s.Queries) {
+		t.Fatalf("every embedded seed query is a placeholder, got %v", got)
+	}
+	s.Queries[0].DocID = "24681357902468135"
+	out, err := MarshalSeed(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := ParseSeed(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(back.Queries) != len(s.Queries) || back.Queries[0].DocID != "24681357902468135" {
+		t.Fatalf("round trip lost data: %+v", back.Queries)
+	}
+	if got := PlaceholderQueries(back); len(got) != len(s.Queries)-1 {
+		t.Fatalf("placeholders after update: %v", got)
+	}
+	for i := range s.Queries {
+		var a, b map[string]any
+		_ = json.Unmarshal(s.Queries[i].Variables, &a)
+		_ = json.Unmarshal(back.Queries[i].Variables, &b)
+		if fmt.Sprint(a) != fmt.Sprint(b) {
+			t.Fatalf("%s variables changed:\n%v\n%v", s.Queries[i].Name, a, b)
+		}
+	}
+	if fmt.Sprint(back.ClientParams) != fmt.Sprint(s.ClientParams) {
+		t.Fatal("client params changed")
 	}
 }

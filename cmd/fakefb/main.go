@@ -24,6 +24,7 @@ func main() {
 	loginWallAfter := flag.Int("login-wall-after", 0, "GraphQL requests per identity before a login wall (0 = off)")
 	latency := flag.Duration("latency", 0, "mean added latency")
 	consent := flag.Bool("consent-wall", false, "show the cookie consent wall")
+	docIDs := flag.String("docids", "seed", "accepted doc_ids: seed (the embedded registry seed) or rotated (different ids, discoverable from /rsrc.php bundles)")
 	flag.Parse()
 
 	spec := fakefb.DefaultSpec()
@@ -38,6 +39,17 @@ func main() {
 	docs := map[string][]string{}
 	for _, q := range s.Queries {
 		docs[q.FriendlyName] = append(docs[q.FriendlyName], q.DocID)
+	}
+	switch *docIDs {
+	case "seed":
+	case "rotated":
+		docs = fakefb.RotatedDocs(docs)
+	default:
+		slog.Error("unknown --docids", "value", *docIDs)
+		os.Exit(2)
+	}
+	for name, ids := range docs {
+		slog.Info("doc_id", "friendly_name", name, "doc_id", ids[0])
 	}
 	srv := fakefb.NewServer(w, fakefb.Options{Docs: docs, InlineReply: true, Faults: fakefb.Faults{
 		RateLimitEvery: *rateLimitEvery, LoginWallAfter: *loginWallAfter, Latency: *latency, ConsentWall: *consent,

@@ -9,6 +9,7 @@ package spike
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -16,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/task"
@@ -29,28 +31,49 @@ import (
 // Options control a run.
 type Options struct {
 	Tier             string
-	MaxTimelinePages int           // per page
-	PostsPerPage     int           // posts sampled for comment measurement
-	MaxCommentPages  int           // per post and ordering
-	ThreadsPerPost   int           // reply threads followed per post
-	Orderings        []string      // registry names, e.g. comments, comments_newest, comments_relevant
-	MediaSamples     int           // CDN downloads per page
-	Concurrency      int           // pages in parallel
-	PageTimeout      time.Duration // per page
+	MaxTimelinePages int      // per page
+	PostsPerPage     int      // posts sampled for comment measurement
+	MaxCommentPages  int      // per post and ordering
+	ThreadsPerPost   int      // reply threads followed per post
+	Orderings        []string // registry names, e.g. comments, comments_newest, comments_relevant
+	MediaSamples     int      // CDN downloads per page
+	// MaxPostComments prefers posts with at most this many comments, so a
+	// measurement can finish within the limits above (0 = busiest first).
+	MaxPostComments int64
+	// ComparePosts is how many sampled posts get the comparison orderings
+	// (Orderings[1:]); 0 = all of them.
+	ComparePosts int
+	Concurrency  int           // pages in parallel
+	PageTimeout  time.Duration // per page
+
+	// Recorded in the run header so reports can project cost and compare runs.
+	RPS          float64 // per-identity pacing
+	CostPerGBUSD float64 // proxy price of the tier
+	Version      string  // fbs-spike build
 }
 
 // Record is one JSONL line.
 type Record struct {
-	Type string    `json:"type"` // request | bootstrap | timeline | comments | portability | media
+	// run | page | request | bootstrap | timeline | comments | portability | media | page_done
+	Type string    `json:"type"`
 	At   time.Time `json:"at"`
-	Page string    `json:"page"`
+	Page string    `json:"page,omitempty"`
 	Tier string    `json:"tier"`
+
+	Labels map[string]string `json:"labels,omitempty"` // page: strata from the pages file
+
+	// run header
+	RPS          float64 `json:"rps,omitempty"`
+	Concurrency  int     `json:"concurrency,omitempty"`
+	CostPerGBUSD float64 `json:"cost_per_gb_usd,omitempty"`
+	Version      string  `json:"version,omitempty"`
 
 	Query    string `json:"query,omitempty"`
 	Class    string `json:"class,omitempty"`
 	Reason   string `json:"reason,omitempty"`
 	Status   int    `json:"status,omitempty"`
-	Bytes    int    `json:"bytes,omitempty"`
+	Bytes    int    `json:"bytes,omitempty"`      // decoded body
+	Wire     int64  `json:"wire_bytes,omitempty"` // on the wire, in + out (what proxies bill)
 	MS       int64  `json:"ms,omitempty"`
 	Identity string `json:"identity,omitempty"`
 
@@ -69,6 +92,9 @@ type Record struct {
 	TopLevel  int    `json:"top_level,omitempty"`
 	Replies   int    `json:"replies,omitempty"`
 	Collected int    `json:"collected,omitempty"`
+	// Capped means the spike's own limits (--comment-pages,
+	// --threads-per-post) stopped the measurement, not Facebook.
+	Capped bool `json:"capped,omitempty"`
 
 	ExpiresInH float64  `json:"expires_in_h,omitempty"`
 	MissingOpt []string `json:"missing_optional,omitempty"`
@@ -82,6 +108,9 @@ type Runner struct {
 	HTTP   *http.Client // direct CDN downloads
 	Out    io.Writer
 	Opt    Options
+	// Progress, when set, is called after each page with the number of
+	// pages finished so far.
+	Progress func(done, total int, page string)
 
 	mu sync.Mutex
 }
@@ -89,6 +118,7 @@ type Runner struct {
 func (r *Runner) emit(rec Record) {
 	rec.At = time.Now().UTC()
 	rec.Tier = r.Opt.Tier
+	rec.Reason = Redact(rec.Reason)
 	b, _ := json.Marshal(rec)
 	r.mu.Lock()
 	_, _ = r.Out.Write(append(b, '\n'))
@@ -97,20 +127,31 @@ func (r *Runner) emit(rec Record) {
 
 func boolp(b bool) *bool { return &b }
 
-// Run crawls every page reference.
-func (r *Runner) Run(ctx context.Context, pages []string) {
+// Run writes a run header, then measures every page. Each page ends with a
+// page_done record (see Done), whatever its outcome. Run stops starting new
+// pages once ctx is cancelled.
+func (r *Runner) Run(ctx context.Context, pages []PageRef) {
+	r.emit(Record{Type: "run", RPS: r.Opt.RPS, Concurrency: r.Opt.Concurrency,
+		CostPerGBUSD: r.Opt.CostPerGBUSD, Version: r.Opt.Version})
 	sem := make(chan struct{}, max(1, r.Opt.Concurrency))
 	var wg sync.WaitGroup
+	var finished atomic.Int64
 	for _, p := range pages {
+		if ctx.Err() != nil {
+			break
+		}
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(p string) {
+		go func(p PageRef) {
 			defer wg.Done()
 			defer func() { <-sem }()
 			pctx, cancel := context.WithTimeout(ctx, r.Opt.PageTimeout)
 			defer cancel()
 			if err := r.page(pctx, p); err != nil {
-				slog.Warn("spike: page failed", "page", p, "err", err)
+				slog.Warn("spike: page failed", "page", p.Ref, "err", Redact(err.Error()))
+			}
+			if r.Progress != nil && ctx.Err() == nil {
+				r.Progress(int(finished.Add(1)), len(pages), p.Ref)
 			}
 		}(p)
 	}
@@ -126,15 +167,24 @@ func (r *Runner) do(ctx context.Context, page string, id *session.Identity, req 
 		return nil, err
 	}
 	rec.Class, rec.Reason, rec.Status, rec.Bytes, rec.MS = resp.Class.String(), resp.Reason, resp.Status, len(resp.Body), resp.Elapsed.Milliseconds()
+	rec.Wire = resp.BytesIn + resp.BytesOut
 	r.emit(rec)
 	return resp, nil
 }
 
-func (r *Runner) page(ctx context.Context, raw string) error {
-	ref, err := task.NormalizeRef(raw)
+func (r *Runner) page(ctx context.Context, p PageRef) error {
+	ref, err := task.NormalizeRef(p.Ref)
 	if err != nil {
 		return err
 	}
+	r.emit(Record{Type: "page", Page: ref, Labels: p.Labels})
+	defer func() {
+		// A page interrupted by shutdown is measured again on resume; one
+		// that hit PageTimeout counts as measured.
+		if !errors.Is(ctx.Err(), context.Canceled) {
+			r.emit(Record{Type: "page_done", Page: ref})
+		}
+	}()
 	id, err := r.Pool.Acquire(ctx, r.Opt.Tier)
 	if err != nil {
 		return err
@@ -151,7 +201,7 @@ func (r *Runner) page(ctx context.Context, raw string) error {
 	}
 	tok := htmlx.ExtractTokens(pl.HTML)
 	brec.OK = boolp(pl.Class == detect.OK && id.Bootstrapped())
-	brec.Class, brec.Reason, brec.Status, brec.Bytes = pl.Class.String(), pl.Reason, pl.Status, len(pl.HTML)
+	brec.Class, brec.Reason, brec.Status, brec.Bytes, brec.Wire = pl.Class.String(), pl.Reason, pl.Status, len(pl.HTML), pl.Bytes
 	brec.Consent = tok.ConsentWall
 	brec.TokensFound = map[string]bool{"lsd": tok.LSD != "", "js_datr": tok.JSDatr != "", "spin_r": tok.SpinR != "",
 		"hsi": tok.HSI != "", "rev": tok.Rev != "", "haste_session": tok.HasteSession != "", "dtsg": tok.DTSG != ""}
@@ -226,14 +276,14 @@ func (r *Runner) page(ctx context.Context, raw string) error {
 		r.portability(ctx, ref, pageID, u.String(), cursors[len(cursors)/2])
 	}
 
-	// Comment completeness per ordering on the busiest posts.
-	sort.Slice(posts, func(i, j int) bool { return posts[i].Post.GetCommentCount() > posts[j].Post.GetCommentCount() })
-	for i := 0; i < len(posts) && i < r.Opt.PostsPerPage; i++ {
-		p := posts[i].Post
-		if p.GetCommentCount() == 0 {
-			break
-		}
-		for _, ord := range r.Opt.Orderings {
+	// Comment completeness: the first ordering on every sampled post, the
+	// others (for comparison) on the first ComparePosts of them.
+	for i, b := range SamplePosts(posts, r.Opt.PostsPerPage, r.Opt.MaxPostComments) {
+		p := b.Post
+		for j, ord := range r.Opt.Orderings {
+			if j > 0 && r.Opt.ComparePosts > 0 && i >= r.Opt.ComparePosts {
+				break
+			}
 			r.comments(ctx, ref, id, pageID, p.PostId, p.FeedbackId, p.GetCommentCount(), ord)
 		}
 	}
@@ -327,11 +377,20 @@ func (r *Runner) comments(ctx context.Context, ref string, id *session.Identity,
 		end = "max_pages"
 	}
 	// Follow reply threads (nested ones included) up to ThreadsPerPost.
-	for followed := 0; len(threads) > 0 && followed < r.Opt.ThreadsPerPost; followed++ {
+	capped := pages == r.Opt.MaxCommentPages
+	for followed := 0; len(threads) > 0; followed++ {
+		if followed >= r.Opt.ThreadsPerPost {
+			capped = true
+			break
+		}
 		th := threads[0]
 		threads = threads[1:]
 		c := ""
-		for p := 0; p < r.Opt.MaxCommentPages; p++ {
+		for p := 0; ; p++ {
+			if p >= r.Opt.MaxCommentPages {
+				capped = true
+				break
+			}
 			vars := map[string]any{"feedback_id": th.FeedbackID, "expansion_token": th.ExpansionToken}
 			if c != "" {
 				vars["cursor"] = c
@@ -356,7 +415,7 @@ func (r *Runner) comments(ctx context.Context, ref string, id *session.Identity,
 		}
 	}
 	r.emit(Record{Type: "comments", Page: ref, PostID: postID, Ordering: ordering, Reported: reported,
-		TopLevel: top, Replies: replies, Collected: len(seen), EndReason: end, PagesRead: pages})
+		TopLevel: top, Replies: replies, Collected: len(seen), EndReason: end, PagesRead: pages, Capped: capped})
 }
 
 func (r *Runner) media(ctx context.Context, ref, rawURL string, expires time.Time) {
@@ -379,6 +438,31 @@ func (r *Runner) media(ctx context.Context, ref, rawURL string, expires time.Tim
 	_ = resp.Body.Close()
 	rec.Status, rec.Bytes, rec.OK = resp.StatusCode, int(n), boolp(resp.StatusCode == 200)
 	r.emit(rec)
+}
+
+// SamplePosts picks up to n posts with comments for the completeness
+// measurement: the busiest with at most maxComments comments first, then,
+// if those are too few, the smallest of the bigger ones. maxComments 0
+// means the busiest posts.
+func SamplePosts(posts []*parse.PostBundle, n int, maxComments int64) []*parse.PostBundle {
+	var fit, big []*parse.PostBundle
+	for _, b := range posts {
+		c := b.Post.GetCommentCount()
+		switch {
+		case c == 0:
+		case maxComments <= 0 || c <= maxComments:
+			fit = append(fit, b)
+		default:
+			big = append(big, b)
+		}
+	}
+	sort.SliceStable(fit, func(i, j int) bool { return fit[i].Post.GetCommentCount() > fit[j].Post.GetCommentCount() })
+	sort.SliceStable(big, func(i, j int) bool { return big[i].Post.GetCommentCount() < big[j].Post.GetCommentCount() })
+	out := append(fit, big...)
+	if len(out) > n {
+		out = out[:n]
+	}
+	return out
 }
 
 // ErrNoPages is returned when the input is empty.

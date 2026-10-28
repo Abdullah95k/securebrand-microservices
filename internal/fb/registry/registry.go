@@ -64,16 +64,18 @@ type Seed struct {
 
 type seedYAML struct {
 	ClientParams map[string]string `yaml:"client_params"`
-	Queries      []struct {
-		Name          string         `yaml:"name"`
-		FriendlyName  string         `yaml:"friendly_name"`
-		DocID         string         `yaml:"doc_id"`
-		Parser        string         `yaml:"parser"`
-		ParserVersion int            `yaml:"parser_version"`
-		Priority      int            `yaml:"priority"`
-		Status        string         `yaml:"status"`
-		Variables     map[string]any `yaml:"variables"`
-	} `yaml:"queries"`
+	Queries      []seedQueryYAML   `yaml:"queries"`
+}
+
+type seedQueryYAML struct {
+	Name          string         `yaml:"name"`
+	FriendlyName  string         `yaml:"friendly_name"`
+	DocID         string         `yaml:"doc_id"`
+	Parser        string         `yaml:"parser"`
+	ParserVersion int            `yaml:"parser_version"`
+	Priority      int            `yaml:"priority"`
+	Status        string         `yaml:"status,omitempty"`
+	Variables     map[string]any `yaml:"variables"`
 }
 
 // ParseSeed parses a seed YAML document.
@@ -98,6 +100,53 @@ func ParseSeed(b []byte) (Seed, error) {
 		})
 	}
 	return s, nil
+}
+
+// placeholderDocID matches the doc_ids shipped in configs/queries.seed.yaml.
+// They only work against fakefb; real Facebook needs discovered ids.
+var placeholderDocID = regexp.MustCompile(`^9000000000000\d{3}$`)
+
+// IsPlaceholderDocID reports whether id is one of the seed placeholders.
+func IsPlaceholderDocID(id string) bool { return placeholderDocID.MatchString(id) }
+
+// PlaceholderQueries returns the names of seed queries that still carry a
+// placeholder doc_id.
+func PlaceholderQueries(s Seed) []string {
+	var out []string
+	for _, q := range s.Queries {
+		if IsPlaceholderDocID(q.DocID) {
+			out = append(out, q.Name)
+		}
+	}
+	return out
+}
+
+// MarshalSeed renders s in the seed YAML format read by ParseSeed.
+func MarshalSeed(s Seed) ([]byte, error) {
+	var y seedYAML
+	y.ClientParams = s.ClientParams
+	for _, q := range s.Queries {
+		var vars map[string]any
+		if len(q.Variables) > 0 {
+			if err := json.Unmarshal(q.Variables, &vars); err != nil {
+				return nil, fmt.Errorf("registry: seed %s variables: %w", q.Name, err)
+			}
+		}
+		st := q.Status
+		if st == StatusActive {
+			st = ""
+		}
+		y.Queries = append(y.Queries, seedQueryYAML{Name: q.Name, FriendlyName: q.FriendlyName, DocID: q.DocID,
+			Parser: q.Parser, ParserVersion: q.ParserVersion, Priority: q.Priority, Status: st, Variables: vars})
+	}
+	var b bytes.Buffer
+	enc := yaml.NewEncoder(&b)
+	enc.SetIndent(2)
+	if err := enc.Encode(y); err != nil {
+		return nil, fmt.Errorf("registry: seed: %w", err)
+	}
+	_ = enc.Close()
+	return b.Bytes(), nil
 }
 
 // snapshot is an immutable view used by Static and DB.

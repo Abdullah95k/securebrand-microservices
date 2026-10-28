@@ -43,6 +43,9 @@ type Response struct {
 	Reason  string
 	Errors  []detect.GQLError
 	Elapsed time.Duration
+	// Wire bytes (compressed, as billed by proxies).
+	BytesIn  int64
+	BytesOut int64
 }
 
 // Client sends GraphQL requests on behalf of identities.
@@ -144,7 +147,7 @@ func (c *Client) do(ctx context.Context, id *session.Identity, q registry.Query,
 		c.Raw.Capture(ctx, q.Name, cls, tr.Body)
 	}
 	return &Response{Query: q, Parts: parts, Body: tr.Body, Status: tr.Status, Class: cls,
-		Reason: reason, Errors: errs, Elapsed: elapsed}, nil
+		Reason: reason, Errors: errs, Elapsed: elapsed, BytesIn: tr.BytesIn, BytesOut: tr.BytesOut}, nil
 }
 
 // pace applies identity pacing, then the per-page and global fleet limits.

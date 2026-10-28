@@ -3,9 +3,13 @@ package spike
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
+
+	fbv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fb/v1"
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/parse"
 
 	"github.com/abdullah95k/securebrand-microservices/internal/fakefb"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/fbtest"
@@ -22,9 +26,9 @@ func runner(t *testing.T, faults fakefb.Faults) (*Runner, *fbtest.Env, *bytes.Bu
 
 func TestSpikeAgainstFakeFacebook(t *testing.T) {
 	r, env, out := runner(t, fakefb.Faults{})
-	var pages []string
+	var pages []PageRef
 	for _, p := range env.World.Pages() {
-		pages = append(pages, p.Vanity)
+		pages = append(pages, PageRef{Ref: p.Vanity})
 	}
 	r.Run(context.Background(), pages)
 	s, err := Report(bytes.NewReader(out.Bytes()), Thresholds{MinMedianCompleteness: 0.7, MinBootstrapSuccess: 0.9, MaxBlockRate: 0.05, MinMedianDays: 1})
@@ -43,9 +47,35 @@ func TestSpikeAgainstFakeFacebook(t *testing.T) {
 
 func TestSpikeReportsLoginWalls(t *testing.T) {
 	r, env, out := runner(t, fakefb.Faults{LoginWallAfter: 3})
-	r.Run(context.Background(), []string{env.World.Pages()[0].Vanity})
+	r.Run(context.Background(), []PageRef{{Ref: env.World.Pages()[0].Vanity}})
 	s, _ := Report(bytes.NewReader(out.Bytes()), DefaultThresholds)
 	if s.Go || s.BlockRate == 0 {
 		t.Fatalf("login walls must fail the verdict: %+v", s)
+	}
+}
+
+func TestSamplePosts(t *testing.T) {
+	mk := func(counts ...int64) []*parse.PostBundle {
+		var out []*parse.PostBundle
+		for i, c := range counts {
+			out = append(out, &parse.PostBundle{Post: &fbv1.Post{PostId: int64(i), CommentCount: &c}})
+		}
+		return out
+	}
+	ids := func(bs []*parse.PostBundle) (out []int64) {
+		for _, b := range bs {
+			out = append(out, b.Post.GetCommentCount())
+		}
+		return out
+	}
+	posts := mk(0, 5000, 120, 300, 80, 900, 301)
+	if got := ids(SamplePosts(posts, 3, 300)); fmt.Sprint(got) != "[300 120 80]" {
+		t.Fatal(got)
+	}
+	if got := ids(SamplePosts(posts, 5, 300)); fmt.Sprint(got) != "[300 120 80 301 900]" {
+		t.Fatal(got)
+	}
+	if got := ids(SamplePosts(posts, 2, 0)); fmt.Sprint(got) != "[5000 900]" {
+		t.Fatal(got)
 	}
 }
