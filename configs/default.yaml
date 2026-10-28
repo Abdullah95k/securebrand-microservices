@@ -1,0 +1,148 @@
+# Default configuration for every fbs binary. Values can be overridden by a
+# file passed with --config and by environment variables:
+#   FBS_<SECTION>__<KEY>=value   e.g. FBS_POSTGRES__DSN, FBS_CRAWLER__STAGES
+service:
+  name: fbs
+  env: dev
+
+log:
+  level: info        # debug | info | warn | error
+  format: json       # json | text
+
+http:
+  addr: ":8080"            # API listener (fbs-api)
+  ops_addr: ":9090"        # /metrics, /healthz, /readyz on every binary
+  read_timeout: 15s
+  write_timeout: 60s
+
+postgres:
+  dsn: "postgres://fbs:fbs@localhost:5432/fbs?sslmode=disable"
+  read_dsn: ""             # optional read replica for API reads
+  max_conns: 20
+
+redis:
+  addr: "localhost:6379"
+  password: ""
+  db: 0
+
+kafka:
+  brokers: ["localhost:19092"]
+  client_id: fbs
+  topic_prefix: ""        # prepended to every topic name (useful for shared clusters)
+  produce_linger: 5ms
+  compression: zstd
+
+s3:
+  endpoint: "localhost:9000"
+  access_key: "fbs"
+  secret_key: "fbs-secret"
+  use_ssl: false
+  region: "us-east-1"
+  media_bucket: "fbs-media"
+  raw_bucket: "fbs-raw"
+
+fb:
+  # Base URL of the Facebook web surface. Tests and local dev point this at fakefb.
+  base_url: "https://www.facebook.com"
+  # Logical query registry; seeded into Postgres by `fbctl migrate`.
+  registry_seed: "queries.seed.yaml"
+  registry_refresh: 30s
+  fingerprint_profile: chrome_146
+  locale: en_US
+  accept_language: "en-US,en;q=0.9"
+  request_timeout: 30s
+  # Cap applied to every identity (requests per second) and burst.
+  identity_rps: 0.33
+  identity_burst: 2
+  identity_max_requests_min: 150
+  identity_max_requests_max: 400
+  # Per page, fleet wide (Redis GCRA).
+  page_rps: 3
+  page_rps_p0: 6
+  # Global ceiling across the fleet. AIMD lowers it on blocks (Phase 2).
+  global_rps: 50
+  bootstrap_attempts: 3
+  capture_raw: failures    # all | failures | none
+  proxy:
+    tiers: []
+    # - name: isp
+    #   kind: static_list
+    #   endpoints: ["http://user:pass@1.2.3.4:8000"]
+    # - name: residential
+    #   kind: gateway
+    #   gateway: "http://gw.provider.example:7777"
+    #   username: "user"
+    #   password: "pass"
+    #   username_template: "{user}-country-{country}-session-{session}-sesstime-{ttl_min}"
+    #   sticky_ttl: 10m
+    #   country: us
+    routing:
+      default: [direct]
+
+crawler:
+  stages: [page, post, thread]
+  lanes:
+    p0: 120   # max in-flight tasks per pod for each lane
+    p1: 80
+    p2: 40
+  max_inflight_per_partition: 64
+  yield_pages: 20
+  yield_after: 60s
+  timeline_page_size: 10
+  comments_page_size: 50
+  consecutive_old_stop: 3
+  max_attempts: 5
+  lease_ttl: 120s
+  freshness_p0: 15m
+  freshness_p1: 6h
+  suppression_refresh: 60s
+
+limits:            # defaults applied to jobs that do not override them
+  max_age_days: 365
+  max_age_cap_days: 1095
+  max_posts: 0       # 0 = unlimited
+  max_depth: 3
+  include_comments: true
+  include_replies: true
+  include_media: true
+  include_comment_media: true
+  video_policy: sd   # none | thumbnail | sd | hd
+  backfill_video_policy: thumbnail
+
+scheduler:
+  planner_interval: 30s
+  planner_batch: 500
+  default_interval: 24h
+  jitter: 0.1
+  finalizer_interval: 2s
+  finalize_timeout: 10m
+  reaper_after: 30m
+  partition_months_ahead: 3
+  incremental_overlap: 24h
+
+media:
+  concurrency: 50
+  ttl: 72h
+  required_consumers: ["analysis"]
+  max_retryable_failures: 3
+  sweep_interval: 1h
+  orphan_interval: 24h
+  presign: false
+  presign_ttl: 24h
+  max_bytes: 524288000   # 500 MiB per object
+
+api:
+  max_running_p0_jobs_per_client: 50
+  default_rate_per_minute: 600
+
+privacy:
+  pii_mode: full        # full | pseudonymized
+  author_hmac_key: "dev-only-change-me"
+  download_author_avatars: false
+  retention:
+    comments_days: 365
+    authors_inactive_days: 365
+    metrics_days: 180
+    raw_payload_days: 7
+    media_rows_days: 30
+    jobs_days: 90

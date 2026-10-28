@@ -1,0 +1,93 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Generated code is up to date
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.5
+          go install github.com/bufbuild/buf/cmd/buf@v1.47.2
+          buf lint
+          buf generate
+          git diff --exit-code -- gen/
+      - name: Proto breaking changes
+        if: github.event_name == 'pull_request'
+        run: |
+          if git ls-tree -d "origin/${{ github.base_ref }}" api/proto >/dev/null 2>&1; then
+            buf breaking --against ".git#branch=origin/${{ github.base_ref }}"
+          else
+            echo "no protos on the base branch yet"
+          fi
+      - name: Fixtures contain no real signed URLs
+        run: |
+          if grep -rlE 'oh=00_|_nc_cat=' testdata/; then
+            echo "fixtures with real fbcdn signatures: run fbctl fixtures scrub"; exit 1
+          fi
+      - name: Unit tests (parsers, fake Facebook client layer, accounting)
+        run: go test -race -count=1 ./...
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.15.0
+
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env: {POSTGRES_USER: fbs, POSTGRES_PASSWORD: fbs, POSTGRES_DB: fbs}
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U fbs" --health-interval 2s --health-retries 30
+      valkey:
+        image: valkey/valkey:8-alpine
+        ports: ["6379:6379"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Start Redpanda
+        run: |
+          docker run -d --name redpanda -p 19092:19092 redpandadata/redpanda:v24.2.7 \
+            redpanda start --mode dev-container --smp 1 --memory 1G \
+            --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092 \
+            --advertise-kafka-addr internal://localhost:9092,external://localhost:19092
+          for i in $(seq 1 60); do docker exec redpanda rpk cluster health --exit-when-healthy && break; sleep 2; done
+      - name: Integration and end-to-end tests
+        env:
+          FBS_TEST_PG_DSN: postgres://fbs:fbs@localhost:5432/fbs?sslmode=disable
+          FBS_TEST_REDIS_ADDR: localhost:6379
+          FBS_TEST_KAFKA_BROKERS: localhost:19092
+        run: go test -count=1 -timeout 20m ./internal/persist/... ./internal/e2e/... ./internal/spike/...
+
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: Helm lint and render
+        run: |
+          helm lint deploy/helm/fbs
+          helm template fbs deploy/helm/fbs > /dev/null
+          helm template fbs deploy/helm/fbs --set keda.enabled=false,api.ingress.enabled=true,networkPolicy.enabled=true > /dev/null
+      - name: Docker build
+        run: docker build -f deploy/docker/Dockerfile -t fbs:ci .
+      - name: Compose config is valid
+        run: docker compose -f deploy/compose/docker-compose.yml config -q

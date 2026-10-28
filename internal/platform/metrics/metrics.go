@@ -1,0 +1,79 @@
+// Package metrics holds the Prometheus registry and the service metrics
+// shared across binaries. Metric names are prefixed with fbs_.
+package metrics
+
+import (
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+)
+
+// Registry is the process registry exposed on /metrics.
+var Registry = prometheus.NewRegistry()
+
+func init() {
+	Registry.MustRegister(
+		collectors.NewGoCollector(),
+		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
+	)
+}
+
+func counterVec(name, help string, labels ...string) *prometheus.CounterVec {
+	c := prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: "fbs", Name: name, Help: help}, labels)
+	Registry.MustRegister(c)
+	return c
+}
+
+func histVec(name, help string, buckets []float64, labels ...string) *prometheus.HistogramVec {
+	h := prometheus.NewHistogramVec(prometheus.HistogramOpts{Namespace: "fbs", Name: name, Help: help, Buckets: buckets}, labels)
+	Registry.MustRegister(h)
+	return h
+}
+
+func gaugeVec(name, help string, labels ...string) *prometheus.GaugeVec {
+	g := prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: "fbs", Name: name, Help: help}, labels)
+	Registry.MustRegister(g)
+	return g
+}
+
+var (
+	// Facebook requests.
+	FBRequests      = counterVec("fb_requests_total", "Facebook requests by query and response class.", "query", "class", "tier")
+	FBRequestSecs   = histVec("fb_request_seconds", "Facebook request latency.", prometheus.ExponentialBuckets(0.05, 2, 10), "query", "tier")
+	FBResponseBytes = histVec("fb_response_bytes", "Decoded Facebook response size.", prometheus.ExponentialBuckets(1024, 2, 12), "query")
+	ProxyBytes      = counterVec("proxy_bytes_total", "Wire bytes through each proxy tier.", "tier", "dir")
+
+	// Parsing.
+	ParseTotal        = counterVec("parse_total", "Parser runs by outcome.", "query", "parser_version", "outcome")
+	ParseMissingField = counterVec("parse_missing_field_total", "Optional or required fields missing from responses.", "query", "field")
+
+	// Identities.
+	IdentityActive  = gaugeVec("identity_active", "Live identities in this pod.", "tier")
+	IdentityRetired = counterVec("identity_retired_total", "Retired identities by reason.", "tier", "reason")
+	Bootstraps      = counterVec("bootstrap_total", "Identity bootstraps.", "method", "outcome")
+
+	// Tasks.
+	Tasks       = counterVec("tasks_total", "Crawl tasks by stage, lane and outcome.", "stage", "lane", "outcome")
+	TaskSeconds = histVec("task_seconds", "Crawl task duration.", prometheus.ExponentialBuckets(0.1, 2, 12), "stage")
+	TaskYields  = counterVec("task_yields_total", "Tasks that yielded a continuation.", "stage")
+	DLQ         = counterVec("dlq_total", "Tasks sent to the dead letter queue.", "stage", "reason")
+	Retries     = counterVec("retries_total", "Tasks sent to a retry topic.", "stage", "tier")
+
+	// Coverage.
+	CommentCompleteness = histVec("comment_completeness_ratio", "Collected / reported comments per post at job completion.", []float64{0.1, 0.25, 0.5, 0.7, 0.8, 0.9, 0.95, 0.99, 1.0, 1.01}, "lane")
+	TimelineTruncated   = counterVec("timeline_truncated_total", "Timelines that hit a login wall before the end of the window.", "reason")
+
+	// Media.
+	MediaDiscoveryToStored = histVec("media_discovery_to_stored_seconds", "Time from media discovery to object stored.", prometheus.ExponentialBuckets(1, 2, 14), "kind")
+	MediaOutcome           = counterVec("media_download_total", "Media downloads by outcome.", "kind", "outcome")
+	MediaDeleted           = counterVec("media_deleted_total", "Media objects deleted by reason.", "reason")
+
+	// Persistence and jobs.
+	PersistRows    = counterVec("persist_rows_total", "Rows written by the persister.", "entity", "op")
+	PersistBatch   = histVec("persist_batch_seconds", "Persister batch flush duration.", prometheus.ExponentialBuckets(0.005, 2, 12), "entity")
+	Jobs           = counterVec("jobs_total", "Jobs reaching a terminal state.", "status", "lane")
+	ScheduleLag    = gaugeVec("schedule_lag_seconds", "Age of the oldest due page in the schedule.", "tier")
+	BreakerState   = gaugeVec("breaker_state", "Circuit breaker state (0 closed, 1 half-open, 2 open).", "name")
+	APIRequests    = counterVec("api_requests_total", "API requests.", "route", "code")
+	KafkaProduce   = counterVec("kafka_produce_total", "Produced records.", "topic", "outcome")
+	KafkaCommitted = counterVec("kafka_commits_total", "Offset commits.", "group", "outcome")
+)

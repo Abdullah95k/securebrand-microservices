@@ -1,0 +1,13 @@
+# Local overrides (mounted into every service). Fast pacing is fine against
+# fakefb; NEVER use these rates against real Facebook.
+service: {env: dev}
+log: {level: info, format: text}
+fb:
+  identity_rps: 20
+  identity_burst: 5
+  page_rps: 50
+  page_rps_p0: 50
+  global_rps: 200
+  capture_raw: failures
+crawler:
+  lanes: {p0: 32, p1: 16, p2: 8}
