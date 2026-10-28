@@ -29,6 +29,12 @@ func histVec(name, help string, buckets []float64, labels ...string) *prometheus
 	return h
 }
 
+func gauge(name, help string) prometheus.Gauge {
+	g := prometheus.NewGauge(prometheus.GaugeOpts{Namespace: "fbs", Name: name, Help: help})
+	Registry.MustRegister(g)
+	return g
+}
+
 func gaugeVec(name, help string, labels ...string) *prometheus.GaugeVec {
 	g := prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: "fbs", Name: name, Help: help}, labels)
 	Registry.MustRegister(g)
@@ -68,12 +74,18 @@ var (
 	MediaDeleted           = counterVec("media_deleted_total", "Media objects deleted by reason.", "reason")
 
 	// Persistence and jobs.
-	PersistRows    = counterVec("persist_rows_total", "Rows written by the persister.", "entity", "op")
-	PersistBatch   = histVec("persist_batch_seconds", "Persister batch flush duration.", prometheus.ExponentialBuckets(0.005, 2, 12), "entity")
-	Jobs           = counterVec("jobs_total", "Jobs reaching a terminal state.", "status", "lane")
-	ScheduleLag    = gaugeVec("schedule_lag_seconds", "Age of the oldest due page in the schedule.", "tier")
-	BreakerState   = gaugeVec("breaker_state", "Circuit breaker state (0 closed, 1 half-open, 2 open).", "name")
-	APIRequests    = counterVec("api_requests_total", "API requests.", "route", "code")
-	KafkaProduce   = counterVec("kafka_produce_total", "Produced records.", "topic", "outcome")
-	KafkaCommitted = counterVec("kafka_commits_total", "Offset commits.", "group", "outcome")
+	PersistRows       = counterVec("persist_rows_total", "Rows written by the persister.", "entity", "op")
+	PersistBatch      = histVec("persist_batch_seconds", "Persister batch flush duration.", prometheus.ExponentialBuckets(0.005, 2, 12), "entity")
+	Jobs              = counterVec("jobs_total", "Jobs reaching a terminal state.", "status", "lane")
+	ScheduleLag       = gaugeVec("schedule_lag_seconds", "Age of the oldest due page in the schedule.", "tier")
+	BreakerState      = gaugeVec("breaker_state", "Circuit breaker state (0 closed, 1 half-open, 2 open).", "name")
+	QueryShortCircuit = counterVec("fb_query_short_circuit_total", "Requests not sent because the query's breaker is open.", "query")
+	AIMDCeiling       = gauge("aimd_ceiling_rps", "Fleet-wide Facebook request ceiling set by AIMD.")
+	AIMDAdjustments   = counterVec("aimd_adjustments_total", "AIMD ceiling changes by direction.", "direction")
+	FleetRPS          = gauge("fleet_rps", "Facebook GraphQL responses per second across the fleet (last AIMD window).")
+	FleetBlockRate    = gauge("fleet_block_rate", "Share of fleet GraphQL responses that were blocks (last AIMD window).")
+	LaneSlots         = gaugeVec("lane_slots", "Shared crawl slots per stage and lane: used, or tasks waiting for one.", "stage", "lane", "state")
+	APIRequests       = counterVec("api_requests_total", "API requests.", "route", "code")
+	KafkaProduce      = counterVec("kafka_produce_total", "Produced records.", "topic", "outcome")
+	KafkaCommitted    = counterVec("kafka_commits_total", "Offset commits.", "group", "outcome")
 )

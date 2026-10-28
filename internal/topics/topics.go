@@ -76,11 +76,3 @@ func ParseLane(s string) taskv1.Lane {
 	}
 }
 
-// StageTopics returns every lane topic of one stage.
-func StageTopics(kind taskv1.Kind) map[taskv1.Lane]string {
-	return map[taskv1.Lane]string{
-		taskv1.Lane_LANE_P0: Task(kind, taskv1.Lane_LANE_P0),
-		taskv1.Lane_LANE_P1: Task(kind, taskv1.Lane_LANE_P1),
-		taskv1.Lane_LANE_P2: Task(kind, taskv1.Lane_LANE_P2),
-	}
-}

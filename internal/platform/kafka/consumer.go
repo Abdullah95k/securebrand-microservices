@@ -37,6 +37,17 @@ type ConsumerConfig struct {
 	// ResetToStart consumes from the earliest offset when the group has no
 	// committed offset (default: earliest, so no task is ever skipped).
 	ResetToLatest bool
+	// Slots, when set, is capacity this consumer shares with others (the
+	// priority lanes of a crawl stage): every record also holds one of its
+	// slots while it runs. MaxInflight then caps this consumer alone.
+	Slots Slots
+}
+
+// Slots is capacity shared between consumers.
+type Slots interface {
+	// Acquire blocks until a slot is free or ctx is done (false).
+	Acquire(ctx context.Context) bool
+	Release()
 }
 
 // Consumer is a group consumer with in-partition concurrency.
@@ -170,8 +181,22 @@ func (c *Consumer) Run(ctx context.Context) error {
 				stop = true
 				return
 			}
+			// Shared slots last: a record waiting for its partition must not
+			// hold capacity other lanes could use.
+			if c.cfg.Slots != nil && !c.cfg.Slots.Acquire(ctx) {
+				<-psem
+				<-c.global
+				stop = true
+				return
+			}
 			go func() {
-				defer func() { <-psem; <-c.global }()
+				defer func() {
+					if c.cfg.Slots != nil {
+						c.cfg.Slots.Release()
+					}
+					<-psem
+					<-c.global
+				}()
 				c.process(handlerCtx, r)
 				c.tr.markDone(e)
 			}()

@@ -79,6 +79,15 @@ func (p *Pool) Acquire(ctx context.Context, tier string) (*Identity, error) {
 		list := p.idle[tier]
 		for i := len(list) - 1; i >= 0; i-- {
 			id := list[i]
+			if p.proxies.IsOpen(id.Endpoint) {
+				// Its exit bucket is cooling down: retire rather than reuse.
+				list = append(list[:i], list[i+1:]...)
+				p.idle[tier] = list
+				p.live[tier]--
+				metrics.IdentityRetired.WithLabelValues(tier, "breaker").Inc()
+				go id.Doer.Close()
+				continue
+			}
 			if id.coolingDown() {
 				continue
 			}
@@ -144,12 +153,17 @@ func (p *Pool) create(tier string) (*Identity, error) {
 		return nil, err
 	}
 	maxReq := randRange(p.cfg.MaxRequestsMin, p.cfg.MaxRequestsMax)
-	return newIdentity(newID(), ep, fp, d, p.base, p.cfg.IdentityRPS, p.cfg.IdentityBurst, maxReq), nil
+	id := newIdentity(newID(), ep, fp, d, p.base, p.cfg.IdentityRPS, p.cfg.IdentityBurst, maxReq)
+	id.observe = func(c detect.Class) { p.proxies.Observe(ep, c) }
+	return id, nil
 }
 
 // Outcome records a request outcome on id. It is a convenience used by the
 // GraphQL client and bootstrapper.
 func Outcome(id *Identity, c detect.Class) {
+	if id.observe != nil {
+		id.observe(c)
+	}
 	if retire, reason := id.Record(c); retire {
 		slog.Debug("session: identity marked for retirement", "identity", id.ID, "reason", reason, "class", c.String())
 	}

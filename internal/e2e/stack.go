@@ -29,6 +29,7 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/jobs"
 	"github.com/abdullah95k/securebrand-microservices/internal/dispatch"
 	"github.com/abdullah95k/securebrand-microservices/internal/fakefb"
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/ratelimit"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/registry"
 	"github.com/abdullah95k/securebrand-microservices/internal/gdpr"
 	"github.com/abdullah95k/securebrand-microservices/internal/media"
@@ -92,7 +93,9 @@ func Start(t *testing.T, o Options) *Stack {
 	cfg.FB.RequestTimeout = 10 * time.Second
 	cfg.Crawler.YieldPages = 2 // exercise continuations
 	cfg.Crawler.TimelinePageSize = 3
-	cfg.Crawler.Lanes = map[string]int{"p0": 16, "p1": 8, "p2": 8}
+	cfg.Crawler.Slots, cfg.Crawler.LaneMin = 24, 2
+	cfg.Crawler.Lanes = map[string]int{"p0": 24, "p1": 16, "p2": 8}
+	cfg.FB.AIMD.MinSamples = 10 // the test pages are small
 	cfg.Crawler.SuppressionRefresh = time.Hour
 	cfg.FB.CaptureRaw = "none"
 	cfg.Scheduler.FinalizeTimeout = 30 * time.Second
@@ -198,10 +201,12 @@ func Start(t *testing.T, o Options) *Stack {
 	t.Cleanup(s.API.Close)
 
 	comps := append([]run.Func{}, s.Crawler.Components...)
+	aimd := ratelimit.NewController(rdb, prefix, cfg.FB.AIMD, cfg.FB.GlobalRPS)
 	comps = append(comps, pc.Run, dlc.Run, jc.Run,
 		func(ctx context.Context) error {
 			return scheduler.Every(ctx, "finalizer", 200*time.Millisecond, fin.Tick)
 		},
+		func(ctx context.Context) error { return scheduler.Every(ctx, "aimd", time.Second, aimd.Tick) },
 	)
 	rctx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel

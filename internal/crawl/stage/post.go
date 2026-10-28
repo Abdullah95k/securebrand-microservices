@@ -100,6 +100,7 @@ func (s *PostStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 			return classOutcome(t, resp.Class, resp.Reason, st.Cursor, c)
 		}
 		res, rep := parse.Comments(resp.Parts, cc)
+		d.GQL.Parsed(resp, rep.OK())
 		for _, f := range rep.Optional {
 			metrics.ParseMissingField.WithLabelValues(query, f).Inc()
 		}
@@ -327,6 +328,7 @@ func (s *ThreadStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 			return classOutcome(t, resp.Class, resp.Reason, st.Cursor, c)
 		}
 		res, rep := parse.Comments(resp.Parts, cc)
+		d.GQL.Parsed(resp, rep.OK())
 		if !rep.OK() {
 			metrics.ParseTotal.WithLabelValues("replies", "1", "drift").Inc()
 			return classOutcome(t, detect.SchemaDrift, fmt.Sprint(rep.Missing), st.Cursor, c)

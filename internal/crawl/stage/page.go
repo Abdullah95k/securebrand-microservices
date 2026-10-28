@@ -178,6 +178,7 @@ func (s *PageStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 			return classOutcome(t, resp.Class, resp.Reason, st.Cursor, c)
 		}
 		tl, rep := parse.Timeline(resp.Parts, sc.PageId, id.Base.String())
+		d.GQL.Parsed(resp, rep.OK())
 		for _, f := range rep.Optional {
 			metrics.ParseMissingField.WithLabelValues("timeline", f).Inc()
 		}

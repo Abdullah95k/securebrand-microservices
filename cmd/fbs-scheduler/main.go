@@ -11,6 +11,7 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/config"
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/jobs"
 	"github.com/abdullah95k/securebrand-microservices/internal/dispatch"
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/ratelimit"
 	"github.com/abdullah95k/securebrand-microservices/internal/gdpr"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/httpserver"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/kafka"
@@ -66,9 +67,16 @@ func runScheduler(ctx context.Context, cfg *config.Config) error {
 
 	ops := httpserver.NewOps(cfg.HTTP.OpsAddr)
 	ops.AddCheck("postgres", db.Ping)
+	leaderLoops := []run.Func{}
+	if cfg.FB.AIMD.Enabled {
+		aimd := ratelimit.NewController(rdb, cfg.Kafka.TopicPrefix, cfg.FB.AIMD, cfg.FB.GlobalRPS)
+		leaderLoops = append(leaderLoops, func(ctx context.Context) error {
+			return scheduler.Every(ctx, "aimd", cfg.FB.AIMD.Interval, aimd.Tick)
+		})
+	}
 	return run.Group(ctx, ops.Run, func(ctx context.Context) error {
 		return leader.Run(ctx, db, leaderKey, func(ctx context.Context) error {
-			return run.Group(ctx,
+			return run.Group(ctx, append(leaderLoops,
 				func(ctx context.Context) error { return scheduler.Every(ctx, "maintenance", time.Hour, maint.Tick) },
 				func(ctx context.Context) error {
 					return scheduler.Every(ctx, "planner", cfg.Scheduler.PlannerInterval, planner.Tick)
@@ -78,7 +86,7 @@ func runScheduler(ctx context.Context, cfg *config.Config) error {
 				},
 				func(ctx context.Context) error { return scheduler.Every(ctx, "reaper", time.Minute, reaper.Tick) },
 				func(ctx context.Context) error { return scheduler.Every(ctx, "erasure", 10*time.Second, eraser.Tick) },
-			)
+			)...)
 		})
 	})
 }

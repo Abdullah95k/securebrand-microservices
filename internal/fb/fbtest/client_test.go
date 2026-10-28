@@ -2,13 +2,17 @@ package fbtest
 
 import (
 	"context"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/abdullah95k/securebrand-microservices/internal/fakefb"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/detect"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/graphql"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/parse"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/session"
+	"github.com/abdullah95k/securebrand-microservices/internal/platform/breaker"
 )
 
 // crawlPage walks a whole page through the client layer and returns the
@@ -231,5 +235,100 @@ func TestSchemaDriftIsReported(t *testing.T) {
 		if b.Post.Text != "" {
 			t.Fatalf("drifted message should not parse, got %q", b.Post.Text)
 		}
+	}
+}
+
+// TestQueryBreakerShortCircuits checks that a query whose responses keep
+// failing to parse stops being sent until its cooldown ends.
+func TestQueryBreakerShortCircuits(t *testing.T) {
+	env := New(t, Options{})
+	env.GQL.Breakers = breaker.New(breaker.Config{MinEvents: 3, OpenRate: 0.5, Cooldown: time.Hour})
+	ctx := context.Background()
+	id, err := env.Pool.Acquire(ctx, "direct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer env.Pool.Release(id)
+	p := env.World.Pages()[0]
+	if _, err := env.Loader.Bootstrap(ctx, id, env.HTTP.URL+"/"+p.Vanity); err != nil {
+		t.Fatal(err)
+	}
+	req := graphql.Request{Query: "timeline", Vars: map[string]any{"page_id": p.ID, "count": 3}}
+	for i := 0; i < 3; i++ {
+		resp, err := env.GQL.Do(ctx, id, req)
+		if err != nil || resp.Class != detect.OK {
+			t.Fatalf("request %d: %v %v", i, err, resp)
+		}
+		env.GQL.Parsed(resp, false) // as if required fields were missing
+	}
+	sent := env.Fake.Stats().ByQuery["ProfileCometTimelineFeedRefetchQuery"]
+	resp, err := env.GQL.Do(ctx, id, req)
+	if err != nil || resp.Class != detect.SchemaDrift || !strings.Contains(resp.Reason, "breaker open") {
+		t.Fatalf("want a short-circuited drift response, got %v %+v", err, resp)
+	}
+	if got := env.Fake.Stats().ByQuery["ProfileCometTimelineFeedRefetchQuery"]; got != sent {
+		t.Fatalf("an open breaker must not send requests (%d -> %d)", sent, got)
+	}
+	// Other queries are unaffected.
+	if resp, err := env.GQL.Do(ctx, id, graphql.Request{Query: "comments", Vars: map[string]any{"feedback_id": parse.FeedbackID(p.Posts[0].ID)}}); err != nil || resp.Class != detect.OK {
+		t.Fatalf("comments: %v %+v", err, resp)
+	}
+}
+
+type recordingLimiter struct {
+	mu   sync.Mutex
+	seen map[string]int
+}
+
+func (l *recordingLimiter) Wait(_ context.Context, key string, perSecond int) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.seen[key] = perSecond
+	return nil
+}
+
+type fixedCeiling int
+
+func (c fixedCeiling) RPS() int { return int(c) }
+
+type countingOutcomes struct{ n, blocked int }
+
+func (c *countingOutcomes) Observe(cls detect.Class) {
+	c.n++
+	if cls.Blocking() {
+		c.blocked++
+	}
+}
+
+// TestGlobalLimitFollowsTheCeiling checks that requests are paced against
+// the AIMD ceiling when one is set, and that outcomes are reported for it.
+func TestGlobalLimitFollowsTheCeiling(t *testing.T) {
+	env := New(t, Options{})
+	lim := &recordingLimiter{seen: map[string]int{}}
+	out := &countingOutcomes{}
+	env.GQL.Limiter, env.GQL.GlobalRPS, env.GQL.Outcomes = lim, 50, out
+	ctx := context.Background()
+	id, err := env.Pool.Acquire(ctx, "direct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer env.Pool.Release(id)
+	p := env.World.Pages()[0]
+	if _, err := env.Loader.Bootstrap(ctx, id, env.HTTP.URL+"/"+p.Vanity); err != nil {
+		t.Fatal(err)
+	}
+	req := graphql.Request{Query: "timeline", Vars: map[string]any{"page_id": p.ID, "count": 3}}
+	if _, err := env.GQL.Do(ctx, id, req); err != nil {
+		t.Fatal(err)
+	}
+	if lim.seen["global"] != 50 {
+		t.Fatalf("without a ceiling, GlobalRPS applies: %v", lim.seen)
+	}
+	env.GQL.Ceiling = fixedCeiling(17)
+	if _, err := env.GQL.Do(ctx, id, req); err != nil {
+		t.Fatal(err)
+	}
+	if lim.seen["global"] != 17 || out.n != 2 || out.blocked != 0 {
+		t.Fatalf("ceiling %v, outcomes %+v", lim.seen, out)
 	}
 }

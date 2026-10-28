@@ -44,6 +44,9 @@ type Identity struct {
 	req       atomic.Uint64
 	limiter   *rate.Limiter
 	sessionID string // __s
+
+	// observe reports outcomes to the exit's breaker (set by the pool).
+	observe func(detect.Class)
 }
 
 func newIdentity(id string, ep proxy.Endpoint, fp Fingerprint, d transport.Doer, base *url.URL, rps float64, burst, maxReq int) *Identity {

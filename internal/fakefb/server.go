@@ -42,12 +42,13 @@ type Options struct {
 type Server struct {
 	World *World
 
-	mu       sync.Mutex
-	opts     Options
-	lsds     map[string]string // lsd -> datr
-	perIdent map[string]*identStats
-	byQuery  map[string]int
-	mediaKey []byte
+	mu          sync.Mutex
+	opts        Options
+	lsds        map[string]string // lsd -> datr
+	perIdent    map[string]*identStats
+	byQuery     map[string]int
+	rateLimited int // rate-limit errors served
+	mediaKey    []byte
 }
 
 type identStats struct {
@@ -253,6 +254,9 @@ func (s *Server) graphql(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if f.RateLimitEvery > 0 && gqlCount%f.RateLimitEvery == 0 {
+		s.mu.Lock()
+		s.rateLimited++
+		s.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `for (;;);{"error":1675004,"errorSummary":"Rate limit exceeded","errorDescription":"Please try again later."}`)
 		return
@@ -519,14 +523,15 @@ func (s *Server) media(w http.ResponseWriter, r *http.Request) {
 
 // Stats is the admin snapshot.
 type Stats struct {
-	Identities map[string]identStats `json:"identities"`
-	ByQuery    map[string]int        `json:"by_query"`
+	Identities  map[string]identStats `json:"identities"`
+	ByQuery     map[string]int        `json:"by_query"`
+	RateLimited int                   `json:"rate_limited"`
 }
 
 func (s *Server) Stats() Stats {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := Stats{Identities: map[string]identStats{}, ByQuery: map[string]int{}}
+	out := Stats{Identities: map[string]identStats{}, ByQuery: map[string]int{}, RateLimited: s.rateLimited}
 	for k, v := range s.perIdent {
 		out.Identities[k] = *v
 	}
