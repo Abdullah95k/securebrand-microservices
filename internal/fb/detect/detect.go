@@ -1,0 +1,215 @@
+// Package detect classifies Facebook responses so the session layer knows
+// whether to continue, back off, rotate the identity, or give up on content.
+package detect
+
+import (
+	"bytes"
+	"regexp"
+	"strings"
+)
+
+// Class is the outcome category of one request.
+type Class int
+
+const (
+	OK Class = iota
+	// RateLimited: back off this identity and retry elsewhere.
+	RateLimited
+	// LoginWall: logged-out access stopped here. Repeated at the same cursor
+	// on fresh identities it means coverage is truncated.
+	LoginWall
+	// Checkpoint: identity/IP flagged. Retire it.
+	Checkpoint
+	// SoftError: transient server error. Re-bootstrap tokens and retry once.
+	SoftError
+	// RegistryStale: doc_id or variables no longer accepted.
+	RegistryStale
+	// SchemaDrift: response shape changed; parser could not find required fields.
+	SchemaDrift
+	// ContentUnavailable: the node is deleted, restricted or geo-blocked.
+	ContentUnavailable
+	// Transport: network/proxy failure.
+	Transport
+)
+
+var classNames = [...]string{"ok", "rate_limited", "login_wall", "checkpoint", "soft_error",
+	"registry_stale", "schema_drift", "content_unavailable", "transport"}
+
+func (c Class) String() string {
+	if int(c) < len(classNames) {
+		return classNames[c]
+	}
+	return "unknown"
+}
+
+// Blocking reports whether the class counts against the identity's health.
+func (c Class) Blocking() bool {
+	return c == RateLimited || c == LoginWall || c == Checkpoint
+}
+
+// GQLError is one entry of a GraphQL errors array or the legacy top-level
+// {"error": code, "errorSummary": ...} form.
+type GQLError struct {
+	Code     int64
+	Message  string
+	Severity string
+	Summary  string
+}
+
+// Rules holds the Facebook error codes and markers. Defaults come from
+// public observations and must be confirmed in Phase 0; they are config so
+// they can change without a deploy.
+type Rules struct {
+	RateLimitCodes []int64
+	SoftCodes      []int64
+	LoginCodes     []int64
+	StaleMessages  []*regexp.Regexp
+	LoginMarkers   [][]byte
+	BlockMarkers   [][]byte
+}
+
+// DefaultRules returns the built-in rules.
+func DefaultRules() Rules {
+	return Rules{
+		RateLimitCodes: []int64{1675004, 1675007, 368, 1390008},
+		SoftCodes:      []int64{1357004, 1357001, 1357031, 2},
+		LoginCodes:     []int64{1357005, 1348007},
+		StaleMessages: []*regexp.Regexp{
+			regexp.MustCompile(`(?i)persisted ?query`),
+			regexp.MustCompile(`(?i)\bdoc_?id\b`),
+			regexp.MustCompile(`(?i)unknown (query|operation)`),
+			regexp.MustCompile(`(?i)variable .* (is|was) (not|never) (defined|provided)`),
+		},
+		LoginMarkers: [][]byte{[]byte(`id="login_form"`), []byte(`"loginForm"`), []byte(`/login/?next=`), []byte(`login_required`)},
+		BlockMarkers: []([]byte){[]byte(`temporarily blocked`), []byte(`Temporarily Blocked`), []byte(`rate limit`)},
+	}
+}
+
+// Input is everything the classifier looks at.
+type Input struct {
+	Status   int
+	Location string
+	// ContentType of the response, e.g. "text/html; charset=utf-8".
+	ContentType string
+	Body        []byte
+	Errors      []GQLError
+	// Expect is "graphql" for API calls and "html" for page loads.
+	Expect string
+}
+
+// Classify returns the class and a short reason.
+func (r Rules) Classify(in Input) (Class, string) {
+	loc := strings.ToLower(in.Location)
+	switch {
+	case strings.Contains(loc, "/checkpoint"):
+		return Checkpoint, "redirect to checkpoint"
+	case strings.Contains(loc, "/login"):
+		return LoginWall, "redirect to login"
+	}
+	switch {
+	case in.Status == 429:
+		return RateLimited, "http 429"
+	case in.Status == 407 || in.Status == 502 || in.Status == 503 || in.Status == 504:
+		return Transport, "http " + itoa(in.Status)
+	case in.Status >= 500:
+		return SoftError, "http " + itoa(in.Status)
+	case in.Status == 404 && in.Expect == "html":
+		return ContentUnavailable, "http 404"
+	case in.Status >= 300 && in.Status < 400:
+		// Unknown redirect (consent, locale); treat as soft so the caller
+		// re-bootstraps once.
+		return SoftError, "redirect " + in.Location
+	}
+	for _, e := range in.Errors {
+		switch {
+		case contains(r.RateLimitCodes, e.Code):
+			return RateLimited, "fb error " + i64toa(e.Code)
+		case contains(r.LoginCodes, e.Code):
+			return LoginWall, "fb error " + i64toa(e.Code)
+		}
+		for _, re := range r.StaleMessages {
+			if re.MatchString(e.Message) || re.MatchString(e.Summary) {
+				return RegistryStale, "stale: " + truncate(e.Message, 80)
+			}
+		}
+		if contains(r.SoftCodes, e.Code) {
+			return SoftError, "fb error " + i64toa(e.Code)
+		}
+	}
+	isHTML := strings.Contains(in.ContentType, "text/html") || bytes.HasPrefix(bytes.TrimSpace(in.Body), []byte("<"))
+	if in.Expect == "graphql" && isHTML {
+		head := in.Body
+		if len(head) > 256<<10 {
+			head = head[:256<<10]
+		}
+		for _, m := range r.BlockMarkers {
+			if bytes.Contains(head, m) {
+				return RateLimited, "block page"
+			}
+		}
+		for _, m := range r.LoginMarkers {
+			if bytes.Contains(head, m) {
+				return LoginWall, "login page"
+			}
+		}
+		return SoftError, "html instead of graphql"
+	}
+	if in.Expect == "html" {
+		head := in.Body
+		if len(head) > 512<<10 {
+			head = head[:512<<10]
+		}
+		if bytes.Contains(head, []byte("checkpoint")) && bytes.Contains(head, []byte(`action="/checkpoint`)) {
+			return Checkpoint, "checkpoint page"
+		}
+		for _, m := range r.BlockMarkers {
+			if bytes.Contains(head, m) {
+				return RateLimited, "block page"
+			}
+		}
+	}
+	if len(in.Errors) > 0 {
+		return SoftError, "fb error " + i64toa(in.Errors[0].Code) + " " + truncate(in.Errors[0].Message, 60)
+	}
+	return OK, ""
+}
+
+func contains(xs []int64, x int64) bool {
+	for _, v := range xs {
+		if v == x {
+			return true
+		}
+	}
+	return false
+}
+
+func truncate(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
+}
+
+func itoa(i int) string { return i64toa(int64(i)) }
+
+func i64toa(i int64) string {
+	if i == 0 {
+		return "0"
+	}
+	neg := i < 0
+	if neg {
+		i = -i
+	}
+	var b [20]byte
+	p := len(b)
+	for i > 0 {
+		p--
+		b[p] = byte('0' + i%10)
+		i /= 10
+	}
+	if neg {
+		p--
+		b[p] = '-'
+	}
+	return string(b[p:])
+}
