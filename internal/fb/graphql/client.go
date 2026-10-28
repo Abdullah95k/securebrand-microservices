@@ -16,6 +16,7 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/registry"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/session"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/transport"
+	"github.com/abdullah95k/securebrand-microservices/internal/platform/breaker"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/metrics"
 )
 
@@ -60,6 +61,24 @@ type Client struct {
 	Locale         string
 	Raw            RawSink
 	CaptureAll     bool
+	// Ceiling, when set, replaces GlobalRPS with the fleet ceiling AIMD
+	// publishes; Outcomes receives every response class for it.
+	Ceiling  interface{ RPS() int }
+	Outcomes interface{ Observe(detect.Class) }
+	// Breakers short-circuit a (query, doc_id) whose responses keep being
+	// rejected or failing to parse, so a Facebook change does not turn into
+	// a wave of wasted requests. nil disables them.
+	Breakers *breaker.Set
+}
+
+func breakerKey(q registry.Query) string { return q.Name + "|" + q.DocID }
+
+// Parsed reports whether a response of resp's query parsed with every
+// required field. Stages call it after parsing; it feeds the breakers.
+func (c *Client) Parsed(resp *Response, ok bool) {
+	if c.Breakers != nil && resp != nil && resp.Query.DocID != "" {
+		c.Breakers.Observe(breakerKey(resp.Query), !ok)
+	}
 }
 
 // ErrTransport wraps network/proxy failures.
@@ -73,11 +92,23 @@ func (c *Client) Do(ctx context.Context, id *session.Identity, req Request) (*Re
 	if err != nil {
 		return nil, err
 	}
+	if c.Breakers != nil && !c.Breakers.Allow(breakerKey(q)) {
+		fb, ok := c.Registry.Fallback(req.Query, q.DocID)
+		if !ok || !c.Breakers.Allow(breakerKey(fb)) {
+			metrics.QueryShortCircuit.WithLabelValues(q.Name).Inc()
+			return &Response{Query: q, Class: detect.SchemaDrift,
+				Reason: "breaker open for " + q.Name + " doc_id " + q.DocID + ": its responses keep failing; waiting for a registry or parser update"}, nil
+		}
+		q = fb
+	}
 	resp, err := c.do(ctx, id, q, req)
 	if err != nil {
 		return nil, err
 	}
 	if resp.Class == detect.RegistryStale {
+		if c.Breakers != nil {
+			c.Breakers.Observe(breakerKey(q), true)
+		}
 		if fb, ok := c.Registry.Fallback(req.Query, q.DocID); ok {
 			return c.do(ctx, id, fb, req)
 		}
@@ -142,6 +173,9 @@ func (c *Client) do(ctx context.Context, id *session.Identity, q registry.Query,
 		cls, reason = detect.SoftError, "empty body"
 	}
 	session.Outcome(id, cls)
+	if c.Outcomes != nil {
+		c.Outcomes.Observe(cls)
+	}
 	metrics.FBRequests.WithLabelValues(q.Name, cls.String(), tier).Inc()
 	if c.Raw != nil && (c.CaptureAll || cls != detect.OK) {
 		c.Raw.Capture(ctx, q.Name, cls, tr.Body)
@@ -167,7 +201,13 @@ func (c *Client) pace(ctx context.Context, id *session.Identity, req Request) er
 			return err
 		}
 	}
-	return c.Limiter.Wait(ctx, "global", c.GlobalRPS)
+	global := c.GlobalRPS
+	if c.Ceiling != nil {
+		if v := c.Ceiling.RPS(); v > 0 {
+			global = v
+		}
+	}
+	return c.Limiter.Wait(ctx, "global", global)
 }
 
 type kv struct{ k, v string }

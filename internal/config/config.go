@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/abdullah95k/securebrand-microservices/configs"
+	"github.com/abdullah95k/securebrand-microservices/internal/platform/breaker"
 	pconfig "github.com/abdullah95k/securebrand-microservices/internal/platform/config"
 )
 
@@ -97,11 +98,34 @@ type FB struct {
 	BootstrapAttempts      int           `koanf:"bootstrap_attempts"`
 	CaptureRaw             string        `koanf:"capture_raw"`
 	Proxy                  Proxy         `koanf:"proxy"`
+	// QueryBreaker stops sending a (query, doc_id) whose responses keep
+	// being rejected or failing to parse.
+	QueryBreaker breaker.Config `koanf:"query_breaker"`
+	// AIMD moves the fleet-wide ceiling (starting at GlobalRPS) with the
+	// block rate the whole fleet sees.
+	AIMD AIMD `koanf:"aimd"`
+}
+
+// AIMD tunes the fleet ceiling controller (internal/fb/ratelimit).
+type AIMD struct {
+	Enabled        bool          `koanf:"enabled"`
+	Interval       time.Duration `koanf:"interval"`
+	MinRPS         int           `koanf:"min_rps"`
+	MaxRPS         int           `koanf:"max_rps"`
+	Increase       float64       `koanf:"increase"` // share added per step while blocks stay low
+	Decrease       float64       `koanf:"decrease"` // factor applied when blocks are high
+	LowBlockRate   float64       `koanf:"low_block_rate"`
+	HighBlockRate  float64       `koanf:"high_block_rate"`
+	MinSamples     int           `koanf:"min_samples"`
+	MinUtilization float64       `koanf:"min_utilization"` // raise only when the fleet uses the ceiling
 }
 
 type Proxy struct {
 	Tiers   []ProxyTier         `koanf:"tiers"`
 	Routing map[string][]string `koanf:"routing"`
+	// Breaker opens an exit bucket (a static /24, or a gateway and country)
+	// that is blocked too often.
+	Breaker breaker.Config `koanf:"breaker"`
 }
 
 type ProxyTier struct {
@@ -118,8 +142,14 @@ type ProxyTier struct {
 }
 
 type Crawler struct {
-	Stages                  []string       `koanf:"stages"`
+	Stages []string `koanf:"stages"`
+	// Slots is the in-flight tasks per pod and stage, shared by the lanes in
+	// priority order (p0 > p1 > p2). Lanes caps each lane and LaneMin is
+	// the share a waiting lane always gets. Slots 0 gives every lane its
+	// own fixed Lanes[lane] slots instead.
+	Slots                   int            `koanf:"slots"`
 	Lanes                   map[string]int `koanf:"lanes"`
+	LaneMin                 int            `koanf:"lane_min"`
 	MaxInflightPerPartition int            `koanf:"max_inflight_per_partition"`
 	YieldPages              int            `koanf:"yield_pages"`
 	YieldAfter              time.Duration  `koanf:"yield_after"`

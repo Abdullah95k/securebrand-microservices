@@ -6,7 +6,10 @@ package proxy
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"log/slog"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -14,6 +17,9 @@ import (
 	"time"
 
 	"github.com/abdullah95k/securebrand-microservices/internal/config"
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/detect"
+	"github.com/abdullah95k/securebrand-microservices/internal/platform/breaker"
+	"github.com/abdullah95k/securebrand-microservices/internal/platform/metrics"
 )
 
 // Endpoint is one proxy exit to use for an identity's lifetime.
@@ -23,6 +29,9 @@ type Endpoint struct {
 	SessionID string
 	Country   string
 	ExpiresAt time.Time // zero = no sticky expiry
+	// Bucket groups exits that Facebook likely treats alike: the /24 of a
+	// static endpoint, or a gateway and country. Breakers work per bucket.
+	Bucket string
 }
 
 // Redacted returns the URL without credentials, for logs.
@@ -38,28 +47,44 @@ func (e Endpoint) Redacted() string {
 	return u.String()
 }
 
-// Tier produces endpoints.
+// Tier produces endpoints. Next returns the next endpoint for which allow
+// is true, or ErrTierOpen.
 type Tier interface {
 	Name() string
-	Next() (Endpoint, error)
+	Next(allow func(bucket string) bool) (Endpoint, error)
+	// Buckets lists the tier's buckets.
+	Buckets() []string
 }
 
-// Pool routes query classes to tiers.
+// ErrTierOpen means every bucket of the tier has an open breaker.
+var ErrTierOpen = errors.New("proxy: every exit of the tier is cooling down")
+
+// Pool routes query classes to tiers and keeps a circuit breaker per exit
+// bucket: one that is blocked too often stops getting new identities.
 type Pool struct {
-	tiers   map[string]Tier
-	routing map[string][]string
+	tiers    map[string]Tier
+	routing  map[string][]string
+	breakers *breaker.Set
 }
 
 // New builds a pool from config. A "direct" tier always exists.
 func New(cfg config.Proxy) (*Pool, error) {
-	p := &Pool{tiers: map[string]Tier{"direct": direct{}}, routing: cfg.Routing}
+	p := &Pool{tiers: map[string]Tier{"direct": direct{}}, routing: cfg.Routing, breakers: breaker.New(cfg.Breaker)}
+	p.breakers.OnChange = func(bucket string, from, to breaker.State) {
+		metrics.BreakerState.WithLabelValues("proxy:" + bucket).Set(float64(to))
+		slog.Info("proxy: breaker", "bucket", bucket, "from", from.String(), "to", to.String())
+	}
 	for _, t := range cfg.Tiers {
 		switch t.Kind {
 		case "static_list":
 			if len(t.Endpoints) == 0 {
 				return nil, fmt.Errorf("proxy: tier %s has no endpoints", t.Name)
 			}
-			p.tiers[t.Name] = &staticList{name: t.Name, endpoints: t.Endpoints, country: t.Country}
+			sl := &staticList{name: t.Name, endpoints: t.Endpoints, country: t.Country}
+			for _, e := range t.Endpoints {
+				sl.buckets = append(sl.buckets, staticBucket(t.Name, e))
+			}
+			p.tiers[t.Name] = sl
 		case "gateway":
 			if t.Gateway == "" {
 				return nil, fmt.Errorf("proxy: tier %s has no gateway", t.Name)
@@ -95,32 +120,86 @@ func (p *Pool) TiersFor(class string) []string {
 	return p.routing["default"]
 }
 
-// Next returns a fresh endpoint from tier.
+// Next returns a fresh endpoint from tier, skipping buckets whose breaker
+// is open. In a half-open bucket the endpoint is the probe.
 func (p *Pool) Next(tier string) (Endpoint, error) {
 	t, ok := p.tiers[tier]
 	if !ok {
 		return Endpoint{}, fmt.Errorf("proxy: unknown tier %s", tier)
 	}
-	return t.Next()
+	return t.Next(p.breakers.Allow)
+}
+
+// Available reports whether tier has a bucket that is not cooling down.
+func (p *Pool) Available(tier string) bool {
+	t, ok := p.tiers[tier]
+	if !ok {
+		return false
+	}
+	if len(t.Buckets()) == 0 {
+		return true // direct egress has no breaker
+	}
+	for _, b := range t.Buckets() {
+		if !p.breakers.IsOpen(b) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsOpen reports whether ep's bucket is cooling down.
+func (p *Pool) IsOpen(ep Endpoint) bool { return ep.Bucket != "" && p.breakers.IsOpen(ep.Bucket) }
+
+// Observe records a response class for ep's bucket. Blocks and transport
+// failures count against it.
+func (p *Pool) Observe(ep Endpoint, c detect.Class) {
+	if ep.Bucket == "" {
+		return
+	}
+	p.breakers.Observe(ep.Bucket, c.Blocking() || c == detect.Transport)
+}
+
+// staticBucket is the /24 of an IPv4 endpoint, else its host.
+func staticBucket(tier, raw string) string {
+	host := raw
+	if u, err := url.Parse(raw); err == nil && u.Hostname() != "" {
+		host = u.Hostname()
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if v4 := ip.To4(); v4 != nil {
+			host = fmt.Sprintf("%d.%d.%d.0/24", v4[0], v4[1], v4[2])
+		} else {
+			host = (&net.IPNet{IP: ip.Mask(net.CIDRMask(48, 128)), Mask: net.CIDRMask(48, 128)}).String()
+		}
+	}
+	return tier + "|" + host
 }
 
 type direct struct{}
 
-func (direct) Name() string            { return "direct" }
-func (direct) Next() (Endpoint, error) { return Endpoint{Tier: "direct"}, nil }
+func (direct) Name() string                             { return "direct" }
+func (direct) Buckets() []string                        { return nil }
+func (direct) Next(func(string) bool) (Endpoint, error) { return Endpoint{Tier: "direct"}, nil }
 
 type staticList struct {
 	name      string
 	endpoints []string
+	buckets   []string // parallel to endpoints
 	country   string
 	next      atomic.Uint64
 }
 
-func (s *staticList) Name() string { return s.name }
+func (s *staticList) Name() string      { return s.name }
+func (s *staticList) Buckets() []string { return s.buckets }
 
-func (s *staticList) Next() (Endpoint, error) {
-	i := s.next.Add(1) - 1
-	return Endpoint{Tier: s.name, URL: s.endpoints[i%uint64(len(s.endpoints))], Country: s.country}, nil
+func (s *staticList) Next(allow func(string) bool) (Endpoint, error) {
+	for range s.endpoints {
+		i := (s.next.Add(1) - 1) % uint64(len(s.endpoints))
+		if allow(s.buckets[i]) {
+			return Endpoint{Tier: s.name, URL: s.endpoints[i], Country: s.country, Bucket: s.buckets[i]}, nil
+		}
+	}
+	return Endpoint{}, ErrTierOpen
 }
 
 // gateway is a rotating residential gateway: the exit IP is chosen by the
@@ -131,7 +210,20 @@ type gateway struct {
 
 func (g *gateway) Name() string { return g.cfg.Name }
 
-func (g *gateway) Next() (Endpoint, error) {
+func (g *gateway) bucket() string {
+	host := g.cfg.Gateway
+	if u, err := url.Parse(g.cfg.Gateway); err == nil && u.Host != "" {
+		host = u.Host
+	}
+	return g.cfg.Name + "|" + host + "|" + g.cfg.Country
+}
+
+func (g *gateway) Buckets() []string { return []string{g.bucket()} }
+
+func (g *gateway) Next(allow func(string) bool) (Endpoint, error) {
+	if !allow(g.bucket()) {
+		return Endpoint{}, ErrTierOpen
+	}
 	sess := randomSession()
 	ttl := g.cfg.StickyTTL
 	if ttl <= 0 {
@@ -155,6 +247,7 @@ func (g *gateway) Next() (Endpoint, error) {
 		SessionID: sess,
 		Country:   g.cfg.Country,
 		ExpiresAt: time.Now().Add(ttl),
+		Bucket:    g.bucket(),
 	}, nil
 }
 

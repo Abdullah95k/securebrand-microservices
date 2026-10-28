@@ -10,4 +10,6 @@ fb:
   global_rps: 200
   capture_raw: failures
 crawler:
-  lanes: {p0: 32, p1: 16, p2: 8}
+  slots: 48
+  lanes: {p0: 48, p1: 48, p2: 20}
+  lane_min: 4

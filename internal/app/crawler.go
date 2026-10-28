@@ -19,6 +19,7 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/checkpoint"
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/emit"
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/jobs"
+	"github.com/abdullah95k/securebrand-microservices/internal/crawl/lanes"
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/rawsink"
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/stage"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/detect"
@@ -28,7 +29,9 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/registry"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/session"
 	"github.com/abdullah95k/securebrand-microservices/internal/gdpr"
+	"github.com/abdullah95k/securebrand-microservices/internal/platform/breaker"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/kafka"
+	"github.com/abdullah95k/securebrand-microservices/internal/platform/metrics"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/run"
 	"github.com/abdullah95k/securebrand-microservices/internal/topics"
 )
@@ -73,9 +76,11 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 	if err != nil {
 		return nil, err
 	}
-	slots := 0
-	for _, v := range cfg.Crawler.Lanes {
-		slots += v
+	slots := cfg.Crawler.Slots
+	if slots <= 0 {
+		for _, v := range cfg.Crawler.Lanes {
+			slots += v
+		}
 	}
 	pool, err := session.NewPool(session.PoolConfig{
 		BaseURL: cfg.FB.BaseURL, Profile: cfg.FB.FingerprintProfile, Timeout: cfg.FB.RequestTimeout,
@@ -91,6 +96,11 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 		Registry: reg, Rules: rules, Limiter: ratelimit.NewRedis(rdb),
 		PageRPS: cfg.FB.PageRPS, PageRPSFast: cfg.FB.PageRPSP0, GlobalRPS: cfg.FB.GlobalRPS,
 		AcceptLanguage: cfg.FB.AcceptLanguage, Locale: cfg.FB.Locale,
+		Breakers: breaker.New(cfg.FB.QueryBreaker),
+	}
+	gql.Breakers.OnChange = func(key string, from, to breaker.State) {
+		metrics.BreakerState.WithLabelValues("query:" + key).Set(float64(to))
+		slog.Warn("graphql: query breaker", "query", key, "from", from.String(), "to", to.String())
 	}
 	supp := gdpr.NewSuppression(db)
 	deps := &stage.Deps{
@@ -109,6 +119,12 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 	c.Components = []run.Func{
 		func(ctx context.Context) error { return reg.Run(ctx, cfg.FB.RegistryRefresh) },
 		func(ctx context.Context) error { return supp.Run(ctx, cfg.Crawler.SuppressionRefresh) },
+	}
+	if cfg.FB.AIMD.Enabled {
+		ns := cfg.Kafka.TopicPrefix
+		rep, ceil := ratelimit.NewReporter(rdb, ns), ratelimit.NewCeiling(rdb, ns, cfg.FB.GlobalRPS)
+		gql.Outcomes, gql.Ceiling = rep, ceil
+		c.Components = append(c.Components, rep.Run, ceil.Run)
 	}
 	if o.RawS3 != nil && cfg.FB.CaptureRaw != "none" {
 		sink := rawsink.New(o.RawS3, cfg.S3.RawBucket)
@@ -138,14 +154,20 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 		if !ok {
 			return nil, fmt.Errorf("unknown stage %q", s)
 		}
-		for lane, topic := range topics.StageTopics(kind) {
+		sched := laneScheduler(cfg.Crawler, s)
+		for i, lane := range []taskv1.Lane{taskv1.Lane_LANE_P0, taskv1.Lane_LANE_P1, taskv1.Lane_LANE_P2} {
 			n := cfg.Crawler.Lanes[topics.LaneName(lane)]
 			if n <= 0 {
 				continue
 			}
+			var shared kafka.Slots
+			if sched != nil {
+				shared = lanes.Slots{S: sched, Lane: i}
+			}
 			cons, err := kafka.NewConsumer(kafka.ConsumerConfig{
-				ClientConfig: kcfg, Group: "fbs-crawler-" + s + "-" + topics.LaneName(lane), Topics: []string{topic},
+				ClientConfig: kcfg, Group: "fbs-crawler-" + s + "-" + topics.LaneName(lane), Topics: []string{topics.Task(kind, lane)},
 				MaxInflight: n, MaxInflightPerPartition: cfg.Crawler.MaxInflightPerPartition, DrainTimeout: 75 * time.Second,
+				Slots: shared,
 			}, worker.Handle)
 			if err != nil {
 				return nil, err
@@ -155,4 +177,22 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 		slog.Info("stage enabled", "stage", s)
 	}
 	return c, nil
+}
+
+// laneScheduler shares a stage's slots between its lanes, or returns nil
+// when crawler.slots is 0 (fixed slots per lane).
+func laneScheduler(c config.Crawler, stage string) *lanes.Scheduler {
+	if c.Slots <= 0 {
+		return nil
+	}
+	var ls []lanes.Lane
+	for _, name := range []string{"p0", "p1", "p2"} {
+		ls = append(ls, lanes.Lane{Name: name, Max: c.Lanes[name], Min: c.LaneMin})
+	}
+	s := lanes.New(c.Slots, ls...)
+	s.OnChange = func(lane string, used, waiting int) {
+		metrics.LaneSlots.WithLabelValues(stage, lane, "used").Set(float64(used))
+		metrics.LaneSlots.WithLabelValues(stage, lane, "waiting").Set(float64(waiting))
+	}
+	return s
 }

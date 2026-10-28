@@ -90,10 +90,18 @@ type Stage interface {
 }
 
 // identity acquires an identity for a query class, escalating tiers on
-// retries (cheapest first).
+// retries (cheapest first) and skipping tiers whose exits are all cooling
+// down behind their breakers.
 func (d *Deps) identity(ctx context.Context, class string, attempt uint32) (*session.Identity, error) {
 	tiers := d.Proxies.TiersFor(class)
-	tier := tiers[min(int(attempt), len(tiers)-1)]
+	from := min(int(attempt), len(tiers)-1)
+	tier := tiers[from]
+	for _, t := range tiers[from:] {
+		if d.Proxies.Available(t) {
+			tier = t
+			break
+		}
+	}
 	return d.Pool.Acquire(ctx, tier)
 }
 

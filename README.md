@@ -137,9 +137,11 @@ Settings that matter most:
 |---|---|---|
 | `fb.proxy.tiers` / `fb.proxy.routing` | direct only | Static ISP lists and rotating residential gateways (sticky sessions). Keep credentials in a secret file. |
 | `fb.identity_rps`, `fb.page_rps`, `fb.global_rps` | 0.33 / 3 / 50 | Pacing per identity, per page fleet-wide and globally (Redis GCRA). Adding pods never raises load. |
+| `fb.aimd` | on, 5–500 rps | Moves the global ceiling with the fleet's block rate: ×0.7 above 6% blocks, +2% per 10s below 2% |
+| `fb.proxy.breaker`, `fb.query_breaker` | 15% / 50% | Circuit breakers per exit bucket (static /24, gateway+country) and per (query, doc_id) |
 | `limits.max_age_days` | 365 | Backfill window per job/page, capped by `limits.max_age_cap_days` |
 | `limits.video_policy` | `sd` (`thumbnail` for backfills) | `none`, `thumbnail`, `sd` or `hd` |
-| `crawler.lanes` | p0 120 / p1 80 / p2 40 | In-flight tasks per pod per lane (on-demand > scheduled > backfill) |
+| `crawler.slots`, `crawler.lanes`, `crawler.lane_min` | 240 / p2 ≤ 96 / 12 | In-flight tasks per pod and stage, shared by the lanes in priority order (on-demand > scheduled > backfill); backfill capped at 40%, each lane keeps a minimum |
 | `media.ttl`, `media.required_consumers` | 72h / `[analysis]` | Temporary media lifecycle |
 | `privacy.pii_mode` | `full` | `pseudonymized` drops author identity and keeps `author_key` |
 | `privacy.author_hmac_key` | dev key | Must be set in prod (validated) |

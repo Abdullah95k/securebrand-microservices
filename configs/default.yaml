@@ -59,8 +59,24 @@ fb:
   # Per page, fleet wide (Redis GCRA).
   page_rps: 3
   page_rps_p0: 6
-  # Global ceiling across the fleet. AIMD lowers it on blocks (Phase 2).
+  # Global ceiling across the fleet, and AIMD's starting point.
   global_rps: 50
+  # AIMD: every 10s the leader scheduler looks at the fleet's block rate
+  # (rate limits, login walls, checkpoints) over the last window. Above
+  # high_block_rate the ceiling is multiplied by `decrease`; below
+  # low_block_rate, while the fleet uses at least min_utilization of the
+  # ceiling, it grows by `increase`. Crawlers re-read it every 5s.
+  aimd:
+    enabled: true
+    interval: 10s
+    min_rps: 5
+    max_rps: 500
+    increase: 0.02
+    decrease: 0.7
+    low_block_rate: 0.02
+    high_block_rate: 0.06
+    min_samples: 100
+    min_utilization: 0.8
   bootstrap_attempts: 3
   capture_raw: failures    # all | failures | none
   proxy:
@@ -78,13 +94,40 @@ fb:
     #   country: us
     routing:
       default: [direct]
+    # Circuit breaker per exit bucket (a static endpoint's /24, or a gateway
+    # and country): one blocked or failing too often gets no new identities
+    # until its cooldown ends, then a single probe identity.
+    breaker:
+      window: 1m
+      min_events: 20
+      open_rate: 0.15
+      cooldown: 2m
+      max_cooldown: 30m
+      probe_successes: 3
+  # Circuit breaker per (query, doc_id): when responses keep failing to parse
+  # (schema drift) or the doc_id is rejected, stop sending that query (tasks
+  # retry later) instead of spending requests until a registry or parser
+  # update lands.
+  query_breaker:
+    window: 5m
+    min_events: 20
+    open_rate: 0.5
+    cooldown: 2m
+    max_cooldown: 30m
+    probe_successes: 3
 
 crawler:
   stages: [page, post, thread]
-  lanes:
-    p0: 120   # max in-flight tasks per pod for each lane
-    p1: 80
-    p2: 40
+  # In-flight tasks per pod and stage, shared by the lanes in priority order:
+  # p0 on-demand > p1 scheduled > p2 backfill. Idle capacity of one lane is
+  # used by the others and handed back as their tasks finish (tasks yield
+  # within yield_after). Set slots to 0 to give each lane fixed slots.
+  slots: 240
+  lanes:      # most slots each lane may use
+    p0: 240
+    p1: 240
+    p2: 96    # backfill: at most 40% of the slots
+  lane_min: 12  # slots a waiting lane always gets, however busy the others are (5%)
   max_inflight_per_partition: 64
   yield_pages: 20
   yield_after: 60s

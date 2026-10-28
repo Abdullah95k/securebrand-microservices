@@ -314,6 +314,37 @@ func TestBlockedIdentitiesRetryAndTruncation(t *testing.T) {
 	if j.Status != "completed" || got != want {
 		t.Fatalf("blocked run did not recover: status=%s comments=%d/%d", j.Status, got, want)
 	}
+	// The crawlers reported every response, rate limits included, to the
+	// fleet windows AIMD reads: the counts match what fakefb served. (How
+	// AIMD moves the ceiling from them is unit tested; whether one 10s
+	// window holds enough blocks to move it depends on timing here.)
+	ctx := context.Background()
+	stats := s.Fake.Stats()
+	served := 0
+	for _, n := range stats.ByQuery {
+		served += n
+	}
+	var total, blocked int64
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(200 * time.Millisecond) { // reporters flush every 2s
+		total, blocked = 0, 0
+		iter := s.Redis.Scan(ctx, 0, s.Cfg.Kafka.TopicPrefix+"aimd:w:*", 100).Iterator()
+		for iter.Next(ctx) {
+			h := s.Redis.HGetAll(ctx, iter.Val()).Val()
+			n, _ := strconv.ParseInt(h["total"], 10, 64)
+			b, _ := strconv.ParseInt(h["blocked"], 10, 64)
+			total, blocked = total+n, blocked+b
+		}
+		if err := iter.Err(); err != nil {
+			t.Fatal(err)
+		}
+		if (total == int64(served) && blocked == int64(stats.RateLimited)) || time.Now().After(deadline) {
+			break
+		}
+	}
+	t.Logf("fleet windows: %d responses, %d blocked; fakefb served %d, %d rate limited", total, blocked, served, stats.RateLimited)
+	if total != int64(served) || blocked != int64(stats.RateLimited) {
+		t.Fatalf("AIMD windows do not match what fakefb served")
+	}
 }
 
 func (s *Stack) runJobWithin(t *testing.T, key, page string, d time.Duration) jobView {
