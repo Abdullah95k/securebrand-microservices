@@ -75,4 +75,3 @@ func ParseLane(s string) taskv1.Lane {
 		return taskv1.Lane_LANE_P1
 	}
 }
-
