@@ -38,12 +38,17 @@ jobs:
           FBS_SOAK_PAGES: ${{ inputs.pages }}
           FBS_SOAK_RESTART_EVERY: ${{ inputs.restart_every }}
           FBS_SOAK_OUT: ${{ github.workspace }}/soak.md
+          FBS_SOAK_HEAPPROFILE: ${{ github.workspace }}/heap
         run: make soak > soak.log 2>&1
       - name: Report
         if: always()
         run: |
           if [ -f soak.md ]; then cat soak.md; cat soak.md >> "$GITHUB_STEP_SUMMARY"; fi
           grep -v ' INFO ' soak.log | tail -60 || true
+          # What the heap retained at the end that it did not after 2 minutes.
+          if [ -f heap-end.pprof ]; then
+            go tool pprof -top -nodecount=40 -sample_index=inuse_space -diff_base heap-base.pprof heap-end.pprof || true
+          fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -51,4 +56,5 @@ jobs:
           path: |
             soak.md
             soak.log
+            heap-*.pprof
           if-no-files-found: ignore
