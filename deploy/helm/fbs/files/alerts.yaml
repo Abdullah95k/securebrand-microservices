@@ -186,11 +186,13 @@ groups:
         # Facebook renamed or dropped a field the parser treats as
         # optional: nothing fails, but the data loses it silently. Fires
         # when a field goes missing far more often than a week before, or
-        # goes missing in most responses with no such history.
+        # goes missing in many responses when it was never missing a week
+        # before (the raw counter, which predates the recording rule).
         expr: |
           (
             fbs:parse_missing_per_response:rate1h > 2 * (fbs:parse_missing_per_response:rate1h offset 7d) + 0.05
-            or (fbs:parse_missing_per_response:rate1h > 0.25 unless (fbs:parse_missing_per_response:rate1h offset 7d))
+            or (fbs:parse_missing_per_response:rate1h > 0.25
+                  unless on (query, field) sum by (query, field) (rate(fbs_parse_missing_field_total[1h] offset 7d)))
           )
           and on (query) sum by (query) (rate(fbs_parse_total[1h])) > 0.05
         for: 2h
@@ -210,7 +212,7 @@ groups:
         labels: {severity: info}
         annotations:
           summary: "{{ $labels.query }}: the candidate parser disagrees on {{ $value | humanizePercentage }} of sampled responses"
-          description: The differing responses are captured (raw-failures, vars.shadow); replay them before promoting the candidate.
+          description: The differing responses are captured under raw-failures/shadow-<query>/; replay them (fbctl replay --query shadow-<query>) before promoting the candidate.
           runbook_url: https://github.com/abdullah95k/securebrand-microservices/blob/main/docs/runbooks/operations.md#schema-drift
 
   - name: fbs.pipeline

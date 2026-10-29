@@ -8,9 +8,10 @@ package replay
 import (
 	"bufio"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,6 +27,9 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/fixtures"
 )
 
+// ShadowPrefix prefixes the query of shadow-parser captures.
+const ShadowPrefix = "shadow-"
+
 // Options selects what to replay.
 type Options struct {
 	Bucket string
@@ -33,7 +37,8 @@ type Options struct {
 	// (everything, with fb.capture_raw: all).
 	Prefix string
 	// Parsers maps query names to their parser (timeline, comments,
-	// replies); queries not listed are skipped.
+	// replies); queries not listed are skipped. A shadow parser's captures
+	// are under "shadow-<query>" and replay with that query's parser.
 	Parsers map[string]string
 	// Queries restricts the replay; empty = every query in Parsers.
 	Queries []string
@@ -94,7 +99,7 @@ func Run(ctx context.Context, s3 *minio.Client, o Options) (Result, error) {
 	}
 	defer dec.Close()
 	for _, q := range queries {
-		parser, ok := o.Parsers[q]
+		parser, ok := o.Parsers[strings.TrimPrefix(q, ShadowPrefix)]
 		if !ok {
 			return res, fmt.Errorf("replay: unknown query %q", q)
 		}
@@ -161,16 +166,7 @@ func replayObject(ctx context.Context, s3 *minio.Client, dec *zstd.Decoder, o Op
 			qr.Missing[m]++
 		}
 		if o.FixturesDir != "" && len(qr.Fixtures) < max(o.Samples, 1) {
-			name := o.Name
-			if name == "" {
-				name = "replay"
-			}
-			keep := []string{}
-			if p := intVar(l.Vars, "page_id"); p != 0 {
-				keep = append(keep, strconv.FormatInt(p, 10))
-			}
-			d, err := fixtures.Write(o.FixturesDir, parser, fmt.Sprintf("%s_%s-%d", l.At.Format("2006-01-02"), name, len(qr.Fixtures)+1),
-				"response.ndjson", body, map[string]any{"query": query, "class": l.Class, "missing": rep.Missing, "replayed_from": key, "vars": l.Vars}, keep)
+			d, err := writeFixture(o, query, parser, key, l, body, rep)
 			if err != nil {
 				return err
 			}
@@ -180,23 +176,61 @@ func replayObject(ctx context.Context, s3 *minio.Client, dec *zstd.Decoder, o Op
 	return sc.Err()
 }
 
+// writeFixture stores a still-drifting response in the parser test layout:
+// <dir>/<parser>/<date>_<name>-<query>-<n>, never over an existing one, with
+// the meta keys the golden tests read for context.
+func writeFixture(o Options, query, parser, key string, l rawsink.Line, body []byte, rep parse.Report) (string, error) {
+	name := o.Name
+	if name == "" {
+		name = "replay"
+	}
+	ctx := parseContext(l.Vars)
+	var keep []string
+	if ctx.PageID != 0 {
+		keep = append(keep, strconv.FormatInt(ctx.PageID, 10))
+	}
+	base := fmt.Sprintf("%s_%s-%s", l.At.Format("2006-01-02"), name, query)
+	caseName := base + "-1"
+	for n := 2; ; n++ {
+		if _, err := os.Stat(filepath.Join(o.FixturesDir, parser, caseName)); os.IsNotExist(err) {
+			break
+		}
+		caseName = fmt.Sprintf("%s-%d", base, n)
+	}
+	return fixtures.Write(o.FixturesDir, parser, caseName, "response.ndjson", body, map[string]any{
+		"page_id": ctx.PageID, "post_id": ctx.PostID, "parent_comment_id": ctx.ParentCommentID,
+		"query": query, "class": l.Class, "missing": rep.Missing, "replayed_from": key, "vars": l.Vars}, keep)
+}
+
+// parseContext derives the parse context from the request's template values.
+func parseContext(vars map[string]any) parse.CommentContext {
+	post, comment := parse.FeedbackTarget(stringVar(vars, "feedback_id"))
+	return parse.CommentContext{PageID: intVar(vars, "page_id"), PostID: post, ParentCommentID: comment}
+}
+
 // Parse runs parser on a raw response with the request's template values
 // as context and returns the parser's report.
 func Parse(parser string, body []byte, vars map[string]any) parse.Report {
 	parts := graphql.SplitParts(body)
-	pageID := intVar(vars, "page_id")
+	cc := parseContext(vars)
 	switch parser {
 	case "timeline":
-		_, rep := parse.Timeline(parts, pageID, "https://www.facebook.com")
+		_, rep := parse.Timeline(parts, cc.PageID, "https://www.facebook.com")
 		return rep
 	case "comments":
-		_, rep := parse.Comments(parts, parse.CommentContext{PostID: postFromFeedback(vars), PageID: pageID})
+		_, rep := parse.Comments(parts, parse.CommentContext{PostID: cc.PostID, PageID: cc.PageID})
 		return rep
 	case "replies":
-		_, rep := parse.Comments(parts, parse.CommentContext{PageID: pageID, BaseDepth: 1, Replies: true})
+		_, rep := parse.Comments(parts, parse.CommentContext{PageID: cc.PageID, PostID: cc.PostID,
+			ParentCommentID: cc.ParentCommentID, BaseDepth: 1, Replies: true})
 		return rep
 	}
 	return parse.Report{Missing: []string{"unknown parser " + parser}}
+}
+
+func stringVar(vars map[string]any, k string) string {
+	s, _ := vars[k].(string)
+	return s
 }
 
 func intVar(vars map[string]any, k string) int64 {
@@ -211,16 +245,4 @@ func intVar(vars map[string]any, k string) int64 {
 		return n
 	}
 	return 0
-}
-
-// postFromFeedback recovers the post id from a post's feedback id
-// (base64 of "feedback:<post id>").
-func postFromFeedback(vars map[string]any) int64 {
-	s, _ := vars["feedback_id"].(string)
-	b, err := base64.StdEncoding.DecodeString(s)
-	if err != nil {
-		return 0
-	}
-	n, _ := strconv.ParseInt(strings.TrimPrefix(string(b), "feedback:"), 10, 64)
-	return n
 }

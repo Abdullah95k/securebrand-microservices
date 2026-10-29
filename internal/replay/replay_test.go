@@ -2,6 +2,7 @@ package replay
 
 import (
 	"context"
+	"encoding/json"
 	"net/http/httptest"
 	"net/url"
 	"os"
@@ -58,6 +59,7 @@ func TestReplay(t *testing.T) {
 		t.Fatal("the fault must make the timeline drift")
 	}
 	drifted.GQL.Raw = sink
+	drifted.GQL.CaptureAll = true // drift still goes to raw-failures/
 	drifted.GQL.Parsed(tl, false)
 
 	healthy := fbtest.New(t, fbtest.Options{})
@@ -66,11 +68,13 @@ func TestReplay(t *testing.T) {
 	cm := response(t, healthy, "comments", vars)
 	sink.Capture(ctx, "comments", detect.SchemaDrift, cm.Body, vars) // say it drifted then, but parses now
 	sink.Capture(ctx, "comments", detect.RateLimited, []byte(`{"error":1675004}`), vars)
+	// Two queries sharing the timeline parser drift alike.
+	sink.Capture(ctx, "timeline_alt", detect.SchemaDrift, tl.Body, tl.Vars)
 	sink.FlushAll(ctx)
 
 	dir := t.TempDir()
 	res, err := Run(ctx, s3, Options{Bucket: "fbs-raw", Prefix: "raw-failures",
-		Parsers: map[string]string{"timeline": "timeline", "comments": "comments", "replies": "replies"},
+		Parsers:     map[string]string{"timeline": "timeline", "timeline_alt": "timeline", "comments": "comments", "replies": "replies"},
 		FixturesDir: dir, Name: "brand", Samples: 2})
 	if err != nil {
 		t.Fatal(err)
@@ -88,7 +92,32 @@ func TestReplay(t *testing.T) {
 	if err != nil || len(b) == 0 {
 		t.Fatalf("fixture: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(tlr.Fixtures[0], "meta.json")); err != nil {
+	// The golden tests read the parse context from meta.json.
+	mb, err := os.ReadFile(filepath.Join(tlr.Fixtures[0], "meta.json"))
+	if err != nil {
 		t.Fatal(err)
+	}
+	var meta struct {
+		PageID int64 `json:"page_id"`
+	}
+	if json.Unmarshal(mb, &meta) != nil || meta.PageID != page.ID {
+		t.Fatalf("meta %s", mb)
+	}
+	// Queries sharing a parser, and a second run, never overwrite fixtures.
+	alt := res.Queries["timeline_alt"]
+	if len(alt.Fixtures) != 1 || alt.Fixtures[0] == tlr.Fixtures[0] {
+		t.Fatalf("shared parser fixtures: %v %v", tlr.Fixtures, alt.Fixtures)
+	}
+	again, err := Run(ctx, s3, Options{Bucket: "fbs-raw", Prefix: "raw-failures", Parsers: map[string]string{"timeline": "timeline"},
+		Queries: []string{"timeline"}, FixturesDir: dir, Name: "brand", Samples: 1})
+	if err != nil || len(again.Queries["timeline"].Fixtures) != 1 || again.Queries["timeline"].Fixtures[0] == tlr.Fixtures[0] {
+		t.Fatalf("a second run overwrote a fixture: %v %+v", err, again.Queries["timeline"])
+	}
+}
+
+func TestParseContextFromVars(t *testing.T) {
+	cc := parseContext(map[string]any{"page_id": "42", "feedback_id": "ZmVlZGJhY2s6MTJfMzQ"}) // feedback:12_34, unpadded
+	if cc.PageID != 42 || cc.PostID != 12 || cc.ParentCommentID != 34 {
+		t.Fatalf("%+v", cc)
 	}
 }

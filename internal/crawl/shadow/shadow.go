@@ -2,9 +2,10 @@
 // of live responses, so a new parser version is proven on production
 // traffic before it becomes active. Outcomes are counted per query
 // (fbs_parse_shadow_total: same, differs, drift, error); a response the two
-// parse differently is captured raw (raw-failures, vars.shadow=differs) for
-// `fbctl replay` and fixtures. The active parser's result is what the stage
-// emits either way.
+// parse differently is captured raw under raw-failures/shadow-<query>/,
+// apart from real drift, for `fbctl replay --query shadow-<query>` and
+// fixtures. The active parser's result is what the stage emits either way,
+// and a candidate that panics only counts as an error.
 package shadow
 
 import (
@@ -54,6 +55,7 @@ const (
 	Same    = "same"
 	Differs = "differs"
 	Drift   = "drift" // the candidate misses required fields
+	Error   = "error" // the candidate panicked
 )
 
 // CompareTimeline parses resp with the candidate when sampled and compares
@@ -62,7 +64,11 @@ func (s *Set) CompareTimeline(query string, resp *graphql.Response, active parse
 	if s == nil || s.Timeline == nil || !s.take() {
 		return ""
 	}
-	cand, rep := s.Timeline(resp.Parts, pageID, baseURL)
+	var cand parse.TimelineResult
+	var rep parse.Report
+	if err := safely(func() { cand, rep = s.Timeline(resp.Parts, pageID, baseURL) }); err != nil {
+		return s.record(query, resp, Error, err.Error())
+	}
 	if !rep.OK() {
 		return s.record(query, resp, Drift, fmt.Sprint(rep.Missing))
 	}
@@ -70,12 +76,28 @@ func (s *Set) CompareTimeline(query string, resp *graphql.Response, active parse
 	return s.record(query, resp, diff(a, b), "")
 }
 
+// safely runs a candidate, turning a panic into an error: a candidate must
+// never take the crawler down.
+func safely(fn func()) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("candidate parser panicked: %v", r)
+		}
+	}()
+	fn()
+	return nil
+}
+
 // CompareComments is CompareTimeline for comments and replies.
 func (s *Set) CompareComments(query string, resp *graphql.Response, active parse.CommentsResult, cc parse.CommentContext) string {
 	if s == nil || s.Comments == nil || !s.take() {
 		return ""
 	}
-	cand, rep := s.Comments(resp.Parts, cc)
+	var cand parse.CommentsResult
+	var rep parse.Report
+	if err := safely(func() { cand, rep = s.Comments(resp.Parts, cc) }); err != nil {
+		return s.record(query, resp, Error, err.Error())
+	}
 	if !rep.OK() {
 		return s.record(query, resp, Drift, fmt.Sprint(rep.Missing))
 	}
@@ -92,7 +114,7 @@ func (s *Set) record(query string, resp *graphql.Response, outcome, why string) 
 		if why != "" {
 			vars["shadow_missing"] = why
 		}
-		s.Raw.Capture(context.Background(), query, detect.SchemaDrift, resp.Body, vars)
+		s.Raw.Capture(context.Background(), "shadow-"+query, detect.SchemaDrift, resp.Body, vars)
 	}
 	return outcome
 }

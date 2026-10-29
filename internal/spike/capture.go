@@ -86,9 +86,6 @@ func (r *Runner) Capture(ctx context.Context, page, dir, name string) ([]string,
 	return written, err
 }
 
-// writeFixture writes body and meta.json to root/<query>/<caseName>/ and
-// scrubs them; ids in keep (the page id) survive the scrub.
-
 // errNotOK is reported when a response came back but was not OK.
 var errNotOK = errors.New("response not ok")
 

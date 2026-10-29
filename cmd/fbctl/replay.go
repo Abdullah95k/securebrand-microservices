@@ -10,6 +10,7 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/configs"
 	"github.com/abdullah95k/securebrand-microservices/internal/config"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/registry"
+	"github.com/abdullah95k/securebrand-microservices/internal/platform/pg"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/s3x"
 	"github.com/abdullah95k/securebrand-microservices/internal/replay"
 )
@@ -27,25 +28,19 @@ func replayRaw(ctx context.Context, cfg *config.Config, args []string) error {
 	samples := fs.Int("samples", 3, "fixtures per query")
 	_ = fs.Parse(args)
 
-	seedBytes, err := configs.FS.ReadFile(cfg.FB.RegistrySeed)
+	parsers, err := queryParsers(ctx, cfg)
 	if err != nil {
 		return err
-	}
-	seed, err := registry.ParseSeed(seedBytes)
-	if err != nil {
-		return err
-	}
-	parsers := map[string]string{}
-	for _, q := range seed.Queries {
-		parsers[q.Name] = q.Parser
 	}
 	s3, err := s3x.Open(ctx, cfg.S3.Endpoint, cfg.S3.AccessKey, cfg.S3.SecretKey, cfg.S3.Region, cfg.S3.UseSSL)
 	if err != nil {
 		return err
 	}
 	var qs []string
-	if *queries != "" {
-		qs = strings.Split(*queries, ",")
+	for _, q := range strings.Split(*queries, ",") {
+		if q = strings.TrimSpace(q); q != "" {
+			qs = append(qs, q)
+		}
 	}
 	res, err := replay.Run(ctx, s3, replay.Options{Bucket: cfg.S3.RawBucket, Prefix: *prefix, Parsers: parsers, Queries: qs,
 		Since: time.Now().Add(-*since), MaxObjects: *maxObjects, FixturesDir: *fixturesDir, Name: *name, Samples: *samples})
@@ -57,4 +52,32 @@ func replayRaw(ctx context.Context, cfg *config.Config, args []string) error {
 		os.Exit(3)
 	}
 	return nil
+}
+
+// queryParsers maps query names to parsers from the live registry, or from
+// the seed when the database is not reachable.
+func queryParsers(ctx context.Context, cfg *config.Config) (map[string]string, error) {
+	parsers := map[string]string{}
+	seedBytes, err := configs.FS.ReadFile(cfg.FB.RegistrySeed)
+	if err != nil {
+		return nil, err
+	}
+	seed, err := registry.ParseSeed(seedBytes)
+	if err != nil {
+		return nil, err
+	}
+	for _, q := range seed.Queries {
+		parsers[q.Name] = q.Parser
+	}
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if db, err := pg.Open(cctx, cfg.Postgres.DSN, 2); err == nil {
+		defer db.Close()
+		if qs, err := registry.List(cctx, db); err == nil {
+			for _, q := range qs {
+				parsers[q.Name] = q.Parser
+			}
+		}
+	}
+	return parsers, nil
 }

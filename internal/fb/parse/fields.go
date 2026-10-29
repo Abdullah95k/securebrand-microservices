@@ -130,6 +130,26 @@ func FeedbackID(postID int64) string {
 	return base64.StdEncoding.EncodeToString([]byte("feedback:" + strconv.FormatInt(postID, 10)))
 }
 
+// FeedbackTarget decodes a feedback graph id: base64 (padded or not) of
+// "feedback:<post id>" for a post, "feedback:<post id>_<comment id>" for a
+// comment's replies. Zero values when id is not one.
+func FeedbackTarget(id string) (post, comment int64) {
+	b, err := base64.StdEncoding.DecodeString(id)
+	if err != nil {
+		if b, err = base64.RawStdEncoding.DecodeString(id); err != nil {
+			return 0, 0
+		}
+	}
+	s, ok := strings.CutPrefix(string(b), "feedback:")
+	if !ok {
+		return 0, 0
+	}
+	p, c, _ := strings.Cut(s, "_")
+	post, _ = strconv.ParseInt(p, 10, 64)
+	comment, _ = strconv.ParseInt(c, 10, 64)
+	return post, comment
+}
+
 // mediaNS namespaces deterministic media ids.
 var mediaNS = uuid.Must(uuid.Parse("6f1c1f7e-8d9b-5c2a-9e0f-3b1f6a7c2d10"))
 

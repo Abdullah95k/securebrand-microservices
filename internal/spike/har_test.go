@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/parse"
 )
 
 const harCookie = "datr=HARCOOKIEVALUE123"
@@ -177,13 +179,13 @@ func filepathWalk(root string, fn func(string, []byte)) error {
 
 func TestFeedbackIDs(t *testing.T) {
 	enc := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
-	if p, c := feedbackIDs(enc("feedback:12_34")); p != 12 || c != 34 {
+	if p, c := parse.FeedbackTarget(enc("feedback:12_34")); p != 12 || c != 34 {
 		t.Fatal(p, c)
 	}
-	if p, c := feedbackIDs(enc("feedback:12")); p != 12 || c != 0 {
+	if p, c := parse.FeedbackTarget(enc("feedback:12")); p != 12 || c != 0 {
 		t.Fatal(p, c)
 	}
-	if p, _ := feedbackIDs("not base64!"); p != 0 {
+	if p, _ := parse.FeedbackTarget("not base64!"); p != 0 {
 		t.Fatal(p)
 	}
 }

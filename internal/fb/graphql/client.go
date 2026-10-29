@@ -92,7 +92,9 @@ func (c *Client) Parsed(resp *Response, ok bool) {
 	if c.Breakers != nil && resp.Query.DocID != "" {
 		c.Breakers.Observe(breakerKey(resp.Query), !ok)
 	}
-	if !ok && c.Raw != nil && !c.CaptureAll && resp.Class == detect.OK {
+	// Also with CaptureAll: that copy is under raw/ as OK, and the drifted
+	// ones belong under raw-failures/ where replay looks first.
+	if !ok && c.Raw != nil && resp.Class == detect.OK {
 		c.Raw.Capture(context.Background(), resp.Query.Name, detect.SchemaDrift, resp.Body, resp.Vars)
 	}
 }

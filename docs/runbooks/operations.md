@@ -133,7 +133,7 @@ Symptom: `fbs_parse_total{outcome="drift"}` (alert `FbsSchemaDrift`), or a field
 
 **Proving a new parser version on live traffic:** register it as a candidate in `internal/crawl/shadow` (`shadow.Candidates.Timeline` or `.Comments`, from its file's `init`). A share of responses (`fb.shadow_rate`, 5%) is then parsed by both versions; only the active result is emitted.
 - `fbs_parse_shadow_total{query,outcome}` counts `same`, `differs` and `drift`.
-- Responses the two parse differently are captured (`vars.shadow`), for `fbctl replay` and fixtures.
+- Responses the two parse differently are captured under `raw-failures/shadow-<query>/`, apart from real drift. Replay them with `fbctl replay --query shadow-<query>`. A candidate that panics only counts as `error`.
 - `FbsShadowParserDiffers` (info) fires above 1%.
 - Promote the candidate once it stays `same`.
 
