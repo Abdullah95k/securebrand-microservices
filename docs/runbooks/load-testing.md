@@ -95,9 +95,17 @@ A 6-minute run on this container (4 pages, a restart every 40s), from `FBS_SOAK_
 - edits counted on 19 of the 22 edited comments that are still up. The other edits came before the comment was first stored;
 - goroutines between 190 and 324, heap at most 66 MB.
 
-A 90-minute run on this container (20 pages, a restart every 2 minutes): 2,844 jobs, every one completed, none partial or failed. The development container's Docker daemon stopped during the final checks, so they did not run there.
-
 **Longer runs on a GitHub runner:** Actions → **soak** → Run workflow, with the duration, pages and restart interval. The report is in the run's summary and in its `soak` artifact, with the log.
+
+A 90-minute run there (20 pages, a restart every 2 minutes; 1h56m with the final full jobs and checks) passed:
+- 2,870 jobs, all completed;
+- 2,024 changes: 681 new posts and comments, 616 comments on older posts, 375 edits and 352 deletions;
+- 44 restarts: the crawler 21 times, the finalizer 17, the persister 6;
+- 19,683 comments stored: every comment fakefb still shows (18,910), visible and with its current text, and 773 marked deleted (the 352 deleted comments and their replies);
+- edits counted on 328 of the 336 edited comments still up; the other 8 were edited before they were first stored;
+- goroutines 300 after 2 minutes, at most 495, and 279 at the end: nothing leaked. Heap at most 359 MB, with fakefb's world in the same process.
+
+The same run on the development container got through its 90 minutes (2,844 jobs, all completed), but the container's Docker daemon stopped during the final checks.
 
 **What these tests found, all fixed:**
 - **Lost posts (load test):** when a page's timeline held both a post and a share of it, the parser returned the post only once, quoted inside the share. The post itself and its 654 comments were never crawled, and the jobs still completed. The parser now drops only true repeats (the same object at the same place) and keeps a quoted post as well as the post itself.
