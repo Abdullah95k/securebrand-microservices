@@ -43,8 +43,15 @@ type Crawler struct {
 	Registry    *registry.DB
 	Suppression *gdpr.Suppression
 	Components  []run.Func
-	// Lanes holds each stage's lane scheduler (shared slots only).
-	Lanes []*lanes.Scheduler
+	// Lanes are the backfill (p2) lanes of every stage, which the traffic
+	// budget pauses.
+	Lanes []laneRef
+}
+
+type laneRef struct {
+	s    *lanes.Scheduler
+	lane int // index of the p2 lane in s
+	max  int // its configured cap
 }
 
 // CrawlerOptions customise construction (tests).
@@ -122,11 +129,16 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 		func(ctx context.Context) error { return reg.Run(ctx, cfg.FB.RegistryRefresh) },
 		func(ctx context.Context) error { return supp.Run(ctx, cfg.Crawler.SuppressionRefresh) },
 	}
+	// The reporter feeds both AIMD (block rate) and the traffic budget.
+	if cfg.FB.AIMD.Enabled || cfg.Scheduler.Budget.Enabled {
+		rep := ratelimit.NewReporter(rdb, cfg.Kafka.TopicPrefix)
+		gql.Outcomes = rep
+		c.Components = append(c.Components, rep.Run)
+	}
 	if cfg.FB.AIMD.Enabled {
-		ns := cfg.Kafka.TopicPrefix
-		rep, ceil := ratelimit.NewReporter(rdb, ns), ratelimit.NewCeiling(rdb, ns, cfg.FB.GlobalRPS)
-		gql.Outcomes, gql.Ceiling = rep, ceil
-		c.Components = append(c.Components, rep.Run, ceil.Run)
+		ceil := ratelimit.NewCeiling(rdb, cfg.Kafka.TopicPrefix, cfg.FB.GlobalRPS)
+		gql.Ceiling = ceil
+		c.Components = append(c.Components, ceil.Run)
 	}
 	if o.RawS3 != nil && cfg.FB.CaptureRaw != "none" {
 		sink := rawsink.New(o.RawS3, cfg.S3.RawBucket)
@@ -158,7 +170,7 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 		}
 		sched := laneScheduler(cfg.Crawler, s)
 		if sched != nil {
-			c.Lanes = append(c.Lanes, sched)
+			c.Lanes = append(c.Lanes, laneRef{s: sched, lane: 2, max: cfg.Crawler.Lanes["p2"]})
 		}
 		for i, lane := range []taskv1.Lane{taskv1.Lane_LANE_P0, taskv1.Lane_LANE_P1, taskv1.Lane_LANE_P2} {
 			n := cfg.Crawler.Lanes[topics.LaneName(lane)]
@@ -166,8 +178,15 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 				continue
 			}
 			var shared kafka.Slots
-			if sched != nil {
+			switch {
+			case sched != nil:
 				shared = lanes.Slots{S: sched, Lane: i}
+			case lane == taskv1.Lane_LANE_P2:
+				// Fixed slots: backfill still gets a scheduler of its own so
+				// the budget can pause it.
+				own := lanes.New(n, lanes.Lane{Name: "p2", Max: n})
+				c.Lanes = append(c.Lanes, laneRef{s: own, lane: 0, max: n})
+				shared = lanes.Slots{S: own, Lane: 0}
 			}
 			cons, err := kafka.NewConsumer(kafka.ConsumerConfig{
 				ClientConfig: kcfg, Group: "fbs-crawler-" + s + "-" + topics.LaneName(lane), Topics: []string{topics.Task(kind, lane)},
@@ -185,12 +204,12 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 		// The daily budget pauses backfill by closing the p2 lane.
 		gate := ratelimit.NewBudgetGate(rdb, cfg.Kafka.TopicPrefix)
 		gate.OnChange = func(st ratelimit.BudgetState) {
-			n := cfg.Crawler.Lanes["p2"]
-			if st.PauseP2 {
-				n = 0
-			}
 			for _, l := range c.Lanes {
-				l.SetMax(2, n)
+				n := l.max
+				if st.PauseP2 {
+					n = 0
+				}
+				l.s.SetMax(l.lane, n)
 			}
 			slog.Warn("budget: backfill lane", "paused", st.PauseP2, "why", st.Explanation)
 		}

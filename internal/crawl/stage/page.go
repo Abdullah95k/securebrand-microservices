@@ -71,6 +71,7 @@ func (s *PageStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 			url = u.String()
 		}
 		pl, err := d.Loader.Load(ctx, id, url)
+		d.observeLoad(pl, err, t.Lane)
 		if err != nil {
 			return retry(t, st.Cursor, "30s", "page load: "+err.Error(), c)
 		}

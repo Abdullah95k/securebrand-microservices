@@ -84,6 +84,11 @@ func TestPlanRefresh(t *testing.T) {
 		!root.Scope.CommentsWatermark.AsTime().Equal(newest) || root.Scope.ReportedCommentCount != 7 {
 		t.Fatalf("3d: %v %+v %v", act, root, next)
 	}
+	// Seen equals the last reported total, so the post stage does not take
+	// replies (total 7 vs 5 top-level stored) for growth and recrawl.
+	if root.Scope.CommentsSeen != root.Scope.ReportedCommentCount {
+		t.Fatalf("seen %d, reported %d", root.Scope.CommentsSeen, root.Scope.ReportedCommentCount)
+	}
 
 	// Nothing stored yet: read it all.
 	d := base(3 * day)

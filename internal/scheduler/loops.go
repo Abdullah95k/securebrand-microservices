@@ -83,7 +83,7 @@ func (p *Planner) Tick(ctx context.Context) error {
 		UPDATE page_schedule s SET
 			next_run_at = now() + make_interval(secs => s.interval_seconds
 				* least(power(2, s.consecutive_failures), 2592000.0 / s.interval_seconds)
-				* CASE WHEN s.tier = ANY($3::text[]) THEN $4 ELSE 1 END
+				* CASE WHEN s.tier = ANY($3::text[]) THEN $4::float8 ELSE 1.0 END
 				* (1 + (random() * 2 - 1) * $2)),
 			last_run_at = now()
 		FROM d WHERE s.page_ref = d.page_ref
@@ -120,17 +120,21 @@ func (p *Planner) Tick(ctx context.Context) error {
 			lim.MaxPosts = *d.maxPosts
 		}
 		var posts []dispatch.PostRoot
+		commit := func(context.Context) error { return nil }
 		if p.Adaptive != nil && d.pageID != nil && lim.IncludeComments {
-			if posts, err = p.Adaptive.DueRefreshes(ctx, *d.pageID, d.tier); err != nil {
+			if posts, commit, err = p.Adaptive.DueRefreshes(ctx, *d.pageID, d.tier); err != nil {
 				slog.Warn("planner: post refreshes", "page", d.ref, "err", err)
-				posts = nil
+				posts, commit = nil, func(context.Context) error { return nil }
 			}
 		}
 		j, _, err := p.Dispatch.Create(ctx, dispatch.Request{Kind: dispatch.KindScheduled, Lane: taskv1.Lane_LANE_P1,
 			Mode: "incremental", PageRef: d.ref, Limits: lim, Posts: posts}, 0)
 		if err != nil {
 			slog.Warn("planner: dispatch failed", "page", d.ref, "err", err)
-			continue
+			continue // the refreshes stay due
+		}
+		if err := commit(ctx); err != nil {
+			slog.Warn("planner: post refreshes not recorded", "page", d.ref, "err", err)
 		}
 		if _, err := p.DB.Exec(ctx, `UPDATE page_schedule SET last_job_id = $2 WHERE page_ref = $1`, d.ref, j.ID); err != nil {
 			return err

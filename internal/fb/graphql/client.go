@@ -162,6 +162,9 @@ func (c *Client) do(ctx context.Context, id *session.Identity, q registry.Query,
 	metrics.FBRequestSecs.WithLabelValues(q.Name, tier).Observe(elapsed.Seconds())
 	if err != nil {
 		session.Outcome(id, detect.Transport)
+		if c.Outcomes != nil {
+			c.Outcomes.Observe(detect.Transport, req.Lane, int64(len(body))) // the request went out
+		}
 		metrics.FBRequests.WithLabelValues(q.Name, detect.Transport.String(), tier).Inc()
 		return nil, fmt.Errorf("%w: %w", ErrTransport, err)
 	}

@@ -327,6 +327,12 @@ func (c *Config) Validate() error {
 	if c.Media.TTL <= 0 {
 		errs = append(errs, errors.New("media.ttl must be > 0"))
 	}
+	if c.Scheduler.DefaultInterval <= 0 {
+		errs = append(errs, errors.New("scheduler.default_interval must be > 0"))
+	}
+	if c.Scheduler.DormantAfter > 0 && c.Scheduler.DormantInterval <= 0 {
+		errs = append(errs, errors.New("scheduler.dormant_interval must be > 0 when dormant_after is set"))
+	}
 	for i, t := range c.Scheduler.Tiers {
 		if t.Name == "" || t.Interval <= 0 {
 			errs = append(errs, fmt.Errorf("scheduler.tiers[%d] needs a name and an interval", i))

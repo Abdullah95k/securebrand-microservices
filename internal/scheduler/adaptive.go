@@ -92,13 +92,19 @@ func (a *Adaptive) AfterJob(ctx context.Context, pageID int64) error {
 	}
 	var recent int64
 	var last, first *time.Time
-	if err := a.DB.QueryRow(ctx, `SELECT count(*) FILTER (WHERE post_created_at > $2), max(post_created_at), min(post_created_at)
+	// The page's known history starts at the oldest post its timeline scans
+	// reached (crawl_cursors), not at the oldest post of the lookback.
+	if err := a.DB.QueryRow(ctx, `SELECT count(*) FILTER (WHERE post_created_at > $2), max(post_created_at),
+			(SELECT oldest_seen_at FROM crawl_cursors WHERE scope_type = 'page_timeline' AND scope_id = $1 AND ordering = 'default')
 		FROM posts WHERE page_id = $1 AND post_created_at > $3`,
 		pageID, now.Add(-window), now.Add(-max(window, sc.DormantAfter))).Scan(&recent, &last, &first); err != nil {
 		return err
 	}
 	rate := PostingRate(recent, first, window, now)
 	tier, interval := TierFor(sc, rate, last, now)
+	if interval <= 0 {
+		interval = max(sc.DefaultInterval, time.Hour)
+	}
 	secs := int(interval.Seconds())
 	if _, err := a.DB.Exec(ctx, `UPDATE page_schedule SET posts_per_day = $2, last_post_at = $3,
 			tier_changed_at = CASE WHEN tier IS DISTINCT FROM $4 THEN $6 ELSE tier_changed_at END,
@@ -136,64 +142,69 @@ type dueRefresh struct {
 	newestComment               *time.Time
 }
 
-// DueRefreshes claims up to PostRefresh.MaxPerJob due refreshes of pageID
-// (in tier) and schedules their next run. Posts past every window are
-// dropped.
-func (a *Adaptive) DueRefreshes(ctx context.Context, pageID int64, tier string) ([]dispatch.PostRoot, error) {
+// DueRefreshes plans up to PostRefresh.MaxPerJob due refreshes of pageID
+// (in tier). It changes nothing: commit, called once the job carrying the
+// refreshes was dispatched, records them and schedules the next ones, so a
+// failed dispatch leaves them due. Posts past every window are dropped by
+// commit too.
+func (a *Adaptive) DueRefreshes(ctx context.Context, pageID int64, tier string) (roots []dispatch.PostRoot, commit func(context.Context) error, err error) {
 	pr := a.Cfg.Scheduler.PostRefresh
+	noop := func(context.Context) error { return nil }
 	if !pr.Enabled || pageID == 0 || pr.MaxPerJob <= 0 {
-		return nil, nil
+		return nil, noop, nil
 	}
 	now := a.now()
-	var out []dispatch.PostRoot
-	err := pgx.BeginFunc(ctx, a.DB, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT r.post_id, r.post_created_at, r.refreshes, r.unchanged, r.recrawls, r.last_comment_count,
-				p.comments_collected, p.comment_count_total, p.feedback_id, p.permalink,
-				(SELECT max(c.created_at) FROM comments c WHERE c.post_created_at = r.post_created_at AND c.post_id = r.post_id)
-			FROM post_refresh r JOIN posts p ON p.post_created_at = r.post_created_at AND p.post_id = r.post_id
-			WHERE r.page_id = $1 AND r.next_refresh_at <= $2
-			ORDER BY r.next_refresh_at LIMIT $3
-			FOR UPDATE OF r SKIP LOCKED`, pageID, now, pr.MaxPerJob)
-		if err != nil {
-			return err
-		}
-		list, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (dueRefresh, error) {
-			d := dueRefresh{pageID: pageID}
-			return d, r.Scan(&d.postID, &d.created, &d.refreshes, &d.unchanged, &d.recrawls, &d.lastCount,
-				&d.collected, &d.total, &d.feedbackID, &d.permalink, &d.newestComment)
-		})
-		if err != nil {
-			return err
-		}
-		for _, d := range list {
-			act, root, next, unchanged, recrawls := plan(pr, tier, d, now)
-			switch act {
-			case actDrop:
-				if _, err := tx.Exec(ctx, `DELETE FROM post_refresh WHERE post_id = $1`, d.postID); err != nil {
-					return err
-				}
-				continue
-			case actPostpone:
-				if _, err := tx.Exec(ctx, `UPDATE post_refresh SET next_refresh_at = $2 WHERE post_id = $1`, d.postID, next); err != nil {
-					return err
-				}
-				continue
-			}
-			if _, err := tx.Exec(ctx, `UPDATE post_refresh SET next_refresh_at = $2, last_refresh_at = $3,
+	rows, err := a.DB.Query(ctx, `SELECT r.post_id, r.post_created_at, r.refreshes, r.unchanged, r.recrawls, r.last_comment_count,
+			p.comments_collected, p.comment_count_total, p.feedback_id, p.permalink,
+			(SELECT max(c.created_at) FROM comments c WHERE c.post_created_at = r.post_created_at AND c.post_id = r.post_id)
+		FROM post_refresh r JOIN posts p ON p.post_created_at = r.post_created_at AND p.post_id = r.post_id
+		WHERE r.page_id = $1 AND r.next_refresh_at <= $2
+		ORDER BY r.next_refresh_at LIMIT $3`, pageID, now, pr.MaxPerJob)
+	if err != nil {
+		return nil, noop, err
+	}
+	list, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (dueRefresh, error) {
+		d := dueRefresh{pageID: pageID}
+		return d, r.Scan(&d.postID, &d.created, &d.refreshes, &d.unchanged, &d.recrawls, &d.lastCount,
+			&d.collected, &d.total, &d.feedbackID, &d.permalink, &d.newestComment)
+	})
+	if err != nil {
+		return nil, noop, err
+	}
+	var batch pgx.Batch
+	kinds := map[string]float64{}
+	for _, d := range list {
+		act, root, next, unchanged, recrawls := plan(pr, tier, d, now)
+		switch act {
+		case actDrop:
+			batch.Queue(`DELETE FROM post_refresh WHERE post_id = $1`, d.postID)
+		case actPostpone:
+			batch.Queue(`UPDATE post_refresh SET next_refresh_at = $2 WHERE post_id = $1`, d.postID, next)
+		default:
+			batch.Queue(`UPDATE post_refresh SET next_refresh_at = $2, last_refresh_at = $3,
 				refreshes = refreshes + 1, unchanged = $4, recrawls = $5, last_comment_count = $6 WHERE post_id = $1`,
-				d.postID, next, now, unchanged, recrawls, d.collected); err != nil {
-				return err
-			}
-			out = append(out, root)
+				d.postID, next, now, unchanged, recrawls, d.collected)
+			roots = append(roots, root)
 			kind := "refresh"
 			if root.Mode == fbv1.CrawlMode_CRAWL_MODE_RECRAWL {
 				kind = "recrawl"
 			}
-			metrics.PostRefreshes.WithLabelValues(kind).Inc()
+			kinds[kind]++
+		}
+	}
+	commit = func(ctx context.Context) error {
+		if batch.Len() == 0 {
+			return nil
+		}
+		if err := a.DB.SendBatch(ctx, &batch).Close(); err != nil {
+			return err
+		}
+		for k, n := range kinds {
+			metrics.PostRefreshes.WithLabelValues(k).Add(n)
 		}
 		return nil
-	})
-	return out, err
+	}
+	return roots, commit, nil
 }
 
 func val[T any](p *T) (v T) {
@@ -261,8 +272,13 @@ func plan(pr config.PostRefresh, tier string, d dueRefresh, now time.Time) (act 
 		next = now.Add(24 * time.Hour) // last visit; the post is dropped then
 	}
 
+	// The post is older than the timeline scan, so its stored count is the
+	// last one known: seen = reported, and the incremental pass does not
+	// take the gap between top-level comments and the total (replies) for
+	// growth. Replies added to old threads are caught by the recrawls.
+	reported := val(d.total)
 	sc := &taskv1.PostScope{PostId: d.postID, PageId: d.pageID, PostCreatedAt: timestamppb.New(d.created),
-		FeedbackId: val(d.feedbackID), ReportedCommentCount: val(d.total), Permalink: val(d.permalink), CommentsSeen: collected}
+		FeedbackId: val(d.feedbackID), ReportedCommentCount: reported, Permalink: val(d.permalink), CommentsSeen: reported}
 	if sc.FeedbackId == "" {
 		sc.FeedbackId = parse.FeedbackID(d.postID)
 	}

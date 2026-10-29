@@ -227,7 +227,10 @@ func (b *BudgetController) Tick(ctx context.Context) error {
 	metrics.BudgetBackfillPaused.Set(paused)
 	metrics.BudgetStretch.Set(st.Stretch)
 	js, _ := json.Marshal(st)
-	return b.rdb.Set(ctx, budgetStateKey(b.ns), js, 0).Err()
+	// The state expires when the controller stops publishing (budget
+	// switched off, leader gone): crawlers and the planner then fall back
+	// to the neutral state instead of holding backfill forever.
+	return b.rdb.Set(ctx, budgetStateKey(b.ns), js, max(10*b.cfg.Interval, 10*time.Minute)).Err()
 }
 
 // BudgetGate gives crawlers the published state.

@@ -123,3 +123,32 @@ func TestNoStateIsNeutral(t *testing.T) {
 		t.Fatalf("%+v %v", st, err)
 	}
 }
+
+func TestBudgetStateExpiresWithoutController(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	noon := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	clk := &clock{t: noon}
+	rep := NewReporter(rdb, "")
+	rep.now = clk.now
+	ctl := NewBudgetController(rdb, "", config.Budget{Enabled: true, RequestsPerDay: 1000, Interval: time.Minute, ProjectionSpan: time.Hour})
+	ctl.now = clk.now
+	fill(t, rep, clk, noon, map[string]int{"p2": 100})
+	if err := ctl.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	gate := NewBudgetGate(rdb, "")
+	resumed := false
+	gate.OnChange = func(st BudgetState) { resumed = !st.PauseP2 }
+	_ = gate.Refresh(context.Background())
+	if !gate.State().PauseP2 {
+		t.Fatal("want paused")
+	}
+	// The controller stops (budget switched off, leader gone): the state
+	// expires and backfill resumes instead of staying paused forever.
+	mr.FastForward(11 * time.Minute)
+	_ = gate.Refresh(context.Background())
+	if gate.State().PauseP2 || !resumed {
+		t.Fatalf("a stale pause must lift: %+v", gate.State())
+	}
+}

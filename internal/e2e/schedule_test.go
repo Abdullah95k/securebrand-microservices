@@ -10,6 +10,7 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/api"
 	"github.com/abdullah95k/securebrand-microservices/internal/config"
 	"github.com/abdullah95k/securebrand-microservices/internal/fakefb"
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/ratelimit"
 )
 
 func (s *Stack) waitJob(t *testing.T, key, id string, d time.Duration) jobView {
@@ -89,8 +90,21 @@ func TestAdaptiveScheduleAndPostRefresh(t *testing.T) {
 	if _, err := s.DB.Exec(ctx, `UPDATE page_schedule SET next_run_at = now() - interval '1 second' WHERE page_id = $1`, page.ID); err != nil {
 		t.Fatal(err)
 	}
+	// The budget stretches T1 by a fractional factor: the next run is planned
+	// 12h x 1.5 (+-10% jitter) out.
+	s.Planner.Budget = func(context.Context) ratelimit.BudgetState {
+		return ratelimit.BudgetState{Stretch: 1.5, StretchTiers: []string{"T1"}}
+	}
 	if err := s.Planner.Tick(ctx); err != nil {
 		t.Fatal(err)
+	}
+	var nextIn float64
+	if err := s.DB.QueryRow(ctx, `SELECT extract(epoch FROM next_run_at - now()) FROM page_schedule WHERE page_id = $1`, page.ID).
+		Scan(&nextIn); err != nil {
+		t.Fatal(err)
+	}
+	if want := 18 * 3600.0; nextIn < want*0.89 || nextIn > want*1.11 {
+		t.Fatalf("stretched next run in %.0fs, want about %.0fs", nextIn, want)
 	}
 	var jobID string
 	if err := s.DB.QueryRow(ctx, `SELECT last_job_id::text FROM page_schedule WHERE page_id = $1`, page.ID).Scan(&jobID); err != nil {

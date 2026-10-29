@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/twmb/franz-go/pkg/kgo"
 
@@ -84,6 +85,10 @@ type Dispatcher struct {
 // ErrTooManyJobs is returned when a client exceeds its concurrent job cap.
 var ErrTooManyJobs = errors.New("dispatch: too many running jobs")
 
+type execer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
 // ErrLaneFull is returned when the lane's fleet-wide job cap is reached.
 var ErrLaneFull = errors.New("dispatch: the fleet is running its maximum of jobs in this lane")
 
@@ -109,26 +114,7 @@ func (d *Dispatcher) Create(ctx context.Context, r Request, maxRunning int) (*Jo
 			return j, false, nil
 		}
 	}
-	if maxRunning > 0 && r.ClientID != nil {
-		var running int
-		if err := d.DB.QueryRow(ctx, `SELECT count(*) FROM jobs WHERE api_client_id = $1 AND status IN ('running','finalizing')`,
-			*r.ClientID).Scan(&running); err != nil {
-			return nil, false, err
-		}
-		if running >= maxRunning {
-			return nil, false, ErrTooManyJobs
-		}
-	}
-	if r.MaxRunningInLane > 0 {
-		var running int
-		if err := d.DB.QueryRow(ctx, `SELECT count(*) FROM jobs WHERE lane = $1 AND status IN ('running','finalizing')`,
-			int16(r.Lane)).Scan(&running); err != nil {
-			return nil, false, err
-		}
-		if running >= r.MaxRunningInLane {
-			return nil, false, ErrLaneFull
-		}
-	}
+	clientCap := maxRunning > 0 && r.ClientID != nil
 	pageID, known := d.ResolvePageID(ctx, r.PageRef)
 	mode := r.Mode
 	if mode == "" || mode == "auto" {
@@ -166,9 +152,52 @@ func (d *Dispatcher) Create(ctx context.Context, r Request, maxRunning int) (*Jo
 	}
 	j := &Job{ID: id, Kind: r.Kind, Lane: topics.LaneName(r.Lane), Mode: mode, PageRef: r.PageRef, PageID: pid,
 		Status: "running", Params: pb, CreatedAt: time.Now().UTC()}
-	_, err = d.DB.Exec(ctx, `INSERT INTO jobs (job_id, api_client_id, kind, lane, mode, page_ref, page_id, params, status,
-		idempotency_key, created_at, dispatched_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'running',$9,$10,$10)`,
-		id, r.ClientID, r.Kind, int16(r.Lane), mode, r.PageRef, pid, pb, idem, j.CreatedAt)
+	insert := func(db execer) error {
+		_, err := db.Exec(ctx, `INSERT INTO jobs (job_id, api_client_id, kind, lane, mode, page_ref, page_id, params, status,
+			idempotency_key, created_at, dispatched_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'running',$9,$10,$10)`,
+			id, r.ClientID, r.Kind, int16(r.Lane), mode, r.PageRef, pid, pb, idem, j.CreatedAt)
+		return err
+	}
+	if clientCap || r.MaxRunningInLane > 0 {
+		// Count and insert under advisory locks (lane, then client), so
+		// concurrent requests on any API replica cannot all pass the caps.
+		err = pgx.BeginFunc(ctx, d.DB, func(tx pgx.Tx) error {
+			if r.MaxRunningInLane > 0 {
+				var running int
+				if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+					"fbs:lane:"+topics.LaneName(r.Lane)); err != nil {
+					return err
+				}
+				if err := tx.QueryRow(ctx, `SELECT count(*) FROM jobs WHERE lane = $1 AND status IN ('running','finalizing')`,
+					int16(r.Lane)).Scan(&running); err != nil {
+					return err
+				}
+				if running >= r.MaxRunningInLane {
+					return ErrLaneFull
+				}
+			}
+			if clientCap {
+				var running int
+				if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+					"fbs:client:"+r.ClientID.String()); err != nil {
+					return err
+				}
+				if err := tx.QueryRow(ctx, `SELECT count(*) FROM jobs WHERE api_client_id = $1 AND status IN ('running','finalizing')`,
+					*r.ClientID).Scan(&running); err != nil {
+					return err
+				}
+				if running >= maxRunning {
+					return ErrTooManyJobs
+				}
+			}
+			return insert(tx)
+		})
+		if errors.Is(err, ErrLaneFull) || errors.Is(err, ErrTooManyJobs) {
+			return nil, false, err
+		}
+	} else {
+		err = insert(d.DB)
+	}
 	if err != nil {
 		if r.IdempotencyKey != "" && r.ClientID != nil {
 			if existing, e2 := d.byIdempotency(ctx, *r.ClientID, r.IdempotencyKey); e2 == nil {

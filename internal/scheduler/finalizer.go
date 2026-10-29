@@ -147,6 +147,13 @@ func (f *Finalizer) finalize(ctx context.Context, id string) error {
 	case st.Counters["pages_unavailable"] > 0 && st.Counters["posts"] == 0:
 		final = "failed"
 	}
+	// Re-tier the page and register its posts for refresh before the job
+	// turns terminal, so a finished job means an updated schedule.
+	if f.Adaptive != nil && pageID != nil && final != "cancelled" {
+		if err := f.Adaptive.AfterJob(ctx, *pageID); err != nil {
+			slog.Warn("finalizer: adaptive schedule", "job", id, "page", *pageID, "err", err)
+		}
+	}
 	cb, _ := json.Marshal(st.Counters)
 	compb, _ := json.Marshal(comp)
 	now := time.Now().UTC()
@@ -177,11 +184,6 @@ func (f *Finalizer) finalize(ctx context.Context, id string) error {
 		return err
 	}
 	metrics.Jobs.WithLabelValues(final, topics.LaneName(taskLane(lane))).Inc()
-	if f.Adaptive != nil && pageID != nil && final != "cancelled" {
-		if err := f.Adaptive.AfterJob(ctx, *pageID); err != nil {
-			slog.Warn("finalizer: adaptive schedule", "job", id, "page", *pageID, "err", err)
-		}
-	}
 	_ = f.Jobs.Expire(ctx, id, 24*time.Hour)
 	slog.Info("job finished", "job", id, "status", final, "posts", st.Counters["posts"], "comments", st.Counters["comments"],
 		"replies", st.Counters["replies"], "median_completeness", comp.MedianRatio)

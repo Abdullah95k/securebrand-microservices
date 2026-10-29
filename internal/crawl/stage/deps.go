@@ -106,12 +106,28 @@ func (d *Deps) identity(ctx context.Context, class string, attempt uint32) (*ses
 }
 
 // ensureBootstrapped loads a page on a fresh identity to obtain tokens.
-func (d *Deps) ensureBootstrapped(ctx context.Context, id *session.Identity, pageID int64) (*session.PageLoad, error) {
+func (d *Deps) ensureBootstrapped(ctx context.Context, id *session.Identity, pageID int64, lane taskv1.Lane) (*session.PageLoad, error) {
 	if id.Bootstrapped() {
 		return nil, nil
 	}
 	u, _ := id.Base.Parse("/" + strconv.FormatInt(pageID, 10))
-	return d.Loader.Bootstrap(ctx, id, u.String())
+	pl, err := d.Loader.Bootstrap(ctx, id, u.String())
+	d.observeLoad(pl, err, lane)
+	return pl, err
+}
+
+// observeLoad reports an HTML page load to the traffic budget and AIMD;
+// page loads go through the proxies like GraphQL requests.
+func (d *Deps) observeLoad(pl *session.PageLoad, err error, lane taskv1.Lane) {
+	if d.GQL == nil || d.GQL.Outcomes == nil {
+		return
+	}
+	switch {
+	case pl != nil:
+		d.GQL.Outcomes.Observe(pl.Class, topics.LaneName(lane), pl.Bytes)
+	case err != nil:
+		d.GQL.Outcomes.Observe(detect.Transport, topics.LaneName(lane), 0)
+	}
 }
 
 // classOutcome maps a non-OK response class to an outcome for task t.
