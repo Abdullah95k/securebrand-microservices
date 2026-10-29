@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -152,6 +151,34 @@ type process struct {
 	cmd     *exec.Cmd
 	profile string
 	wsURL   string
+	stderr  *tail
+	done    chan struct{} // closed once the process has exited
+	exitErr error         // its exit, once done is closed
+}
+
+// tail keeps the last bytes written to it: Chromium's stderr, for the
+// error when it fails to start.
+type tail struct {
+	mu  sync.Mutex
+	buf []byte
+}
+
+const tailSize = 4 << 10
+
+func (t *tail) Write(b []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.buf = append(t.buf, b...)
+	if len(t.buf) > tailSize {
+		t.buf = append(t.buf[:0], t.buf[len(t.buf)-tailSize:]...)
+	}
+	return len(b), nil
+}
+
+func (t *tail) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return strings.TrimSpace(string(t.buf))
 }
 
 // launch starts Chromium with a fresh profile and the DevTools endpoint on
@@ -181,7 +208,8 @@ func launch(ctx context.Context, binary string, noSandbox bool, args []string) (
 	flags = append(flags, args...)
 	flags = append(flags, "about:blank")
 	cmd := exec.CommandContext(ctx, binary, flags...) //nolint:gosec // the binary is configuration
-	cmd.Stdout, cmd.Stderr = nil, nil
+	stderr := &tail{}
+	cmd.Stdout, cmd.Stderr = nil, stderr
 	// Its own process group, so stop kills the renderer and zygote
 	// children too instead of orphaning them.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -190,7 +218,11 @@ func launch(ctx context.Context, binary string, noSandbox bool, args []string) (
 		_ = os.RemoveAll(profile)
 		return nil, fmt.Errorf("browser: start %s: %w", binary, err)
 	}
-	p := &process{cmd: cmd, profile: profile}
+	p := &process{cmd: cmd, profile: profile, stderr: stderr, done: make(chan struct{})}
+	go func() {
+		p.exitErr = cmd.Wait()
+		close(p.done)
+	}()
 	// Chromium writes the port and the browser target path once listening.
 	deadline := time.Now().Add(20 * time.Second)
 	for {
@@ -206,18 +238,22 @@ func launch(ctx context.Context, binary string, noSandbox bool, args []string) (
 				return p, nil
 			}
 		}
+		select {
+		case <-p.done:
+			p.stop()
+			return nil, fmt.Errorf("browser: chromium exited before opening its DevTools port (%w): %s", p.exitErr, p.stderr)
+		default:
+		}
 		if time.Now().After(deadline) || ctx.Err() != nil {
 			p.stop()
-			return nil, errors.New("browser: chromium did not open its DevTools port")
+			return nil, fmt.Errorf("browser: chromium did not open its DevTools port within 20s: %s", p.stderr)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 }
 
 func (p *process) stop() {
-	if p.cmd.Process != nil {
-		_ = syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL)
-		_ = p.cmd.Wait()
-	}
+	_ = syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL)
+	<-p.done
 	_ = os.RemoveAll(p.profile)
 }
