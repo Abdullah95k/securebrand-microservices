@@ -97,15 +97,15 @@ A 6-minute run on this container (4 pages, a restart every 40s), from `FBS_SOAK_
 
 **Longer runs on a GitHub runner:** Actions → **soak** → Run workflow, with the duration, pages and restart interval. The report is in the run's summary and in its `soak` artifact, with the log.
 
-A 90-minute run there (20 pages, a restart every 2 minutes; 1h56m with the final full jobs and checks) passed:
+A 90-minute run there ([run 40882655887](https://github.com/Abdullah95k/securebrand-microservices/actions/runs/40882655887), commit `4c26a05`; 20 pages, a restart every 2 minutes; 1h56m with the final full jobs and checks) passed:
 - 2,870 jobs, all completed;
-- 2,024 changes: 681 new posts and comments, 616 comments on older posts, 375 edits and 352 deletions;
+- 2,024 changes to the world: 681 rounds of new posts and comments (0–1 posts and 1–4 comments each), 616 rounds of comments on older posts (1–4 each), 375 edits and 352 deletions;
 - 44 restarts: the crawler 21 times, the finalizer 17, the persister 6;
-- 19,683 comments stored: every comment fakefb still shows (18,910), visible and with its current text, and 773 marked deleted (the 352 deleted comments and their replies);
-- edits counted on 328 of the 336 edited comments still up; the other 8 were edited before they were first stored;
-- goroutines 300 after 2 minutes, at most 495, and 279 at the end: nothing leaked. Heap at most 359 MB, with fakefb's world in the same process.
+- 19,683 comments stored. All 18,910 comments left in fakefb's world are stored, visible and with their current text. The other 773 are marked deleted, and each is one the test deleted or a reply under one;
+- 328 of the 336 edited comments still up have an edit counted. An edit made before a comment is first stored is not an edit for us, so some are expected to go uncounted; the test does not check the 8 one by one;
+- goroutines 300 after 2 minutes, at most 495, and 279 at the end: they did not grow with the restarts. Heap in use peaked at 359 MB; see the note on memory below.
 
-The same run on the development container got through its 90 minutes (2,844 jobs, all completed), but the container's Docker daemon stopped during the final checks.
+An earlier run with the same settings on the development container got through its 90 minutes (2,844 jobs, all completed, none partial or failed), but the container's Docker daemon stopped during the final checks.
 
 **What these tests found, all fixed:**
 - **Lost posts (load test):** when a page's timeline held both a post and a share of it, the parser returned the post only once, quoted inside the share. The post itself and its 654 comments were never crawled, and the jobs still completed. The parser now drops only true repeats (the same object at the same place) and keeps a quoted post as well as the post itself.
