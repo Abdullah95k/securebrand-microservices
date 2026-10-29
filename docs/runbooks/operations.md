@@ -173,6 +173,12 @@ and `GET /v1/jobs/{id}` counters.
 
 ## Schedule and tiers
 
+**Registering pages in bulk:** `fbctl pages import --api URL --key KEY FILE`, with a file of page URLs, vanity names or ids (one per line, or CSV with a `page` column).
+- It registers 5 pages a second by default (`--rps`) and retries rate limits and server errors.
+- Each new page gets its backfill in the low-priority lane.
+- Running it again is safe: pages already registered keep their schedule and options and are not backfilled again. A page that has never had a job (its backfill failed to start) is backfilled then.
+- It prints `{"created", "existing", "failed"}`; the failed pages and their errors are listed even when it is interrupted.
+
 Pages registered without `schedule.interval_hours` are scheduled adaptively.
 
 - **When the tier is set:** after every job, the page's posting rate over `scheduler.rate_window` (14 days) picks its tier. If the stored history is shorter, the rate uses that span, with a 1-day floor.
