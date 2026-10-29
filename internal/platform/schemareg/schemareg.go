@@ -18,6 +18,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -65,22 +66,40 @@ func IsNotFound(err error) bool {
 	return errors.As(err, &e) && e.Status == http.StatusNotFound
 }
 
+// ErrIncompatible is returned by Apply when a schema fails its check.
+var ErrIncompatible = errors.New("schemareg: incompatible schema")
+
 // IsIncompatible reports a schema the subject's compatibility level rejects.
 func IsIncompatible(err error) bool {
 	var e *Error
-	return errors.As(err, &e) && e.Status == http.StatusConflict
+	return errors.Is(err, ErrIncompatible) || (errors.As(err, &e) && e.Status == http.StatusConflict)
 }
 
+// do sends one request. Every call this client makes is idempotent, so a
+// request on a connection the registry closed meanwhile (Redpanda drops
+// kept-alive connections after some error responses) is sent once more.
 func (c *Client) do(ctx context.Context, method, path string, in, out any) error {
-	var body io.Reader
+	var body []byte
 	if in != nil {
 		b, err := json.Marshal(in)
 		if err != nil {
 			return err
 		}
-		body = bytes.NewReader(b)
+		body = b
 	}
-	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(c.URL, "/")+path, body)
+	err := c.send(ctx, method, path, body, out)
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, syscall.ECONNRESET) {
+		err = c.send(ctx, method, path, body, out)
+	}
+	return err
+}
+
+func (c *Client) send(ctx context.Context, method, path string, body []byte, out any) error {
+	var r io.Reader
+	if body != nil {
+		r = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(c.URL, "/")+path, r)
 	if err != nil {
 		return err
 	}
@@ -157,26 +176,8 @@ func (c *Client) Register(ctx context.Context, subject string, s Schema) (id, ve
 	if err := c.do(ctx, http.MethodPost, subjectPath(subject)+"/versions", s, &reg); err != nil {
 		return 0, 0, err
 	}
-	var found struct {
-		Version int `json:"version"`
-		ID      int `json:"id"`
-	}
-	if err := c.do(ctx, http.MethodPost, subjectPath(subject), s, &found); err != nil {
-		return reg.ID, 0, err
-	}
-	return found.ID, found.Version, nil
-}
-
-// LatestVersion returns the subject's latest version, 0 when it has none.
-func (c *Client) LatestVersion(ctx context.Context, subject string) (int, error) {
-	var out struct {
-		Version int `json:"version"`
-	}
-	err := c.do(ctx, http.MethodGet, subjectPath(subject)+"/versions/latest", nil, &out)
-	if IsNotFound(err) {
-		return 0, nil
-	}
-	return out.Version, err
+	v, err := c.Lookup(ctx, subject, s)
+	return reg.ID, v, err
 }
 
 // Subjects lists the registered subjects.
@@ -186,12 +187,39 @@ func (c *Client) Subjects(ctx context.Context) ([]string, error) {
 	return out, err
 }
 
+// Lookup returns the version under which subject holds exactly s, 0 when
+// it does not.
+func (c *Client) Lookup(ctx context.Context, subject string, s Schema) (int, error) {
+	var out struct {
+		Version int `json:"version"`
+	}
+	err := c.do(ctx, http.MethodPost, subjectPath(subject), s, &out)
+	if IsNotFound(err) {
+		return 0, nil
+	}
+	return out.Version, err
+}
+
+// DeleteSubject deletes subject and all its versions, permanently.
+func (c *Client) DeleteSubject(ctx context.Context, subject string) error {
+	if err := c.do(ctx, http.MethodDelete, subjectPath(subject), nil, nil); err != nil && !IsNotFound(err) {
+		return err
+	}
+	err := c.do(ctx, http.MethodDelete, subjectPath(subject)+"?permanent=true", nil, nil)
+	if IsNotFound(err) {
+		return nil
+	}
+	return err
+}
+
 // Result describes one subject applied (or checked).
 type Result struct {
-	Subject    string   `json:"subject"`
-	File       string   `json:"file"`
-	ID         int      `json:"id,omitempty"`
+	Subject string `json:"subject"`
+	File    string `json:"file"`
+	ID      int    `json:"id,omitempty"`
+	// Version is the registered version (0 when a check found a change).
 	Version    int      `json:"version,omitempty"`
+	Unchanged  bool     `json:"unchanged,omitempty"`
 	Compatible bool     `json:"compatible"`
 	Messages   []string `json:"messages,omitempty"`
 }
@@ -209,85 +237,42 @@ func imports(src string) []string {
 	return out
 }
 
-// Apply registers, for each topic in topicFiles, the proto file holding its
-// value message as subject <prefix><topic>-value, and every file it imports
-// as subject <prefix><import path>, dependencies first. Every subject gets
-// compatibility level BACKWARD_TRANSITIVE. Well-known google/protobuf
-// imports are left to the registry. With dryRun nothing is written: each
-// schema is checked against the subject's latest version. Apply stops at
-// the first incompatible schema, reporting the registry's reasons.
-func Apply(ctx context.Context, c *Client, files fs.FS, prefix string, topicFiles map[string]string, dryRun bool) ([]Result, error) {
-	type done struct{ version int }
-	registered := map[string]done{}
-	var results []Result
-	var apply func(file, subject string, stack []string) (int, error)
-	apply = func(file, subject string, stack []string) (int, error) {
-		for _, s := range stack {
-			if s == file {
-				return 0, fmt.Errorf("schemareg: import cycle through %s", file)
+// node is one subject to apply.
+type node struct {
+	file, subject string
+	source        string
+	imports       []string
+	isImport      bool
+}
+
+// plan orders the subjects dependencies first: every file a topic's file
+// imports (transitively) as <prefix><import path>, then <prefix><topic>-value.
+func plan(files fs.FS, prefix string, topicFiles map[string]string) ([]node, error) {
+	var out []node
+	seen := map[string]bool{}
+	var visit func(file, subject string, isImport bool, stack []string) error
+	visit = func(file, subject string, isImport bool, stack []string) error {
+		for _, f := range stack {
+			if f == file {
+				return fmt.Errorf("schemareg: import cycle through %s", file)
 			}
+		}
+		if seen[subject] {
+			return nil
 		}
 		b, err := fs.ReadFile(files, file)
 		if err != nil {
-			return 0, fmt.Errorf("schemareg: %w", err)
+			return fmt.Errorf("schemareg: %w", err)
 		}
-		s := Schema{Schema: string(b), SchemaType: "PROTOBUF"}
-		for _, imp := range imports(s.Schema) {
-			v, err := apply(imp, prefix+imp, append(stack, file))
-			if err != nil {
-				return 0, err
+		n := node{file: file, subject: subject, source: string(b), imports: imports(string(b)), isImport: isImport}
+		for _, imp := range n.imports {
+			if err := visit(imp, prefix+imp, true, append(stack, file)); err != nil {
+				return err
 			}
-			s.References = append(s.References, Reference{Name: imp, Subject: prefix + imp, Version: v})
 		}
-		if d, ok := registered[subject]; ok {
-			return d.version, nil
-		}
-		r := Result{Subject: subject, File: file}
-		if dryRun {
-			newImport := false
-			for _, ref := range s.References {
-				newImport = newImport || ref.Version == 0
-			}
-			if newImport {
-				// The registry cannot resolve an import that is not
-				// registered yet; apply checks it.
-				r.Compatible, r.Messages = true, []string{"imports a file not registered yet; checked on apply"}
-			} else {
-				ok, msgs, err := c.Check(ctx, subject, s)
-				if err != nil {
-					return 0, err
-				}
-				r.Compatible, r.Messages = ok, msgs
-			}
-			results = append(results, r)
-			if !r.Compatible {
-				return 0, fmt.Errorf("schemareg: %s is not compatible with %s: %s", file, subject, strings.Join(r.Messages, "; "))
-			}
-			// Dependents reference the version registered now (0: none yet).
-			v, err := c.LatestVersion(ctx, subject)
-			if err != nil {
-				return 0, err
-			}
-			registered[subject] = done{version: v}
-			return v, nil
-		}
-		if err := c.SetCompatibility(ctx, subject, BackwardTransitive); err != nil {
-			return 0, err
-		}
-		id, version, err := c.Register(ctx, subject, s)
-		if IsIncompatible(err) {
-			_, msgs, _ := c.Check(ctx, subject, s)
-			r.Messages = msgs
-			results = append(results, r)
-			return 0, fmt.Errorf("schemareg: %s is not compatible with %s (%s): %w", file, subject, strings.Join(msgs, "; "), err)
-		}
-		if err != nil {
-			return 0, err
-		}
-		r.ID, r.Version, r.Compatible = id, version, true
-		results = append(results, r)
-		registered[subject] = done{version: version}
-		return version, nil
+		seen[subject] = true
+		out = append(out, n)
+		return nil
 	}
 	topics := make([]string, 0, len(topicFiles))
 	for t := range topicFiles {
@@ -295,8 +280,109 @@ func Apply(ctx context.Context, c *Client, files fs.FS, prefix string, topicFile
 	}
 	sort.Strings(topics)
 	for _, t := range topics {
-		if _, err := apply(topicFiles[t], prefix+t+"-value", nil); err != nil {
+		if err := visit(topicFiles[t], prefix+t+"-value", false, nil); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func (n node) schema(refs map[string]Reference) Schema {
+	s := Schema{Schema: n.source, SchemaType: "PROTOBUF"}
+	for _, imp := range n.imports {
+		s.References = append(s.References, refs[imp])
+	}
+	return s
+}
+
+// Apply registers, for each topic in topicFiles, the proto file holding its
+// value message as subject <prefix><topic>-value, and every file it imports
+// as subject <prefix><import path>, which the topic subjects reference.
+// Well-known google/protobuf imports are left to the registry.
+//
+// It first checks every changed schema against its subject's latest
+// version, and registers nothing unless all pass. A changed import is
+// staged under a temporary subject during the check, so the files
+// importing it are checked against its new content; the temporary
+// subjects are deleted afterwards. With dryRun it stops after the check.
+// A subject without a compatibility level of its own gets
+// BACKWARD_TRANSITIVE; a level an operator set is kept. (The registry
+// enforces the subject's level, transitive included, on registration.)
+func Apply(ctx context.Context, c *Client, files fs.FS, prefix string, topicFiles map[string]string, dryRun bool) ([]Result, error) {
+	nodes, err := plan(files, prefix, topicFiles)
+	if err != nil {
+		return nil, err
+	}
+	results := make([]Result, len(nodes))
+	staged := map[string]Reference{}
+	var temps []string
+	defer func() {
+		cctx := context.WithoutCancel(ctx)
+		for i := len(temps) - 1; i >= 0; i-- {
+			_ = c.DeleteSubject(cctx, temps[i])
+		}
+	}()
+	tmpPrefix := fmt.Sprintf("%sfbs-check-%d.", prefix, time.Now().UnixNano())
+	var problems []string
+	for i, n := range nodes {
+		s := n.schema(staged)
+		r := Result{Subject: n.subject, File: n.file}
+		v, err := c.Lookup(ctx, n.subject, s)
+		if err != nil {
+			return nil, err
+		}
+		if v > 0 {
+			r.Version, r.Unchanged, r.Compatible = v, true, true
+			results[i] = r
+			if n.isImport {
+				staged[n.file] = Reference{Name: n.file, Subject: n.subject, Version: v}
+			}
+			continue
+		}
+		ok, msgs, err := c.Check(ctx, n.subject, s)
+		if err != nil {
+			return nil, fmt.Errorf("schemareg: check %s: %w", n.subject, err)
+		}
+		r.Compatible, r.Messages = ok, msgs
+		results[i] = r
+		if !ok {
+			problems = append(problems, fmt.Sprintf("%s (%s): %s", n.subject, n.file, strings.Join(msgs, "; ")))
+		}
+		if n.isImport {
+			tmp := tmpPrefix + n.file
+			temps = append(temps, tmp)
+			_, tv, err := c.Register(ctx, tmp, s)
+			if err != nil {
+				return nil, fmt.Errorf("schemareg: stage %s: %w", n.file, err)
+			}
+			staged[n.file] = Reference{Name: n.file, Subject: tmp, Version: tv}
+		}
+	}
+	if len(problems) > 0 {
+		return results, fmt.Errorf("%w: %s", ErrIncompatible, strings.Join(problems, " | "))
+	}
+	if dryRun {
+		return results, nil
+	}
+	registered := map[string]Reference{}
+	for i, n := range nodes {
+		s := n.schema(registered)
+		lvl, err := c.Compatibility(ctx, n.subject)
+		if err != nil {
 			return results, err
+		}
+		if lvl == "" {
+			if err := c.SetCompatibility(ctx, n.subject, BackwardTransitive); err != nil {
+				return results, err
+			}
+		}
+		id, v, err := c.Register(ctx, n.subject, s)
+		if err != nil {
+			return results, fmt.Errorf("schemareg: register %s: %w", n.subject, err)
+		}
+		results[i].ID, results[i].Version, results[i].Compatible = id, v, true
+		if n.isImport {
+			registered[n.file] = Reference{Name: n.file, Subject: n.subject, Version: v}
 		}
 	}
 	return results, nil

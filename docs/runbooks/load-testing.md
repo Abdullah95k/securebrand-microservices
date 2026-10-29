@@ -13,18 +13,18 @@ These are measured with every component in one process on a 4-CPU container. The
 
 | Run | Wall time | Facebook requests | Comments and replies | Job duration p50 / max |
 |---|---|---|---|---|
-| 30 pages × 25 posts, no latency | 33s | 15,797 (480/s) | 109,205 (3,300/s) | 32s / 33s |
-| 60 pages × 20 posts, 40 ms latency | 48s | 25,480 (530/s) | 176,870 (3,700/s) | 47s / 48s |
+| 30 pages × 25 posts, no latency | 35s | 15,791 (456/s) | 109,205 (3,150/s) | 27s / 32s |
+| 60 pages × 20 posts, 40 ms latency | 51s | 25,475 (499/s) | 176,870 (3,460/s) | 40s / 45s |
 
-| Persister, 200k comments | Rows/s | Mean batch |
+| Persister, 200k comments | Rows/s | Batches |
 |---|---|---|
-| New rows (COPY into a temp table, then insert) | 15,300 | 1,365 rows in 98 ms |
-| Same rows again (no-op upsert) | 29,900 | |
+| New rows (COPY into a temp table, then insert) | 15,400 | about 1,980 rows each, 67 ms mean (both passes) |
+| Same rows again (no-op upsert) | 28,700 | |
 
 ## Reading them
 
 - **The stages are CPU-bound here.** Adding 40 ms of latency barely changed the request rate, so the limit was CPU (fakefb rendering, parsing, protobuf, every component sharing 4 cores), not the 96 shared slots. In production each crawler pod has its own cores, and the requests are paced by Facebook's limits.
-- **Jobs progress together.** Job p50 is close to max: the shared slots interleave all jobs instead of finishing them one by one. On-demand (p0) work is still served first when lanes compete.
+- **Jobs progress together.** Job p50 is close to max: the shared slots interleave all jobs instead of finishing them one by one. The jobs are submitted one after the other, a few milliseconds apart. On-demand (p0) work is still served first when lanes compete.
 - **Completion waits for the persister.** A job completes only after the persister's committed offsets pass the end offsets taken when its last task finished, so "completed" means "queryable".
 - **Persister headroom.** The sizing target in the README is about 100M row writes a day, about 1,200 rows/s on average. One persister pod on this container did 15k new rows/s, and twice that for unchanged rows. The chart's 2–6 persister pods (KEDA on `fb.comment.v1` lag) leave a wide margin; Postgres IOPS will be the limit first.
 

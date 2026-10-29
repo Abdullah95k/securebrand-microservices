@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -82,7 +81,9 @@ func machine() string {
 	return fmt.Sprintf("%d CPUs, %s/%s, %s", runtime.NumCPU(), runtime.GOOS, runtime.GOARCH, runtime.Version())
 }
 
-func histogram(name string, labels map[string]string) (count uint64, sum float64) {
+// sample sums a metric's children matching labels: a counter's value, or
+// a histogram's sample count and sum.
+func sample(name string, labels map[string]string) (value float64, count uint64, sum float64) {
 	mfs, _ := metrics.Registry.Gather()
 	for _, mf := range mfs {
 		if mf.GetName() != name {
@@ -92,11 +93,12 @@ func histogram(name string, labels map[string]string) (count uint64, sum float64
 			if !matches(m, labels) {
 				continue
 			}
+			value += m.GetCounter().GetValue()
 			count += m.GetHistogram().GetSampleCount()
 			sum += m.GetHistogram().GetSampleSum()
 		}
 	}
-	return count, sum
+	return value, count, sum
 }
 
 func matches(m *dto.Metric, labels map[string]string) bool {
@@ -158,18 +160,15 @@ func TestLoadPipeline(t *testing.T) {
 	}
 
 	before := s.Fake.Stats()
+	_, bc0, bs0 := sample("fbs_persist_batch_seconds", map[string]string{"entity": "comment"})
 	start := time.Now()
+	// Submitted one after the other (a few ms each): every job starts as
+	// soon as it is accepted, and a refused submission fails the test now.
 	ids := make([]string, len(world))
-	var wg sync.WaitGroup
 	for i, p := range world {
-		wg.Add(1)
-		go func(i int, vanity string) {
-			defer wg.Done()
-			j := decodeBody[jobView](t, s.Do(t, key, "POST", "/v1/jobs", []byte(fmt.Sprintf(`{"page":%q,"mode":"full"}`, "https://www.facebook.com/"+vanity))), http.StatusAccepted)
-			ids[i] = j.ID
-		}(i, p.Vanity)
+		j := decodeBody[jobView](t, s.Do(t, key, "POST", "/v1/jobs", []byte(fmt.Sprintf(`{"page":%q,"mode":"full"}`, "https://www.facebook.com/"+p.Vanity))), http.StatusAccepted)
+		ids[i] = j.ID
 	}
-	wg.Wait()
 	deadline := time.Now().Add(envDuration("FBS_LOADTEST_TIMEOUT", 20*time.Minute))
 	for time.Now().Before(deadline) {
 		if count(t, s, `SELECT count(*) FROM jobs WHERE status IN ('completed','partial','failed','cancelled')`) == len(ids) {
@@ -203,7 +202,8 @@ func TestLoadPipeline(t *testing.T) {
 	for q, n := range after.ByQuery {
 		requests += n - before.ByQuery[q]
 	}
-	bc, bs := histogram("fbs_persist_batch_seconds", map[string]string{"entity": "comment"})
+	_, bc, bs := sample("fbs_persist_batch_seconds", map[string]string{"entity": "comment"})
+	bc, bs = bc-bc0, bs-bs0
 
 	r := &report{title: fmt.Sprintf("Pipeline: %d pages × %d posts, all backfilled at once", pages, posts)}
 	r.add("Machine", "%s", machine())
@@ -258,31 +258,23 @@ func TestLoadPersister(t *testing.T) {
 	// processed counts comment rows the persister handled (written or
 	// unchanged).
 	processed := func() float64 {
-		mfs, _ := metrics.Registry.Gather()
-		for _, mf := range mfs {
-			if mf.GetName() != "fbs_persist_rows_total" {
-				continue
-			}
-			var v float64
-			for _, m := range mf.GetMetric() {
-				if matches(m, map[string]string{"entity": "comment"}) {
-					v += m.GetCounter().GetValue()
-				}
-			}
-			return v
-		}
-		return 0
+		v, _, _ := sample("fbs_persist_rows_total", map[string]string{"entity": "comment"})
+		return v
 	}
 	wait := func(target float64) time.Duration {
 		start := time.Now()
 		deadline := start.Add(10 * time.Minute)
-		for processed() < target && time.Now().Before(deadline) {
+		for processed() < target {
+			if time.Now().After(deadline) {
+				t.Fatalf("the persister handled %.0f of %.0f rows in 10m", processed(), target)
+			}
 			time.Sleep(100 * time.Millisecond)
 		}
 		return time.Since(start)
 	}
 
 	base := processed()
+	_, bc0, bs0 := sample("fbs_persist_batch_seconds", map[string]string{"entity": "comment"})
 	start := time.Now()
 	prodNew := produce()
 	wait(base + float64(n))
@@ -294,7 +286,8 @@ func TestLoadPersister(t *testing.T) {
 	prodAgain := produce()
 	wait(base + 2*float64(n))
 	again := time.Since(start)
-	bc, bs := histogram("fbs_persist_batch_seconds", map[string]string{"entity": "comment"})
+	_, bc, bs := sample("fbs_persist_batch_seconds", map[string]string{"entity": "comment"})
+	bc, bs = bc-bc0, bs-bs0
 
 	r := &report{title: fmt.Sprintf("Persister: %d comments", n)}
 	r.add("Machine", "%s", machine())

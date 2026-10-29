@@ -31,12 +31,15 @@ A consumer decodes by `fbs-type`: with the generated code, or with a descriptor 
 `fbctl schemas apply` registers the contract with a Confluent-compatible registry (`kafka.schema_registry.url`). Redpanda's registry, on port 8081, works.
 
 - **Subjects:**
-  - each topic's value schema is registered under `<topic>-value`;
+  - each topic's subject `<topic>-value` holds the whole proto file that declares its value message. For example, `fb.post.v1-value` and `fb.post_metrics.v1-value` both hold `post.proto`. The table above, and each record's `fbs-type` header, say which message a topic carries. Confluent-framed tooling (Connect converters, ksqlDB) cannot decode these records directly: it expects the magic byte and schema id, and by default takes the file's first message;
   - `securebrand/fb/v1/common.proto`, which the other files import, has a subject of its own, and the topic subjects reference it;
   - `google/protobuf/*` imports are the registry's built-in well-known types.
-- **Compatibility:** every subject is set to `BACKWARD_TRANSITIVE`. A consumer built against any earlier version can still read new data, so it can upgrade at its own pace.
+- **Check first, then register:** apply first checks every changed schema against its subject's latest version, and registers nothing unless all pass, so a failed upgrade leaves the registry as it was.
+  - A changed import is staged under a temporary subject (`fbs-check-…`) during the check, so the files importing it are checked against its new content. The temporary subjects are deleted afterwards.
+  - On registration the registry enforces the subject's level against every earlier version.
+- **Compatibility:** a subject without a level of its own is set to `BACKWARD_TRANSITIVE`: a consumer built against any earlier version can still read new data, so it can upgrade at its own pace. A level an operator set on a subject (for a planned migration, say) is kept.
 - **Idempotent:** an unchanged contract registers nothing new.
-- **`fbctl schemas check`** is a dry run. It checks each schema against the subject's latest version.
+- **`fbctl schemas check`** runs only the check. It writes nothing except the temporary subjects.
 
 The registry does not change what is on the wire. It documents the schemas for consumers and refuses breaking changes at deploy time. The Helm hook (`hooks.schemas: true`) runs `fbctl schemas apply` before each upgrade, so an incompatible contract change fails the upgrade before any pod produces it. Docker Compose runs it as the `schemas` service.
 
