@@ -102,14 +102,17 @@ func (s *PostStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 		}
 		res, rep := parse.Comments(resp.Parts, cc)
 		d.GQL.Parsed(resp, rep.OK())
+		if rep.OK() {
+			d.Shadow.CompareComments(query, resp, res, cc)
+		}
 		for _, f := range rep.Optional {
 			metrics.ParseMissingField.WithLabelValues(query, f).Inc()
 		}
 		if !rep.OK() {
-			metrics.ParseTotal.WithLabelValues("comments", "1", "drift").Inc()
+			metrics.ParseTotal.WithLabelValues(query, "1", "drift").Inc()
 			return classOutcome(t, detect.SchemaDrift, fmt.Sprint(rep.Missing), st.Cursor, c)
 		}
-		metrics.ParseTotal.WithLabelValues("comments", "1", "ok").Inc()
+		metrics.ParseTotal.WithLabelValues(query, "1", "ok").Inc()
 		if res.NodeNull && st.Pages == 0 {
 			_ = d.Jobs.UpdatePostState(ctx, t.JobId, sc.PostId, jobs.PostComplete)
 			return done(map[string]int64{"posts_unavailable": 1})
@@ -330,6 +333,9 @@ func (s *ThreadStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 		}
 		res, rep := parse.Comments(resp.Parts, cc)
 		d.GQL.Parsed(resp, rep.OK())
+		if rep.OK() {
+			d.Shadow.CompareComments("replies", resp, res, cc)
+		}
 		if !rep.OK() {
 			metrics.ParseTotal.WithLabelValues("replies", "1", "drift").Inc()
 			return classOutcome(t, detect.SchemaDrift, fmt.Sprint(rep.Missing), st.Cursor, c)

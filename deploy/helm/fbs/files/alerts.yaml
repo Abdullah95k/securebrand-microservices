@@ -21,6 +21,12 @@ groups:
         expr: |
           sum by (query) (rate(fbs_parse_total{outcome="drift"}[15m]))
             / clamp_min(sum by (query) (rate(fbs_parse_total[15m])), 1e-9)
+      # How often each optional field is missing, per parsed response. The
+      # drift baseline compares it with the same series a week earlier.
+      - record: fbs:parse_missing_per_response:rate1h
+        expr: |
+          sum by (query, field) (rate(fbs_parse_missing_field_total[1h]))
+            / on (query) group_left () clamp_min(sum by (query) (rate(fbs_parse_total[1h])), 1e-9)
       - record: fbs:registry_stale_ratio:rate10m
         expr: |
           sum by (query) (rate(fbs_fb_requests_total{class="registry_stale", query!~"registry_sync:.*"}[10m]))
@@ -174,6 +180,37 @@ groups:
           description: >-
             Facebook changed the response shape. Raw failing responses are in
             the raw bucket under raw-failures/<query>/.
+          runbook_url: https://github.com/abdullah95k/securebrand-microservices/blob/main/docs/runbooks/operations.md#schema-drift
+
+      - alert: FbsOptionalFieldDrift
+        # Facebook renamed or dropped a field the parser treats as
+        # optional: nothing fails, but the data loses it silently. Fires
+        # when a field goes missing far more often than a week before, or
+        # goes missing in most responses with no such history.
+        expr: |
+          (
+            fbs:parse_missing_per_response:rate1h > 2 * (fbs:parse_missing_per_response:rate1h offset 7d) + 0.05
+            or (fbs:parse_missing_per_response:rate1h > 0.25 unless (fbs:parse_missing_per_response:rate1h offset 7d))
+          )
+          and on (query) sum by (query) (rate(fbs_parse_total[1h])) > 0.05
+        for: 2h
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.query }}: optional field {{ $labels.field }} missing in {{ $value | humanizePercentage }} of responses"
+          description: >-
+            Compared with a week ago. Look at captured responses (fbctl replay
+            --prefix raw with capture_raw: all, or the fixtures) and add the
+            field's new path to the parser.
+          runbook_url: https://github.com/abdullah95k/securebrand-microservices/blob/main/docs/runbooks/operations.md#schema-drift
+      - alert: FbsShadowParserDiffers
+        expr: |
+          sum by (query) (rate(fbs_parse_shadow_total{outcome!="same"}[1h]))
+            / clamp_min(sum by (query) (rate(fbs_parse_shadow_total[1h])), 1e-9) > 0.01
+        for: 1h
+        labels: {severity: info}
+        annotations:
+          summary: "{{ $labels.query }}: the candidate parser disagrees on {{ $value | humanizePercentage }} of sampled responses"
+          description: The differing responses are captured (raw-failures, vars.shadow); replay them before promoting the candidate.
           runbook_url: https://github.com/abdullah95k/securebrand-microservices/blob/main/docs/runbooks/operations.md#schema-drift
 
   - name: fbs.pipeline

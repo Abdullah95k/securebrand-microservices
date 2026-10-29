@@ -47,7 +47,7 @@ fbs-crawler --stages page ─PostTask─▶ post ─ThreadTask─▶ thread     
 | `fbs-persister` | Writes `fb.*` topics into partitioned Postgres (COPY + no-op upserts) |
 | `fbs-media-downloader` / `fbs-media-janitor` | Temporary media lifecycle ([contract](docs/contracts/media-handoff.md)) |
 | `fbs-registry-sync` | Follows Facebook's doc_id rotations. It scans canary pages' bundles, checks new ids with real requests and promotes working ones ([runbook](docs/runbooks/operations.md#registry-stale-doc_id-rotated)). |
-| `fbctl` | Migrations, topics, Schema Registry, API keys, query registry, DLQ replay, fixture scrub, dev media acks |
+| `fbctl` | Migrations, topics, Schema Registry, API keys, query registry, DLQ replay, raw-response replay against the current parsers, fixture scrub, dev media acks |
 | `fbs-spike` | Phase 0 harness against real Facebook: `phase0` runs everything; also `preflight`, `docids`, `har`, `capture`, `check-fixtures`, `run`, `report` (no infrastructure needed) |
 | `fakefb`, `devs3` | Synthetic Facebook and in-memory S3, for development and tests |
 
@@ -195,7 +195,7 @@ The Helm chart is at `deploy/helm/fbs`.
 - environment variables come from `secretEnv.existingSecret` (DSNs, S3 keys, HMAC key);
 - proxy tiers come from `secretFiles.existingSecret`, a `proxies.yaml` layered over the ConfigMap.
 
-Operational guidance is in [docs/runbooks/operations.md](docs/runbooks/operations.md). Load tests and measured pipeline throughput are in [docs/runbooks/load-testing.md](docs/runbooks/load-testing.md).
+Operational guidance is in [docs/runbooks/operations.md](docs/runbooks/operations.md). Load tests and measured pipeline throughput are in [docs/runbooks/load-testing.md](docs/runbooks/load-testing.md). Proxy cost, how to measure it and the settings that move it are in [docs/runbooks/cost-tuning.md](docs/runbooks/cost-tuning.md).
 
 **Rough sizing** for about 300k pages/day incremental plus 2k new pages/day backfilled to 365 days. These are estimates until Phase 0 measures real numbers.
 

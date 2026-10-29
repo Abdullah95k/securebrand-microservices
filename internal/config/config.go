@@ -147,6 +147,9 @@ type FB struct {
 	AIMD AIMD `koanf:"aimd"`
 	// Browser is the headless-Chromium fallback (internal/fb/browser).
 	Browser Browser `koanf:"browser"`
+	// ShadowRate is the share of responses a registered candidate parser
+	// also parses (internal/crawl/shadow); nothing runs without one.
+	ShadowRate float64 `koanf:"shadow_rate"`
 }
 
 // Browser configures the headless-Chromium fallback: bootstraps of pages

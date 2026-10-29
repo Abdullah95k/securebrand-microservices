@@ -36,21 +36,23 @@ func New(s3 *minio.Client, bucket string) *Sink {
 	return &Sink{s3: s3, bucket: bucket, pod: pod, maxSize: 8 << 20, bufs: map[string]*bytes.Buffer{}}
 }
 
-type line struct {
+// Line is one captured response (one JSONL line of a raw object).
+type Line struct {
 	At    time.Time       `json:"at"`
 	Query string          `json:"query"`
 	Class string          `json:"class"`
+	Vars  map[string]any  `json:"vars,omitempty"`
 	Body  json.RawMessage `json:"body,omitempty"`
 	Text  string          `json:"text,omitempty"`
 }
 
 // Capture buffers one response.
-func (s *Sink) Capture(ctx context.Context, query string, cls detect.Class, body []byte) {
+func (s *Sink) Capture(ctx context.Context, query string, cls detect.Class, body []byte, vars map[string]any) {
 	prefix := "raw"
 	if cls != detect.OK {
 		prefix = "raw-failures"
 	}
-	l := line{At: time.Now().UTC(), Query: query, Class: cls.String()}
+	l := Line{At: time.Now().UTC(), Query: query, Class: cls.String(), Vars: vars}
 	if json.Valid(body) {
 		l.Body = body
 	} else {

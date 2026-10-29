@@ -13,6 +13,7 @@ import (
 
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/parse"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/registry"
+	"github.com/abdullah95k/securebrand-microservices/internal/fixtures"
 )
 
 // HAR import: a browser recording of a logged-out session is the most
@@ -324,7 +325,7 @@ func harFixtures(c HARCapture, seed registry.Seed, root, name string) ([]string,
 	}
 	keep := []string{strconv.FormatInt(pageID, 10)}
 	if pageHTML != nil {
-		d, err := writeFixture(root, "page_html", date+"_"+name, "response.html", pageHTML,
+		d, err := fixtures.Write(root, "page_html", date+"_"+name, "response.html", pageHTML,
 			map[string]any{"page_id": pageID, "source": "har"}, keep)
 		if err != nil {
 			return written, err
@@ -349,7 +350,7 @@ func harFixtures(c HARCapture, seed registry.Seed, root, name string) ([]string,
 			case "replies":
 				meta["post_id"], meta["parent_comment_id"] = post, comment
 			}
-			d, err := writeFixture(root, q.Parser, date+"_"+name, "response.ndjson", op.Body, meta, keep)
+			d, err := fixtures.Write(root, q.Parser, date+"_"+name, "response.ndjson", op.Body, meta, keep)
 			if err != nil {
 				return written, err
 			}

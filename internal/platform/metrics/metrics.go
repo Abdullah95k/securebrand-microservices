@@ -51,6 +51,7 @@ var (
 	// Parsing.
 	ParseTotal        = counterVec("parse_total", "Parser runs by outcome.", "query", "parser_version", "outcome")
 	ParseMissingField = counterVec("parse_missing_field_total", "Optional or required fields missing from responses.", "query", "field")
+	ParseShadow       = counterVec("parse_shadow_total", "Responses a candidate (shadow) parser also parsed, by outcome (same, differs, drift).", "query", "outcome")
 
 	// Identities.
 	IdentityActive  = gaugeVec("identity_active", "Live identities in this pod.", "tier")

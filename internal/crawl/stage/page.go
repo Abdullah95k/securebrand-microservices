@@ -181,6 +181,9 @@ func (s *PageStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 		}
 		tl, rep := parse.Timeline(resp.Parts, sc.PageId, id.Base.String())
 		d.GQL.Parsed(resp, rep.OK())
+		if rep.OK() {
+			d.Shadow.CompareTimeline("timeline", resp, tl, sc.PageId, id.Base.String())
+		}
 		for _, f := range rep.Optional {
 			metrics.ParseMissingField.WithLabelValues("timeline", f).Inc()
 		}

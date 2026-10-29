@@ -19,6 +19,7 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/checkpoint"
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/emit"
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/jobs"
+	"github.com/abdullah95k/securebrand-microservices/internal/crawl/shadow"
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/task"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/detect"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/graphql"
@@ -42,7 +43,9 @@ type Deps struct {
 	Ckpt        *checkpoint.Store
 	DB          *pgxpool.Pool // crawl_cursors; nil disables watermarks
 	Suppression *gdpr.Suppression
-	Now         func() time.Time
+	// Shadow runs candidate parsers on a sample of responses; nil = none.
+	Shadow *shadow.Set
+	Now    func() time.Time
 }
 
 func (d *Deps) now() time.Time {
