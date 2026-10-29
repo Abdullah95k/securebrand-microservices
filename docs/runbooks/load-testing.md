@@ -61,10 +61,11 @@ Both check that restarts lose nothing and that the store ends up exactly like th
   3. No job may be left in the finalize set, no seen list in Redis, and goroutines must not have grown.
 - **Report:** `FBS_SOAK_OUT=file.md` writes the report.
 
-A 5-minute run on this container (4 pages, a restart every 40s), from `FBS_SOAK_DURATION=5m FBS_SOAK_PAGES=4 FBS_SOAK_RESTART_EVERY=40s make soak`:
-- 41 jobs; 95 changes, including 18 deletions and 16 edits; 7 restarts;
-- 41 comments marked deleted (the 18 deletions and their replies); 14 of the 16 edits counted. The other two edits came before the comment was first stored;
-- goroutines between 189 and 309, heap at most 63 MB.
+A 6-minute run on this container (4 pages, a restart every 40s), from `FBS_SOAK_DURATION=6m FBS_SOAK_PAGES=4 FBS_SOAK_RESTART_EVERY=40s make soak`:
+- 48 jobs; 133 changes, including 27 deletions and 25 edits; 8 restarts;
+- 59 comments marked deleted: the 27 deletions and their replies;
+- edits counted on 19 of the 22 edited comments that are still up. The other edits came before the comment was first stored;
+- goroutines between 190 and 324, heap at most 66 MB.
 
 **What these tests found, all fixed:**
 - **Lost tasks:** a crawler that hit its drain timeout committed the offsets of the tasks it abandoned, so those tasks were lost and their jobs never finished. Abandoned records are now left for the partition's next owner.
