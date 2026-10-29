@@ -35,6 +35,7 @@ type laneState struct {
 	Lane
 	used    int
 	waiters list.List // of chan struct{}
+	min0    *int      // configured Min, kept across SetMax
 }
 
 // New returns a scheduler with total slots and lanes in priority order
@@ -127,6 +128,21 @@ func (s *Scheduler) changed(l *laneState) {
 	if s.OnChange != nil {
 		s.OnChange(l.Name, l.used, l.waiters.Len())
 	}
+}
+
+// SetMax changes a lane's cap; 0 pauses the lane (its minimum is ignored
+// while paused). Tasks already running are not interrupted.
+func (s *Scheduler) SetMax(lane, n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	l := s.lanes[lane]
+	if l.min0 == nil {
+		m := l.Min
+		l.min0 = &m
+	}
+	l.Max = min(max(0, n), s.total)
+	l.Min = min(*l.min0, l.Max)
+	s.dispatch()
 }
 
 // Stats is a lane's current use.

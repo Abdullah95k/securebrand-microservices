@@ -186,6 +186,63 @@ type Scheduler struct {
 	ReaperAfter          time.Duration `koanf:"reaper_after"`
 	PartitionMonthsAhead int           `koanf:"partition_months_ahead"`
 	IncrementalOverlap   time.Duration `koanf:"incremental_overlap"`
+	// Adaptive tiers: pages registered without an explicit interval move
+	// between Tiers (highest MinPostsPerDay first) by their posting rate
+	// over RateWindow; pages without a post for DormantAfter use
+	// DormantInterval.
+	Tiers           []Tier        `koanf:"tiers"`
+	RateWindow      time.Duration `koanf:"rate_window"`
+	DormantAfter    time.Duration `koanf:"dormant_after"`
+	DormantInterval time.Duration `koanf:"dormant_interval"`
+	PostRefresh     PostRefresh   `koanf:"post_refresh"`
+	Budget          Budget        `koanf:"budget"`
+}
+
+// Tier is one adaptive scheduling tier.
+type Tier struct {
+	Name           string        `koanf:"name"`
+	MinPostsPerDay float64       `koanf:"min_posts_per_day"`
+	Interval       time.Duration `koanf:"interval"`
+}
+
+// PostRefresh re-reads the comments of posts older than the timeline
+// overlap, on the page's scheduled jobs.
+type PostRefresh struct {
+	Enabled bool `koanf:"enabled"`
+	// Windows by post age (ascending MaxAge): how often to refresh. A window
+	// with Tiers only applies to pages in those tiers. Posts older than the
+	// last window are no longer refreshed.
+	Windows []RefreshWindow `koanf:"windows"`
+	// MaxPerJob caps the post refreshes added to one page job.
+	MaxPerJob int `koanf:"max_per_job"`
+	// MaxBackoff caps the doubling of the interval after refreshes that
+	// found nothing new (2^MaxBackoff).
+	MaxBackoff int `koanf:"max_backoff"`
+	// Recrawl posts with at least RecrawlMinComments comments in full when
+	// they reach each age in RecrawlAt, to pick up edits and deletions.
+	RecrawlAt          []time.Duration `koanf:"recrawl_at"`
+	RecrawlMinComments int64           `koanf:"recrawl_min_comments"`
+}
+
+// RefreshWindow is one post-age band.
+type RefreshWindow struct {
+	MaxAge   time.Duration `koanf:"max_age"`
+	Interval time.Duration `koanf:"interval"`
+	Tiers    []string      `koanf:"tiers"`
+}
+
+// Budget bounds daily Facebook traffic fleet-wide. When the day's
+// projected use exceeds it, backfill (p2) pauses first; if scheduled and
+// on-demand work alone would still exceed it, the slower tiers' intervals
+// are stretched. On-demand (p0) work is never held back.
+type Budget struct {
+	Enabled        bool          `koanf:"enabled"`
+	RequestsPerDay int64         `koanf:"requests_per_day"` // 0 = no request budget
+	BytesPerDay    int64         `koanf:"bytes_per_day"`    // 0 = no traffic budget
+	Interval       time.Duration `koanf:"interval"`
+	Stretch        float64       `koanf:"stretch"`         // interval factor for StretchTiers
+	StretchTiers   []string      `koanf:"stretch_tiers"`   // slowest first
+	ProjectionSpan time.Duration `koanf:"projection_span"` // recent use the projection extrapolates
 }
 
 type Media struct {
@@ -202,7 +259,9 @@ type Media struct {
 
 type API struct {
 	MaxRunningP0JobsPerClient int `koanf:"max_running_p0_jobs_per_client"`
-	DefaultRatePerMinute      int `koanf:"default_rate_per_minute"`
+	// MaxRunningP0Jobs caps on-demand jobs running fleet-wide (0 = no cap).
+	MaxRunningP0Jobs     int `koanf:"max_running_p0_jobs"`
+	DefaultRatePerMinute int `koanf:"default_rate_per_minute"`
 }
 
 type Privacy struct {
@@ -267,6 +326,26 @@ func (c *Config) Validate() error {
 	}
 	if c.Media.TTL <= 0 {
 		errs = append(errs, errors.New("media.ttl must be > 0"))
+	}
+	if c.Scheduler.DefaultInterval <= 0 {
+		errs = append(errs, errors.New("scheduler.default_interval must be > 0"))
+	}
+	if c.Scheduler.DormantAfter > 0 && c.Scheduler.DormantInterval <= 0 {
+		errs = append(errs, errors.New("scheduler.dormant_interval must be > 0 when dormant_after is set"))
+	}
+	for i, t := range c.Scheduler.Tiers {
+		if t.Name == "" || t.Interval <= 0 {
+			errs = append(errs, fmt.Errorf("scheduler.tiers[%d] needs a name and an interval", i))
+		}
+		if i > 0 && t.MinPostsPerDay > c.Scheduler.Tiers[i-1].MinPostsPerDay {
+			errs = append(errs, errors.New("scheduler.tiers must be ordered by min_posts_per_day, highest first"))
+		}
+	}
+	for i, w := range c.Scheduler.PostRefresh.Windows {
+		if w.Interval <= 0 || (i > 0 && w.MaxAge <= c.Scheduler.PostRefresh.Windows[i-1].MaxAge) {
+			errs = append(errs, errors.New("scheduler.post_refresh.windows need intervals and ascending max_age"))
+			break
+		}
 	}
 	return errors.Join(errs...)
 }

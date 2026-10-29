@@ -21,6 +21,7 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/parse"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/kafka"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/metrics"
+	"github.com/abdullah95k/securebrand-microservices/internal/topics"
 )
 
 // incrementalOlderStop: newest-first incremental reads stop after this many
@@ -43,7 +44,7 @@ func (s *PostStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 		return retry(t, "", "30s", "no identity: "+err.Error(), c)
 	}
 	defer d.Pool.Release(id)
-	if pl, err := d.ensureBootstrapped(ctx, id, sc.PageId); err != nil {
+	if pl, err := d.ensureBootstrapped(ctx, id, sc.PageId, t.Lane); err != nil {
 		if pl != nil {
 			return classOutcome(t, pl.Class, pl.Reason, t.Cursor, c)
 		}
@@ -84,7 +85,7 @@ func (s *PostStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 			vars["cursor"] = st.Cursor
 		}
 		resp, err := d.GQL.Do(ctx, id, graphql.Request{Query: query, Vars: vars, PageID: sc.PageId,
-			Fast: t.Lane == taskv1.Lane_LANE_P0, Referer: sc.Permalink})
+			Fast: t.Lane == taskv1.Lane_LANE_P0, Lane: topics.LaneName(t.Lane), Referer: sc.Permalink})
 		c["requests"]++
 		if err != nil {
 			return retry(t, st.Cursor, "30s", err.Error(), c)
@@ -279,7 +280,7 @@ func (s *ThreadStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 		return retry(t, "", "30s", "no identity: "+err.Error(), c)
 	}
 	defer d.Pool.Release(id)
-	if pl, err := d.ensureBootstrapped(ctx, id, sc.PageId); err != nil {
+	if pl, err := d.ensureBootstrapped(ctx, id, sc.PageId, t.Lane); err != nil {
 		if pl != nil {
 			return classOutcome(t, pl.Class, pl.Reason, t.Cursor, c)
 		}
@@ -312,7 +313,7 @@ func (s *ThreadStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 			vars["cursor"] = st.Cursor
 		}
 		resp, err := d.GQL.Do(ctx, id, graphql.Request{Query: "replies", Vars: vars, PageID: sc.PageId,
-			Fast: t.Lane == taskv1.Lane_LANE_P0})
+			Fast: t.Lane == taskv1.Lane_LANE_P0, Lane: topics.LaneName(t.Lane)})
 		c["requests"]++
 		if err != nil {
 			return retry(t, st.Cursor, "30s", err.Error(), c)

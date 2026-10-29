@@ -18,6 +18,7 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/jobs"
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/task"
 	"github.com/abdullah95k/securebrand-microservices/internal/dispatch"
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/ratelimit"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/kafka"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/metrics"
 	"github.com/abdullah95k/securebrand-microservices/internal/store"
@@ -42,15 +43,23 @@ func Every(ctx context.Context, name string, interval time.Duration, fn func(con
 	}
 }
 
-// Planner enqueues scheduled re-scrapes of registered pages.
+// Planner enqueues scheduled re-scrapes of registered pages, with the
+// page's due post comment refreshes riding on the same job.
 type Planner struct {
 	DB       *pgxpool.Pool
 	Dispatch *dispatch.Dispatcher
 	Cfg      *config.Config
+	// Adaptive supplies post refreshes; nil disables them.
+	Adaptive *Adaptive
+	// Budget, when set, returns the traffic budget state: its stretch
+	// lengthens the slow tiers' intervals.
+	Budget func(context.Context) ratelimit.BudgetState
 }
 
 type due struct {
 	ref      string
+	pageID   *int64
+	tier     string
 	options  []byte
 	maxAge   *int
 	maxPosts *int64
@@ -59,6 +68,12 @@ type due struct {
 
 func (p *Planner) Tick(ctx context.Context) error {
 	jitter := p.Cfg.Scheduler.Jitter
+	stretch, stretchTiers := 1.0, []string{}
+	if p.Budget != nil {
+		if st := p.Budget(ctx); st.Stretch > 1 {
+			stretch, stretchTiers = st.Stretch, st.StretchTiers
+		}
+	}
 	rows, err := p.DB.Query(ctx, `
 		WITH d AS (
 			SELECT page_ref FROM page_schedule
@@ -68,16 +83,18 @@ func (p *Planner) Tick(ctx context.Context) error {
 		UPDATE page_schedule s SET
 			next_run_at = now() + make_interval(secs => s.interval_seconds
 				* least(power(2, s.consecutive_failures), 2592000.0 / s.interval_seconds)
+				* CASE WHEN s.tier = ANY($3::text[]) THEN $4::float8 ELSE 1.0 END
 				* (1 + (random() * 2 - 1) * $2)),
 			last_run_at = now()
 		FROM d WHERE s.page_ref = d.page_ref
-		RETURNING s.page_ref, s.options, s.max_age_days, s.max_posts, s.last_job_id`, p.Cfg.Scheduler.PlannerBatch, jitter)
+		RETURNING s.page_ref, s.page_id, s.tier, s.options, s.max_age_days, s.max_posts, s.last_job_id`,
+		p.Cfg.Scheduler.PlannerBatch, jitter, stretchTiers, stretch)
 	if err != nil {
 		return err
 	}
 	list, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (due, error) {
 		var d due
-		return d, r.Scan(&d.ref, &d.options, &d.maxAge, &d.maxPosts, &d.lastJob)
+		return d, r.Scan(&d.ref, &d.pageID, &d.tier, &d.options, &d.maxAge, &d.maxPosts, &d.lastJob)
 	})
 	if err != nil {
 		return err
@@ -102,11 +119,22 @@ func (p *Planner) Tick(ctx context.Context) error {
 		if d.maxPosts != nil {
 			lim.MaxPosts = *d.maxPosts
 		}
+		var posts []dispatch.PostRoot
+		commit := func(context.Context) error { return nil }
+		if p.Adaptive != nil && d.pageID != nil && lim.IncludeComments {
+			if posts, commit, err = p.Adaptive.DueRefreshes(ctx, *d.pageID, d.tier); err != nil {
+				slog.Warn("planner: post refreshes", "page", d.ref, "err", err)
+				posts, commit = nil, func(context.Context) error { return nil }
+			}
+		}
 		j, _, err := p.Dispatch.Create(ctx, dispatch.Request{Kind: dispatch.KindScheduled, Lane: taskv1.Lane_LANE_P1,
-			Mode: "incremental", PageRef: d.ref, Limits: lim}, 0)
+			Mode: "incremental", PageRef: d.ref, Limits: lim, Posts: posts}, 0)
 		if err != nil {
 			slog.Warn("planner: dispatch failed", "page", d.ref, "err", err)
-			continue
+			continue // the refreshes stay due
+		}
+		if err := commit(ctx); err != nil {
+			slog.Warn("planner: post refreshes not recorded", "page", d.ref, "err", err)
 		}
 		if _, err := p.DB.Exec(ctx, `UPDATE page_schedule SET last_job_id = $2 WHERE page_ref = $1`, d.ref, j.ID); err != nil {
 			return err
@@ -117,6 +145,29 @@ func (p *Planner) Tick(ctx context.Context) error {
 		WHERE enabled AND next_run_at <= now()`).Scan(&lag)
 	metrics.ScheduleLag.WithLabelValues("all").Set(math.Max(lag, 0))
 	return nil
+}
+
+// TierGauges publishes the number of scheduled pages and the schedule lag
+// per tier.
+func (p *Planner) TierGauges(ctx context.Context) error {
+	rows, err := p.DB.Query(ctx, `SELECT tier, count(*),
+			coalesce(extract(epoch FROM now() - min(next_run_at) FILTER (WHERE next_run_at <= now())), 0)
+		FROM page_schedule WHERE enabled GROUP BY tier`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var tier string
+		var n int64
+		var lag float64
+		if err := rows.Scan(&tier, &n, &lag); err != nil {
+			return err
+		}
+		metrics.PageTier.WithLabelValues(tier).Set(float64(n))
+		metrics.ScheduleLag.WithLabelValues(tier).Set(math.Max(lag, 0))
+	}
+	return rows.Err()
 }
 
 // applyOptions overlays stored per-page options (API CrawlOptions JSON).
@@ -274,6 +325,14 @@ func (m *Maintenance) Tick(ctx context.Context) error {
 		if _, err := m.DB.Exec(ctx, s.q, s.days); err != nil {
 			return err
 		}
+	}
+	// Refresh rows of posts past every refresh window and recrawl age, and
+	// of pages no longer scheduled.
+	if _, err := m.DB.Exec(ctx, `DELETE FROM post_refresh WHERE post_id IN (SELECT r.post_id FROM post_refresh r
+		LEFT JOIN page_schedule s ON s.page_id = r.page_id AND s.enabled
+		WHERE r.post_created_at < $1 OR s.page_id IS NULL LIMIT 20000)`,
+		now.Add(-maxRefreshAge(m.Cfg.Scheduler.PostRefresh)-24*time.Hour)); err != nil {
+		return err
 	}
 	return nil
 }

@@ -12,6 +12,8 @@ All metric names start with `fbs_`.
 | Fleet ceiling | `fbs_aimd_ceiling_rps`, `fbs_fleet_rps`, `fbs_aimd_adjustments_total{direction}` | ceiling stable or rising; `fleet_rps` close to it when there is backlog |
 | Breakers | `fbs_breaker_state{name="proxy:..."}`, `{name="query:..."}` (2 = open), `fbs_fb_query_short_circuit_total` | all 0 |
 | Lanes | `fbs_lane_slots{stage,lane,state}` | `waiting` on p0 ≈ 0 |
+| Schedule | `fbs_scheduled_pages{tier}`, `fbs_schedule_lag_seconds{tier}`, `fbs_post_refreshes_total{kind}` | lag < tier interval |
+| Budget | `fbs_budget_used{kind,lane}`, `fbs_budget_projected{kind}`, `fbs_budget_limit{kind}`, `fbs_budget_backfill_paused`, `fbs_budget_stretch` | projected < limit |
 | Parser health | `fbs_parse_total{outcome="drift"}`, `fbs_parse_missing_field_total` | drift ≈ 0 |
 | Coverage | `fbs_comment_completeness_ratio` | median at the Phase 0 baseline |
 | Truncation | `fbs_timeline_truncated_total` | flat |
@@ -107,3 +109,60 @@ raw payloads age out by retention (7 days).
 The reaper marks jobs `partial` after `scheduler.reaper_after` (30m) without
 activity, or `failed` when their accounting state is gone. Inspect the DLQ
 and `GET /v1/jobs/{id}` counters.
+
+## Schedule and tiers
+
+Pages registered without `schedule.interval_hours` are scheduled adaptively.
+
+- **When the tier is set:** after every job, the page's posting rate over `scheduler.rate_window` (14 days) picks its tier. If the stored history is shorter, the rate uses that span, with a 1-day floor.
+
+| Tier | Posts per day | Interval |
+|---|---|---|
+| T0 | ≥ 10 | 3h |
+| T1 | ≥ 1 | 12h |
+| T2 | weekly or more | 24h |
+| T3 | less than weekly | 72h |
+| T4 | no post for 90 days | 7d |
+
+- **What a tier change does:** a faster tier pulls the next run forward; a slower one takes effect after the run already planned.
+- **Failing pages** still back off exponentially, up to 30 days.
+- **Turning it off:** a page registered or patched with `interval_hours` keeps that interval (`adaptive: false`). `PATCH /v1/pages/{page}` with `{"adaptive": true}` hands it back to the tiers.
+- **Inspect:** `GET /v1/pages/{page}` shows `tier`, `posts_per_day`, `last_post_at` and `adaptive`.
+
+## Comment refresh of older posts
+
+The timeline scan re-reads posts younger than `scheduler.incremental_overlap` (24h). Older posts are registered in `post_refresh` after each job and ride on the page's next scheduled job as extra post tasks, at most `post_refresh.max_per_job` (50) per job.
+
+**What a refresh reads:** comments newest-first, stopping at the first one already stored, so an unchanged post costs one request.
+
+**How often:**
+
+| Post age | Interval |
+|---|---|
+| up to 7 days | 24h |
+| 7–14 days | 72h |
+| 14–30 days | 7d, T0/T1 pages only |
+
+- **Backoff:** each refresh that finds nothing new doubles the post's interval, up to 2^`max_backoff`.
+- **Recrawls:** posts with at least `recrawl_min_comments` (20) comments get a full recrawl at 7 and 30 days, to pick up edits.
+- **Signal:** `fbs_post_refreshes_total{kind="refresh"|"recrawl"}`.
+- **Cleanup:** rows of posts past every window, and of pages no longer scheduled, are deleted hourly.
+
+## Daily budget
+
+`scheduler.budget.requests_per_day` and `bytes_per_day` bound Facebook traffic fleet-wide per UTC day. 0 means unlimited, the default; set them from the Phase 0 cost projection.
+
+**Every minute the leader:**
+1. Adds today's use (`fbs_budget_used`) to the last hour's rate extrapolated to midnight (`fbs_budget_projected`).
+2. If that exceeds the budget, backfill (p2) pauses (`fbs_budget_backfill_paused` = 1). Crawlers close the p2 lane within 15s; queued backfill waits in Kafka.
+3. If on-demand plus scheduled traffic alone would exceed it, the `stretch_tiers` (T4, T3, T2) intervals are multiplied by `stretch` (2) for the runs planned next (`fbs_budget_stretch`).
+4. On-demand (p0) traffic is never held back.
+
+Backfill resumes, and the stretch lifts, only when the projection is 5% under the budget. Each new day starts from zero.
+
+## On-demand admission
+
+`POST /v1/jobs` answers `429` with `Retry-After` when:
+- the client already runs `api.max_running_p0_jobs_per_client` (50) on-demand jobs; or
+- the fleet runs `api.max_running_p0_jobs`. That cap is 0 (off) by default; set it to what the crawler fleet can serve within the p0 SLO.
+

@@ -182,3 +182,21 @@ func TestStress(t *testing.T) {
 		}
 	}
 }
+
+func TestSetMaxPausesAndResumes(t *testing.T) {
+	s := New(4, Lane{Name: "p0", Max: 4}, Lane{Name: "p2", Max: 2, Min: 1})
+	ctx := context.Background()
+	s.SetMax(1, 0)
+	var g atomic.Int64
+	hold(t, ctx, s, 1, 2, &g)
+	waitFor(t, "waiters", func() bool { return s.Stats()[1].Waiting == 2 })
+	time.Sleep(10 * time.Millisecond)
+	if g.Load() != 0 {
+		t.Fatal("a paused lane gets no slots, not even its minimum")
+	}
+	s.SetMax(1, 2)
+	waitFor(t, "resumed", func() bool { return g.Load() == 2 })
+	if st := s.Stats()[1]; st.Used != 2 || s.lanes[1].Min != 1 {
+		t.Fatalf("%+v min=%d", st, s.lanes[1].Min)
+	}
+}

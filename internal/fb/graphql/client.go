@@ -32,6 +32,7 @@ type Request struct {
 	PageID  int64          // fleet-wide per-page limit key; 0 = none
 	Fast    bool           // p0 per-page rate
 	Referer string
+	Lane    string // p0 | p1 | p2, for the traffic budget
 }
 
 // Response is the decoded result.
@@ -62,9 +63,12 @@ type Client struct {
 	Raw            RawSink
 	CaptureAll     bool
 	// Ceiling, when set, replaces GlobalRPS with the fleet ceiling AIMD
-	// publishes; Outcomes receives every response class for it.
+	// publishes; Outcomes receives every response (class, lane, wire
+	// bytes) for AIMD and the traffic budget.
 	Ceiling  interface{ RPS() int }
-	Outcomes interface{ Observe(detect.Class) }
+	Outcomes interface {
+		Observe(c detect.Class, lane string, wireBytes int64)
+	}
 	// Breakers short-circuit a (query, doc_id) whose responses keep being
 	// rejected or failing to parse, so a Facebook change does not turn into
 	// a wave of wasted requests. nil disables them.
@@ -158,6 +162,9 @@ func (c *Client) do(ctx context.Context, id *session.Identity, q registry.Query,
 	metrics.FBRequestSecs.WithLabelValues(q.Name, tier).Observe(elapsed.Seconds())
 	if err != nil {
 		session.Outcome(id, detect.Transport)
+		if c.Outcomes != nil {
+			c.Outcomes.Observe(detect.Transport, req.Lane, int64(len(body))) // the request went out
+		}
 		metrics.FBRequests.WithLabelValues(q.Name, detect.Transport.String(), tier).Inc()
 		return nil, fmt.Errorf("%w: %w", ErrTransport, err)
 	}
@@ -174,7 +181,7 @@ func (c *Client) do(ctx context.Context, id *session.Identity, q registry.Query,
 	}
 	session.Outcome(id, cls)
 	if c.Outcomes != nil {
-		c.Outcomes.Observe(cls)
+		c.Outcomes.Observe(cls, req.Lane, tr.BytesIn+tr.BytesOut)
 	}
 	metrics.FBRequests.WithLabelValues(q.Name, cls.String(), tier).Inc()
 	if c.Raw != nil && (c.CaptureAll || cls != detect.OK) {

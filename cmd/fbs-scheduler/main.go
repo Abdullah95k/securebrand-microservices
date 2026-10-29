@@ -59,15 +59,33 @@ func runScheduler(ctx context.Context, cfg *config.Config) error {
 	}
 	tracker := jobs.New(rdb)
 	disp := &dispatch.Dispatcher{DB: db, Jobs: tracker, Producer: producer, BaseURL: cfg.FB.BaseURL}
-	fin := &scheduler.Finalizer{DB: db, Jobs: tracker, Producer: producer, Timeout: cfg.Scheduler.FinalizeTimeout}
-	planner := &scheduler.Planner{DB: db, Dispatch: disp, Cfg: cfg}
+	adaptive := &scheduler.Adaptive{DB: db, Cfg: cfg}
+	fin := &scheduler.Finalizer{DB: db, Jobs: tracker, Producer: producer, Timeout: cfg.Scheduler.FinalizeTimeout, Adaptive: adaptive}
+	planner := &scheduler.Planner{DB: db, Dispatch: disp, Cfg: cfg, Adaptive: adaptive}
 	reaper := &scheduler.Reaper{DB: db, Jobs: tracker, Producer: producer, After: cfg.Scheduler.ReaperAfter}
 	maint := &scheduler.Maintenance{DB: db, Cfg: cfg}
 	eraser := &gdpr.Eraser{DB: db, S3: s3, Producer: producer}
 
 	ops := httpserver.NewOps(cfg.HTTP.OpsAddr)
 	ops.AddCheck("postgres", db.Ping)
-	leaderLoops := []run.Func{}
+	leaderLoops := []run.Func{
+		func(ctx context.Context) error {
+			return scheduler.Every(ctx, "tier-gauges", 5*time.Minute, planner.TierGauges)
+		},
+	}
+	if b := cfg.Scheduler.Budget; b.Enabled && (b.RequestsPerDay > 0 || b.BytesPerDay > 0) {
+		budget := ratelimit.NewBudgetController(rdb, cfg.Kafka.TopicPrefix, b)
+		planner.Budget = func(ctx context.Context) ratelimit.BudgetState {
+			st, err := ratelimit.LoadBudgetState(ctx, rdb, cfg.Kafka.TopicPrefix)
+			if err != nil {
+				slog.Warn("planner: budget state", "err", err)
+			}
+			return st
+		}
+		leaderLoops = append(leaderLoops, func(ctx context.Context) error {
+			return scheduler.Every(ctx, "budget", b.Interval, budget.Tick)
+		})
+	}
 	if cfg.FB.AIMD.Enabled {
 		aimd := ratelimit.NewController(rdb, cfg.Kafka.TopicPrefix, cfg.FB.AIMD, cfg.FB.GlobalRPS)
 		leaderLoops = append(leaderLoops, func(ctx context.Context) error {

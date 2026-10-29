@@ -101,10 +101,16 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	j, created, err := s.Dispatch.Create(r.Context(), dispatch.Request{
 		ClientID: &c.ID, Kind: dispatch.KindOnDemand, Lane: taskv1.Lane_LANE_P0, Mode: req.Mode, PageRef: ref,
 		Limits: lim, IdempotencyKey: r.Header.Get("Idempotency-Key"), Params: map[string]any{"page": req.Page},
+		MaxRunningInLane: s.Cfg.API.MaxRunningP0Jobs,
 	}, s.Cfg.API.MaxRunningP0JobsPerClient)
 	switch {
 	case errors.Is(err, dispatch.ErrTooManyJobs):
+		w.Header().Set("Retry-After", "30")
 		problem(w, http.StatusTooManyRequests, "too many running jobs", err.Error())
+		return
+	case errors.Is(err, dispatch.ErrLaneFull):
+		w.Header().Set("Retry-After", "30")
+		problem(w, http.StatusTooManyRequests, "on-demand capacity reached", err.Error())
 		return
 	case err != nil:
 		serverError(w, err)

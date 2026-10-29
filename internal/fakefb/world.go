@@ -389,6 +389,27 @@ func (w *World) Mutate(pageID int64, newPosts, newCommentsOnLatest int) error {
 	return nil
 }
 
+// AddComments adds n new top-level comments to post postID, as if people
+// kept commenting on an older post.
+func (w *World) AddComments(postID int64, n int) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, p := range w.pages {
+		for _, post := range p.Posts {
+			if post.ID != postID {
+				continue
+			}
+			at := time.Now().UTC()
+			for i := 0; i < n; i++ {
+				at = at.Add(time.Second)
+				post.Comments = append(post.Comments, w.newComment(post, nil, at))
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("fakefb: no post %d", postID)
+}
+
 func countAll(cs []*Comment) int {
 	n := 0
 	for _, c := range cs {

@@ -314,10 +314,11 @@ func TestBlockedIdentitiesRetryAndTruncation(t *testing.T) {
 	if j.Status != "completed" || got != want {
 		t.Fatalf("blocked run did not recover: status=%s comments=%d/%d", j.Status, got, want)
 	}
-	// The crawlers reported every response, rate limits included, to the
-	// fleet windows AIMD reads: the counts match what fakefb served. (How
-	// AIMD moves the ceiling from them is unit tested; whether one 10s
-	// window holds enough blocks to move it depends on timing here.)
+	// The crawlers reported every GraphQL response, rate limits included,
+	// to the fleet windows AIMD reads (page loads count too, so the windows
+	// hold at least what fakefb served over GraphQL). How AIMD moves the
+	// ceiling from them is unit tested; whether one 10s window holds enough
+	// blocks to move it depends on timing here.
 	ctx := context.Background()
 	stats := s.Fake.Stats()
 	served := 0
@@ -337,13 +338,13 @@ func TestBlockedIdentitiesRetryAndTruncation(t *testing.T) {
 		if err := iter.Err(); err != nil {
 			t.Fatal(err)
 		}
-		if (total == int64(served) && blocked == int64(stats.RateLimited)) || time.Now().After(deadline) {
+		if (total >= int64(served) && blocked == int64(stats.RateLimited)) || time.Now().After(deadline) {
 			break
 		}
 	}
-	t.Logf("fleet windows: %d responses, %d blocked; fakefb served %d, %d rate limited", total, blocked, served, stats.RateLimited)
-	if total != int64(served) || blocked != int64(stats.RateLimited) {
-		t.Fatalf("AIMD windows do not match what fakefb served")
+	t.Logf("fleet windows: %d responses, %d blocked; fakefb served %d GraphQL responses, %d rate limited", total, blocked, served, stats.RateLimited)
+	if total < int64(served) || blocked != int64(stats.RateLimited) {
+		t.Fatalf("AIMD windows do not hold what fakefb served")
 	}
 }
 

@@ -38,3 +38,29 @@ func TestValidate(t *testing.T) {
 		t.Fatal("prod with the dev HMAC key must be rejected")
 	}
 }
+
+func TestSchedulingDefaults(t *testing.T) {
+	c, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := c.Scheduler
+	if len(s.Tiers) != 4 || s.Tiers[0].Name != "T0" || s.Tiers[0].Interval != 3*time.Hour || s.Tiers[2].MinPostsPerDay < 0.14 {
+		t.Fatalf("tiers: %+v", s.Tiers)
+	}
+	if s.DormantAfter != 90*24*time.Hour || s.RateWindow != 14*24*time.Hour {
+		t.Fatalf("dormancy: %+v", s)
+	}
+	pr := s.PostRefresh
+	if !pr.Enabled || len(pr.Windows) != 3 || pr.Windows[2].MaxAge != 30*24*time.Hour || len(pr.Windows[2].Tiers) != 2 ||
+		len(pr.RecrawlAt) != 2 || pr.RecrawlMinComments != 20 {
+		t.Fatalf("post refresh: %+v", pr)
+	}
+	if !s.Budget.Enabled || s.Budget.Stretch != 2 || len(s.Budget.StretchTiers) != 3 {
+		t.Fatalf("budget: %+v", s.Budget)
+	}
+	c.Scheduler.Tiers[1].MinPostsPerDay = 50
+	if err := c.Validate(); err == nil {
+		t.Fatal("unordered tiers must fail validation")
+	}
+}
