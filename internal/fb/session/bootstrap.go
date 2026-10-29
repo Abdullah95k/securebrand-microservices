@@ -26,11 +26,26 @@ type PageLoad struct {
 // ErrBootstrap means no usable tokens could be obtained.
 var ErrBootstrap = errors.New("session: bootstrap failed")
 
+// BrowserFallback renders a page in a real browser for an identity whose
+// HTML load carried no tokens (a page that needs JavaScript first), and
+// installs the cookies and tokens it found. Observe counts the HTTP loads
+// the fallback's share cap is measured against. A non-nil PageLoad means a
+// render happened and its outcome is already recorded on the identity; a
+// nil one (capped, busy, no browser) leaves the HTTP load's outcome to the
+// caller.
+type BrowserFallback interface {
+	Observe()
+	Bootstrap(ctx context.Context, id *Identity, rawURL string) (*PageLoad, error)
+}
+
 // Loader loads Facebook HTML pages for an identity and refreshes its tokens
 // from them. Every page load doubles as a bootstrap.
 type Loader struct {
 	Rules          detect.Rules
 	AcceptLanguage string
+	// Browser, when set, bootstraps identities whose HTML carries no
+	// tokens (fb.browser).
+	Browser BrowserFallback
 }
 
 // NavHeaders are Chrome's top-level navigation headers, in wire order.
@@ -84,6 +99,9 @@ func (l *Loader) Load(ctx context.Context, id *Identity, rawURL string) (*PageLo
 		cls, reason := l.Rules.Classify(detect.Input{Status: resp.Status, Location: resp.Location,
 			ContentType: resp.Header.Get("Content-Type"), Body: resp.Body, Expect: "html"})
 		metrics.FBRequests.WithLabelValues("page_html", cls.String(), id.Endpoint.Tier).Inc()
+		if l.Browser != nil {
+			l.Browser.Observe()
+		}
 		pl := &PageLoad{URL: target, Status: resp.Status, HTML: resp.Body, Class: cls, Reason: reason, Bytes: total}
 		if cls != detect.OK {
 			Outcome(id, cls)
@@ -100,9 +118,22 @@ func (l *Loader) Load(ctx context.Context, id *Identity, rawURL string) (*PageLo
 			}
 		}
 		if !tok.Valid() {
-			Outcome(id, detect.SoftError)
 			metrics.Bootstraps.WithLabelValues("http", "no_tokens").Inc()
-			pl.Class, pl.Reason = detect.SoftError, "no tokens in html"
+			if l.Browser != nil {
+				bpl, err := l.Browser.Bootstrap(ctx, id, target)
+				if bpl != nil {
+					bpl.Bytes += total
+					return bpl, nil
+				}
+				if err != nil {
+					pl.Reason = "no tokens in html; browser: " + err.Error()
+				}
+			}
+			Outcome(id, detect.SoftError)
+			pl.Class = detect.SoftError
+			if pl.Reason == "" {
+				pl.Reason = "no tokens in html"
+			}
 			return pl, nil
 		}
 		id.SetTokens(tok)
@@ -157,6 +188,9 @@ func (l *Loader) acceptConsent(ctx context.Context, id *Identity, tok htmlx.Toke
 func sameSite(base, u *url.URL) bool {
 	return u.Host == "" || u.Host == base.Host || strings.HasSuffix(u.Hostname(), "."+strings.TrimPrefix(base.Hostname(), "www."))
 }
+
+// IsWall reports a login or checkpoint path.
+func IsWall(path string) bool { return isWall(path) }
 
 func isWall(path string) bool {
 	return strings.HasPrefix(path, "/login") || strings.HasPrefix(path, "/checkpoint")

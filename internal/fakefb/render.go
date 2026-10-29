@@ -30,6 +30,8 @@ type renderer struct {
 	inlineRepl bool   // include one inline reply preview
 	drift      bool   // schema drift: rename message -> msg_v2
 	driftReq   bool   // schema drift: rename creation_time -> created_v2
+	jsOnly     bool   // tokens are inserted by a script, not in the markup
+	timeline   string // timeline doc_id the page script requests ("" = no script)
 	bundle     string // relay bundle path; it changes when doc_ids rotate
 	clock      func() time.Time
 }
@@ -335,9 +337,29 @@ func (r *renderer) pageHTML(p *Page, lsd, datr string, consent bool) []byte {
 	if consent {
 		b.WriteString(`<div data-cookiebanner="banner"><form action="/cookie/consent/" method="post"></form></div>`)
 	}
-	fmt.Fprintf(&b, `<script type="application/json" data-sjs>%s</script>`, site)
+	if r.jsOnly {
+		// Like a page behind a JavaScript challenge: an HTTP client sees no
+		// tokens; a browser runs the script that inserts them.
+		fmt.Fprintf(&b, `<script>(function(){var s=document.createElement("script");s.type="application/json";`+
+			`s.setAttribute("data-sjs","");s.textContent=atob("%s");document.body.appendChild(s);})();</script>`,
+			base64.StdEncoding.EncodeToString([]byte(site)))
+	} else {
+		fmt.Fprintf(&b, `<script type="application/json" data-sjs>%s</script>`, site)
+	}
 	fmt.Fprintf(&b, `<script type="application/json" data-sjs>%s</script>`, hb)
-	fmt.Fprintf(&b, `<script>requireLazy(["pageID"],function(){});var x={"pageID":"%d"};</script>`, p.ID)
+	fmt.Fprintf(&b, `<script>window.requireLazy&&requireLazy(["pageID"],function(){});var x={"pageID":"%d"};</script>`, p.ID)
+	if r.timeline != "" {
+		// The page's own first timeline request, as Facebook's client makes
+		// it: what a render-and-intercept captures.
+		vars, _ := json.Marshal(obj{"count": 3, "cursor": nil, "id": strconv.FormatInt(p.ID, 10)})
+		fmt.Fprintf(&b, `<script>(function(){var lsd=atob("%s");var f=new URLSearchParams();`+
+			`f.set("lsd",lsd);f.set("fb_api_caller_class","RelayModern");`+
+			`f.set("fb_api_req_friendly_name","ProfileCometTimelineFeedRefetchQuery");f.set("doc_id","%s");`+
+			`f.set("variables",atob("%s"));fetch("/api/graphql/",{method:"POST",credentials:"include",`+
+			`headers:{"content-type":"application/x-www-form-urlencoded","x-fb-lsd":lsd,`+
+			`"x-fb-friendly-name":"ProfileCometTimelineFeedRefetchQuery"},body:f.toString()});})();</script>`,
+			base64.StdEncoding.EncodeToString([]byte(lsd)), r.timeline, base64.StdEncoding.EncodeToString(vars))
+	}
 	b.WriteString("</body></html>")
 	return []byte(b.String())
 }

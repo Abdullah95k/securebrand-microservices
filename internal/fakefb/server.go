@@ -28,8 +28,11 @@ type Faults struct {
 	Drift          bool          `json:"drift"` // rename story.message
 	// DriftRequired renames the stories' creation_time: the timeline parser
 	// misses a required field.
-	DriftRequired bool          `json:"drift_required"`
-	MediaTTL      time.Duration `json:"media_ttl"`
+	DriftRequired bool `json:"drift_required"`
+	// JSOnlyTokens serves pages whose tokens only a browser sees (a script
+	// inserts them), so HTTP bootstraps fail and need the browser.
+	JSOnlyTokens bool          `json:"js_only_tokens"`
+	MediaTTL     time.Duration `json:"media_ttl"`
 }
 
 // Options configures a Server.
@@ -40,6 +43,9 @@ type Options struct {
 	// TopReactions is how many reaction types Facebook exposes (default 3).
 	TopReactions int
 	InlineReply  bool
+	// BundleOmits are friendly names the relay bundle does not declare
+	// (as if lazily loaded from a bundle the scan does not reach).
+	BundleOmits []string
 }
 
 // Server is the fake Facebook HTTP handler.
@@ -97,6 +103,13 @@ func (s *Server) AcceptDocs(friendly string, docIDs ...string) {
 	s.mu.Unlock()
 }
 
+// OmitFromBundle stops the relay bundle declaring the friendly names.
+func (s *Server) OmitFromBundle(friendly ...string) {
+	s.mu.Lock()
+	s.opts.BundleOmits = append(s.opts.BundleOmits, friendly...)
+	s.mu.Unlock()
+}
+
 // RotateDoc makes docID the only accepted doc_id for friendly.
 func (s *Server) RotateDoc(friendly, docID string) {
 	s.mu.Lock()
@@ -116,6 +129,7 @@ func (s *Server) renderer(r *http.Request) *renderer {
 	}
 	return &renderer{base: scheme + "://" + r.Host, mediaKey: s.mediaKey, mediaTTL: s.opts.Faults.MediaTTL,
 		topN: s.opts.TopReactions, inlineRepl: s.opts.InlineReply, drift: s.opts.Faults.Drift, driftReq: s.opts.Faults.DriftRequired,
+		jsOnly: s.opts.Faults.JSOnlyTokens, timeline: first(s.opts.Docs["ProfileCometTimelineFeedRefetchQuery"]),
 		bundle: s.bundlePath()}
 }
 
@@ -131,6 +145,7 @@ func (s *Server) bundlePath() string {
 	for _, name := range names {
 		_, _ = fmt.Fprintf(h, "%s=%v;", name, s.opts.Docs[name])
 	}
+	_, _ = fmt.Fprintf(h, "omit=%v", s.opts.BundleOmits)
 	return fmt.Sprintf("/rsrc.php/v3/%x/relay.js", h.Sum64())
 }
 
@@ -635,6 +650,13 @@ func (s *Server) admin(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func first(xs []string) string {
+	if len(xs) == 0 {
+		return ""
+	}
+	return xs[0]
+}
+
 func contains(xs []string, x string) bool {
 	for _, v := range xs {
 		if v == x {
@@ -651,7 +673,7 @@ func (s *Server) bundle(w http.ResponseWriter) {
 	s.mu.Lock()
 	names := make([]string, 0, len(s.opts.Docs))
 	for name, ids := range s.opts.Docs {
-		if len(ids) > 0 {
+		if len(ids) > 0 && !contains(s.opts.BundleOmits, name) {
 			names = append(names, name)
 		}
 	}

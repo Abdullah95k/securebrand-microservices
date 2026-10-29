@@ -139,6 +139,7 @@ Settings that matter most:
 | `fb.proxy.tiers` / `fb.proxy.routing` | direct only | Static ISP lists and rotating residential gateways (sticky sessions). Keep credentials in a secret file. |
 | `fb.identity_rps`, `fb.page_rps`, `fb.global_rps` | 0.33 / 3 / 50 | Pacing per identity, per page fleet-wide and globally (Redis GCRA). Adding pods never raises load. |
 | `fb.aimd` | on, 5–500 rps | Moves the global ceiling with the fleet's block rate: ×0.7 above 6% blocks, +2% per 10s below 2% |
+| `fb.browser` | off | Headless-Chromium fallback for pages whose HTML carries no tokens (≤ 2% of loads, 2 browsers per pod), and doc_id discovery from a rendered page's own requests. Needs the `--target browser` image. |
 | `fb.proxy.breaker`, `fb.query_breaker` | 15% / 50% | Circuit breakers per exit bucket (static /24, gateway+country) and per (query, doc_id) |
 | `limits.max_age_days` | 365 | Backfill window per job/page, capped by `limits.max_age_cap_days` |
 | `scheduler.tiers` | T0 3h … T3 72h, T4 7d | Adaptive re-scrape interval by posting rate (pages registered without `interval_hours`) |

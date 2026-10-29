@@ -73,6 +73,19 @@ fb:
   # high_block_rate the ceiling is multiplied by `decrease`; below
   # low_block_rate, while the fleet uses at least min_utilization of the
   # ceiling, it grows by `increase`. Crawlers re-read it every 5s.
+  # Headless-Chromium fallback. When a page's HTML carries no tokens (it
+  # needs JavaScript first), the identity is bootstrapped in a browser
+  # through its own proxy, for at most max_share of HTML loads and
+  # max_concurrent browsers per process. fbs-registry-sync also renders a
+  # canary page to read doc_ids from the requests the page makes when the
+  # bundles do not declare a query. Needs a Chromium in the image.
+  browser:
+    enabled: false
+    binary: ""
+    max_concurrent: 2
+    max_share: 0.02
+    timeout: 45s
+    no_sandbox: false
   aimd:
     enabled: true
     interval: 10s
