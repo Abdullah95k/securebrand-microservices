@@ -26,9 +26,11 @@ type renderer struct {
 	base       string // http://host:port
 	mediaKey   []byte
 	mediaTTL   time.Duration
-	topN       int  // top_reactions entries exposed (Facebook shows 3)
-	inlineRepl bool // include one inline reply preview
-	drift      bool // schema drift: rename message -> msg_v2
+	topN       int    // top_reactions entries exposed (Facebook shows 3)
+	inlineRepl bool   // include one inline reply preview
+	drift      bool   // schema drift: rename message -> msg_v2
+	driftReq   bool   // schema drift: rename creation_time -> created_v2
+	bundle     string // relay bundle path; it changes when doc_ids rotate
 	clock      func() time.Time
 }
 
@@ -164,6 +166,10 @@ func (r *renderer) story(w *World, p *Page, post *Post, alt bool) obj {
 	if len(atts) > 0 {
 		content["attachments"] = atts
 	}
+	created := "creation_time"
+	if r.driftReq {
+		created = "created_v2"
+	}
 	s := obj{
 		"__typename": "Story",
 		"id":         b64(fmt.Sprintf("S:_I%d:%d:%d", p.ID, post.ID, post.ID)),
@@ -173,7 +179,7 @@ func (r *renderer) story(w *World, p *Page, post *Post, alt bool) obj {
 			"content": obj{"story": content},
 			"context_layout": obj{"story": obj{"comet_sections": obj{"metadata": []any{
 				obj{"__typename": "CometFeedStoryMinimizedTimestampStrategy", "story": obj{
-					"creation_time": post.CreatedAt.Unix(), "url": r.postURL(p, post)}},
+					created: post.CreatedAt.Unix(), "url": r.postURL(p, post)}},
 			}}}},
 			"feedback": obj{"story": obj{"story_ufi_container": obj{"story": obj{"feedback_context": obj{
 				"feedback_target_with_context": obj{"comet_ufi_summary_and_actions_renderer": obj{"feedback": feedback}},
@@ -182,7 +188,7 @@ func (r *renderer) story(w *World, p *Page, post *Post, alt bool) obj {
 	}
 	if alt {
 		// Some A/B shapes carry the timestamp at the top level.
-		s["creation_time"] = post.CreatedAt.Unix()
+		s[created] = post.CreatedAt.Unix()
 		s["permalink_url"] = r.postURL(p, post)
 	}
 	if post.Pinned {
@@ -320,7 +326,11 @@ func (r *renderer) pageHTML(p *Page, lsd, datr string, consent bool) []byte {
 	fmt.Fprintf(&b, `<meta property="og:title" content="%s"/>`, html.EscapeString(p.Name))
 	fmt.Fprintf(&b, `<meta property="og:url" content="%s"/>`, r.pageURL(p))
 	fmt.Fprintf(&b, `<meta property="al:android:url" content="fb://page/%d"/>`, p.ID)
-	fmt.Fprintf(&b, `<script src="%s/rsrc.php/v3/relay.js" async crossorigin="anonymous"></script>`, r.base)
+	bundle := r.bundle
+	if bundle == "" {
+		bundle = "/rsrc.php/v3/relay.js"
+	}
+	fmt.Fprintf(&b, `<script src="%s%s" async crossorigin="anonymous"></script>`, r.base, bundle)
 	b.WriteString("</head><body>")
 	if consent {
 		b.WriteString(`<div data-cookiebanner="banner"><form action="/cookie/consent/" method="post"></form></div>`)

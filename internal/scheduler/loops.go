@@ -317,6 +317,7 @@ func (m *Maintenance) Tick(ctx context.Context) error {
 			AND discovered_at < now() - make_interval(days => $1) LIMIT 5000)`, ret.MediaRowsDays},
 		{`DELETE FROM comment_authors WHERE author_key IN (SELECT author_key FROM comment_authors
 			WHERE last_seen_at < now() - make_interval(days => $1) LIMIT 5000)`, ret.AuthorsInactiveDays},
+		{`DELETE FROM registry_sync_runs WHERE started_at < now() - make_interval(days => $1)`, ret.JobsDays},
 	}
 	for _, s := range stmts {
 		if s.days <= 0 {

@@ -5,19 +5,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/task"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/detect"
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/docids"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/graphql"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/parse"
 	"github.com/abdullah95k/securebrand-microservices/internal/fixtures"
@@ -127,27 +124,14 @@ func classOf(r *graphql.Response) string {
 	return r.Class.String() + " " + r.Reason
 }
 
-var (
-	// Bundle URLs appear in script tags and, JSON-escaped, in inline data.
-	scriptSrc   = regexp.MustCompile(`(?:https?:)?(?:\\/\\/|//)[A-Za-z0-9.\-:]+(?:\\/|/)rsrc\.php(?:\\/|/)[^"'\s<>]+?\.js[^"'\s<>]*`)
-	relayOp     = regexp.MustCompile(`__d\("([A-Za-z0-9_]+)_facebookRelayOperation"[^{]*\{[^}]*?exports\s*=\s*"(\d+)"`)
-	relayOpLoad = regexp.MustCompile(`"([A-Za-z0-9_]+Query)"\s*,\s*\{?\s*"?(?:queryID|id)"?\s*:\s*"(\d{8,})"`)
-)
-
 // DocIDs loads pages and scans them and their JS bundles for Relay
 // operation ids (friendly_name -> doc_id). Bundles are static and immutable,
 // so they are fetched over direct egress (r.HTTP), and only from Facebook's
-// CDN or the page's own host. It fails only when no page could be loaded.
+// CDN or the page's own host, at most maxBundles in all. It fails only when
+// no page could be loaded.
 func (r *Runner) DocIDs(ctx context.Context, pages []string, maxBundles int) (map[string]string, int, error) {
 	out := map[string]string{}
-	scan := func(b []byte) {
-		for _, re := range []*regexp.Regexp{relayOp, relayOpLoad} {
-			for _, m := range re.FindAllSubmatch(b, -1) {
-				out[string(m[1])] = string(m[2])
-			}
-		}
-	}
-	seen := map[string]bool{}
+	sc := &docids.Scanner{Fetch: docids.HTTPFetcher(r.HTTP)}
 	n, loaded := 0, 0
 	var lastErr error
 	for _, page := range pages {
@@ -157,25 +141,8 @@ func (r *Runner) DocIDs(ctx context.Context, pages []string, maxBundles int) (ma
 			continue
 		}
 		loaded++
-		scan(pl)
-		for _, m := range scriptSrc.FindAll(pl, -1) {
-			src := strings.ReplaceAll(string(m), `\/`, "/")
-			if strings.HasPrefix(src, "//") {
-				src = pageURL.Scheme + ":" + src
-			}
-			u, err := url.Parse(src)
-			if err != nil || seen[src] || n >= maxBundles {
-				continue
-			}
-			if !strings.HasSuffix(u.Hostname(), "fbcdn.net") && u.Host != pageURL.Host {
-				continue
-			}
-			seen[src] = true
-			n++
-			if b, err := r.get(ctx, src); err == nil {
-				scan(b)
-			}
-		}
+		sc.MaxBundles = maxBundles - n
+		n += sc.Page(ctx, pl, pageURL, out)
 	}
 	if loaded == 0 {
 		if lastErr == nil {
@@ -202,20 +169,4 @@ func (r *Runner) load(ctx context.Context, page string) ([]byte, *url.URL, error
 		return nil, nil, err
 	}
 	return pl.HTML, u, nil
-}
-
-func (r *Runner) get(ctx context.Context, src string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, src, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := r.HTTP.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("spike: %s: status %d", src, resp.StatusCode)
-	}
-	return io.ReadAll(io.LimitReader(resp.Body, 20<<20))
 }

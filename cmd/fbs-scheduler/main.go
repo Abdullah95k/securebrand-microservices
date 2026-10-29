@@ -8,6 +8,8 @@ import (
 	"os"
 	"time"
 
+	"github.com/twmb/franz-go/pkg/kadm"
+
 	"github.com/abdullah95k/securebrand-microservices/internal/config"
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/jobs"
 	"github.com/abdullah95k/securebrand-microservices/internal/dispatch"
@@ -17,6 +19,7 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/kafka"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/leader"
 	plog "github.com/abdullah95k/securebrand-microservices/internal/platform/log"
+	"github.com/abdullah95k/securebrand-microservices/internal/platform/metrics"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/pg"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/redisx"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/run"
@@ -72,6 +75,10 @@ func runScheduler(ctx context.Context, cfg *config.Config) error {
 		func(ctx context.Context) error {
 			return scheduler.Every(ctx, "tier-gauges", 5*time.Minute, planner.TierGauges)
 		},
+		func(ctx context.Context) error {
+			lag := &scheduler.LagGauges{Admin: kadm.NewClient(producer.Client()), Prefix: cfg.Kafka.TopicPrefix}
+			return scheduler.Every(ctx, "consumer-lag", 30*time.Second, lag.Tick)
+		},
 	}
 	if b := cfg.Scheduler.Budget; b.Enabled && (b.RequestsPerDay > 0 || b.BytesPerDay > 0) {
 		budget := ratelimit.NewBudgetController(rdb, cfg.Kafka.TopicPrefix, b)
@@ -94,6 +101,13 @@ func runScheduler(ctx context.Context, cfg *config.Config) error {
 	}
 	return run.Group(ctx, ops.Run, func(ctx context.Context) error {
 		return leader.Run(ctx, db, leaderKey, func(ctx context.Context) error {
+			// Leader-only gauges are read joined on fbs_scheduler_leader, so a
+			// former leader's last values do not linger in dashboards.
+			metrics.SchedulerLeader.Set(1)
+			defer func() {
+				metrics.SchedulerLeader.Set(0)
+				metrics.ConsumerLag.Reset()
+			}()
 			return run.Group(ctx, append(leaderLoops,
 				func(ctx context.Context) error { return scheduler.Every(ctx, "maintenance", time.Hour, maint.Tick) },
 				func(ctx context.Context) error {

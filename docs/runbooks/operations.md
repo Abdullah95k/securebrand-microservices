@@ -15,6 +15,7 @@ All metric names start with `fbs_`.
 | Schedule | `fbs_scheduled_pages{tier}`, `fbs_schedule_lag_seconds{tier}`, `fbs_post_refreshes_total{kind}` | lag < tier interval |
 | Budget | `fbs_budget_used{kind,lane}`, `fbs_budget_projected{kind}`, `fbs_budget_limit{kind}`, `fbs_budget_backfill_paused`, `fbs_budget_stretch` | projected < limit |
 | Parser health | `fbs_parse_total{outcome="drift"}`, `fbs_parse_missing_field_total` | drift ≈ 0 |
+| Registry | `fbs_registry_query_healthy{query}`, `fbs_registry_sync_last_success_timestamp_seconds`, `fbs_registry_promotions_total{query}`, `fbs_registry_checks_total{query,status,verdict}` | all 1; last success < 1h ago |
 | Coverage | `fbs_comment_completeness_ratio` | median at the Phase 0 baseline |
 | Truncation | `fbs_timeline_truncated_total` | flat |
 | Retries / DLQ | `fbs_retries_total`, `fbs_dlq_total{reason}` | low, flat |
@@ -23,7 +24,16 @@ All metric names start with `fbs_`.
 | Jobs | `fbs_jobs_total{status}` | `completed` dominates |
 | Schedule lag | `fbs_schedule_lag_seconds` | < planner interval |
 | Media | `fbs_media_download_total{outcome}`, `fbs_media_deleted_total{reason}` | `ttl_expired` ≈ 0 |
-| Persister | `fbs_persist_batch_seconds`, consumer lag of `<prefix>fbs-persister` | lag < 1 min |
+| Persister | `fbs_persist_batch_seconds`, `fbs_kafka_consumer_lag{group="fbs-persister"}` | lag < 1 min |
+| Consumer lag | `fbs_kafka_consumer_lag{group,topic}` (leader scheduler) | p0 groups ≈ 0 |
+
+## Alerts and dashboards
+
+The chart ships the alerting and recording rules in `deploy/helm/fbs/files/alerts.yaml`; set `alerts.enabled` to install them as a PrometheusRule. The Grafana dashboard **fbs / Overview** is in `deploy/helm/fbs/files/dashboards/`; set `dashboards.enabled` to install it for the Grafana sidecar. Every alert links to the section of this runbook that handles it. The thresholds are starting points: tune them once Phase 0 has a baseline.
+
+Only the leader scheduler publishes AIMD, budget, schedule-lag and consumer-lag values. Every fbs binary exports those gauges, though, at 0, and a former leader keeps its last values. So the rules read them through `fbs:leader:*` recording rules, which join on `fbs_scheduler_leader == 1`. Do the same in ad-hoc queries.
+
+`fbs_kafka_consumer_lag{group,topic}` is published by the leader scheduler every 30s, so lag alerts need no separate Kafka exporter.
 
 ## Block storm (block rate > 10%)
 
@@ -56,11 +66,37 @@ Symptom: `class="registry_stale"` rising, tasks retrying with delay 5m.
 
 The `query:timeline|<doc_id>` breaker (`fb.query_breaker`) may open. While it is open, requests for that query are not sent (`fbs_fb_query_short_circuit_total`), the fallback doc_id is tried if there is one, and tasks wait in the 5m retry topic.
 
+Usually `fbs-registry-sync` heals this on its own within `registry_sync.interval` (30m). Each run:
+
+1. **Loads** the canary pages (`registry_sync.canary_pages`) and scans them and their JS bundles for Relay operation ids, the same scan as `fbs-spike docids`. Bundles are content-addressed and fetched once each.
+2. **Records** each doc_id it finds for a query's friendly name, if the query does not know it yet, as a `candidate` with the same variables and parser.
+3. **Checks** the active entry and the candidates with a real request on a canary page: the timeline first, then comments on a busy post it returned (or on a stored post when the timeline fails), then a reply thread. Verdicts:
+   - `ok`: the response parsed and had data;
+   - `stale`: Facebook rejects the doc_id;
+   - `drift`: Facebook accepts it, but the parser misses required fields;
+   - `inconclusive`: blocked, no data, or a transport error; it says nothing about the entry.
+4. **Promotes** a candidate that is `ok` and declared by the current bundles. The old active entry becomes a `fallback`, which the client tries on a stale doc_id. When the active entry fails and no current candidate passes, a passing older candidate or fallback is promoted. Only `registry_sync.keep_fallbacks` (2) fallbacks are kept. A candidate or fallback that fails `retire_after` (3) checks in a row is retired.
+
+Crawlers reload the registry within `fb.registry_refresh` (30s), and parked tasks come back from the 5m retry topic. The query breaker is keyed by doc_id, so the new one starts closed.
+
+When it does not heal:
+
+- `fbs_registry_query_healthy{query} == 0`: the active doc_id is stale or drifted and nothing passed.
+  - If the run report lists the query's friendly name under `not_found`, Facebook renamed the operation. Capture a HAR (phase0 runbook), then set the new entry with `PUT /v1/admin/queries/{name}`.
+  - If the checks say `drift`, it is a parser change: see Schema drift below.
+- `fbs_registry_sync_last_success_timestamp_seconds` is old: no recent run gave every query a verdict. Typically no canary page loads (blocked tier, or a page gone), every probe is blocked, or the canary pages have no posts with comments or reply threads. See `GET /v1/admin/registry-sync/runs` (`unchecked`) and the service logs. Replace dead or quiet canary pages.
+- To check without promoting, set `registry_sync.promote: false`. The runs then list what they would promote under `proposed`.
+- `fbs-registry-sync --once` runs once and prints the report. It exits 3 when the run is degraded.
+
+The manual path is still there:
+
 1. `fbs-spike docids --page <public page>` (see phase0 runbook).
 2. `PUT /v1/admin/queries/{name}` with the new doc_id (and variables if they
    changed). Crawlers reload within 30s; parked tasks come back from the 5m
    retry topic. Tasks that exhausted retries are in the DLQ:
    `fbctl dlq replay --reason max_attempts`.
+
+`GET /v1/admin/queries` shows each entry's `last_check`, `last_checked_at` and `last_ok_at`. The sync's own requests are counted under `query="registry_sync:<name>"` in `fbs_fb_requests_total`, apart from crawl traffic.
 
 ## Schema drift
 

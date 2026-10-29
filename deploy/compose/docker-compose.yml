@@ -101,5 +101,9 @@ services:
     <<: *fbs
     entrypoint: ["/usr/local/bin/fbs-media-janitor"]
 
+  registry-sync:
+    <<: *fbs
+    entrypoint: ["/usr/local/bin/fbs-registry-sync"]
+
 volumes:
   pgdata: {}

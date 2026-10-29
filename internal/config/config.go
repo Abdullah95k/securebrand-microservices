@@ -31,6 +31,38 @@ type Config struct {
 	Media     Media     `koanf:"media"`
 	API       API       `koanf:"api"`
 	Privacy   Privacy   `koanf:"privacy"`
+	// RegistrySync follows Facebook's doc_id rotations (fbs-registry-sync).
+	RegistrySync RegistrySync `koanf:"registry_sync"`
+}
+
+// RegistrySync configures the service that discovers rotated doc_ids on
+// canary pages, validates them and promotes them in fb_queries.
+type RegistrySync struct {
+	Interval time.Duration `koanf:"interval"`
+	// CanaryPages are public pages with regular posts, comments and reply
+	// threads; validation reads one timeline page and a few comment pages
+	// of each, in order, until every query has a verdict.
+	CanaryPages []string `koanf:"canary_pages"`
+	// Tier is the proxy tier page loads and probes use; "" = the first one.
+	Tier string `koanf:"tier"`
+	// MaxBundles caps the JS bundles fetched per canary page and run.
+	MaxBundles int `koanf:"max_bundles"`
+	// BundlesViaProxy fetches bundles through the tier instead of direct
+	// egress (bundles are public and immutable, so direct is the default).
+	BundlesViaProxy bool `koanf:"bundles_via_proxy"`
+	// Promote switches promotion on; false records candidates and checks
+	// only (dry run).
+	Promote bool `koanf:"promote"`
+	// KeepFallbacks is how many former active entries stay as fallbacks;
+	// older ones are retired.
+	KeepFallbacks int `koanf:"keep_fallbacks"`
+	// RetireAfter retires a candidate after this many failed checks.
+	RetireAfter int `koanf:"retire_after"`
+	// RecheckRetired re-validates a retired candidate discovered again after
+	// this long (a parser fix may have made it usable).
+	RecheckRetired time.Duration `koanf:"recheck_retired"`
+	// Timeout bounds one run.
+	Timeout time.Duration `koanf:"timeout"`
 }
 
 type Service struct {
@@ -346,6 +378,9 @@ func (c *Config) Validate() error {
 			errs = append(errs, errors.New("scheduler.post_refresh.windows need intervals and ascending max_age"))
 			break
 		}
+	}
+	if c.RegistrySync.Interval <= 0 || c.RegistrySync.Timeout <= 0 {
+		errs = append(errs, errors.New("registry_sync.interval and registry_sync.timeout must be > 0"))
 	}
 	return errors.Join(errs...)
 }

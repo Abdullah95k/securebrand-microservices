@@ -13,3 +13,6 @@ crawler:
   slots: 48
   lanes: {p0: 48, p1: 48, p2: 20}
   lane_min: 4
+registry_sync:
+  interval: 5m
+  canary_pages: [brand0, brand1]   # fakefb pages

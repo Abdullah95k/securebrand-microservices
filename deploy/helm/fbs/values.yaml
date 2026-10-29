@@ -32,6 +32,10 @@ config:
   media:
     ttl: 72h
     required_consumers: ["analysis"]
+  # fbs-registry-sync follows doc_id rotations on these pages. Pick at least
+  # three public pages that post daily and get comments with reply threads.
+  registry_sync:
+    canary_pages: []
 
 # Existing Secret whose keys become environment variables, e.g.
 #   FBS_POSTGRES__DSN, FBS_POSTGRES__READ_DSN, FBS_REDIS__PASSWORD,
@@ -56,6 +60,21 @@ securityContext:
 serviceMonitor:
   enabled: false
   interval: 30s
+
+# Alerting and recording rules (files/alerts.yaml) as a PrometheusRule.
+# Requires the Prometheus Operator CRDs. Labels let the Prometheus
+# ruleSelector pick the rule up.
+alerts:
+  enabled: false
+  labels: {}
+
+# Grafana dashboards (files/dashboards/*.json) as ConfigMaps, for the
+# Grafana sidecar that loads ConfigMaps labelled grafana_dashboard.
+dashboards:
+  enabled: false
+  labels:
+    grafana_dashboard: "1"
+  annotations: {}
 
 # KEDA scales Kafka consumers on consumer-group lag. Requires KEDA installed.
 keda:
@@ -170,6 +189,14 @@ components:
   media-janitor:
     enabled: true
     command: ["/usr/local/bin/fbs-media-janitor"]
+    replicas: 1
+    resources: {requests: {cpu: 100m, memory: 128Mi}, limits: {memory: 256Mi}}
+  # Discovers, checks and promotes rotated doc_ids. Needs the crawlers'
+  # egress (proxies, and Facebook's CDN for bundles). One replica; runs are
+  # serialised by a Postgres advisory lock anyway.
+  registry-sync:
+    enabled: true
+    command: ["/usr/local/bin/fbs-registry-sync"]
     replicas: 1
     resources: {requests: {cpu: 100m, memory: 128Mi}, limits: {memory: 256Mi}}
 

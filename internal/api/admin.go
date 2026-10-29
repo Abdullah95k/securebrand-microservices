@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/registry"
 	"github.com/abdullah95k/securebrand-microservices/internal/gdpr"
@@ -20,6 +22,40 @@ func (s *Server) listQueries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"queries": qs})
+}
+
+// registrySyncRuns lists the latest fbs-registry-sync runs, newest first.
+func (s *Server) registrySyncRuns(w http.ResponseWriter, r *http.Request) {
+	limit := 20
+	if v, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && v > 0 && v <= 200 {
+		limit = v
+	}
+	rows, err := s.ReadDB.Query(r.Context(), `SELECT run_id, started_at, finished_at, status, report
+		FROM registry_sync_runs ORDER BY started_at DESC LIMIT $1`, limit)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	type run struct {
+		ID         int64           `json:"id"`
+		StartedAt  time.Time       `json:"started_at"`
+		FinishedAt time.Time       `json:"finished_at"`
+		Status     string          `json:"status"`
+		Report     json.RawMessage `json:"report"`
+	}
+	runs, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (run, error) {
+		var x run
+		err := row.Scan(&x.ID, &x.StartedAt, &x.FinishedAt, &x.Status, &x.Report)
+		return x, err
+	})
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	if runs == nil {
+		runs = []run{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"runs": runs})
 }
 
 // putQuery sets a registry entry; crawlers pick it up on their next reload.

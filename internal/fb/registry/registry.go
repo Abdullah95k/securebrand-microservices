@@ -39,6 +39,10 @@ type Query struct {
 	Status        string          `json:"status"`
 	Priority      int             `json:"priority"`
 	Source        string          `json:"source"`
+	// Check state recorded by fbs-registry-sync (read only; List fills it).
+	LastCheck     string     `json:"last_check,omitempty"`
+	LastCheckedAt *time.Time `json:"last_checked_at,omitempty"`
+	LastOKAt      *time.Time `json:"last_ok_at,omitempty"`
 }
 
 // ErrNotFound is returned for unknown query names.
@@ -300,14 +304,15 @@ func (r *DB) Run(ctx context.Context, every time.Duration) error {
 // List returns every row of fb_queries.
 func List(ctx context.Context, pool *pgxpool.Pool) ([]Query, error) {
 	rows, err := pool.Query(ctx, `SELECT name, doc_id, friendly_name, variables_template, parser,
-		parser_version, status, priority, source FROM fb_queries ORDER BY name, priority DESC`)
+		parser_version, status, priority, source, coalesce(last_check, ''), last_checked_at, last_ok_at
+		FROM fb_queries ORDER BY name, priority DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("registry: list: %w", err)
 	}
 	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (Query, error) {
 		var q Query
 		err := row.Scan(&q.Name, &q.DocID, &q.FriendlyName, &q.Variables, &q.Parser,
-			&q.ParserVersion, &q.Status, &q.Priority, &q.Source)
+			&q.ParserVersion, &q.Status, &q.Priority, &q.Source, &q.LastCheck, &q.LastCheckedAt, &q.LastOKAt)
 		return q, err
 	})
 }

@@ -45,7 +45,7 @@ infra-down:
 
 ## Integration tests against real Postgres/Redpanda/Valkey (make infra-up first).
 test-integration:
-	$(TEST_ENV) $(GO) test -count=1 ./internal/persist/... ./internal/e2e/... ./internal/spike/...
+	$(TEST_ENV) $(GO) test -count=1 ./internal/persist/... ./internal/e2e/... ./internal/spike/... ./internal/registrysync/...
 
 ## Full pipeline end-to-end test only.
 e2e:
