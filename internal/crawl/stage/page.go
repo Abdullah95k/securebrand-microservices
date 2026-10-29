@@ -20,6 +20,7 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/parse"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/kafka"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/metrics"
+	"github.com/abdullah95k/securebrand-microservices/internal/topics"
 )
 
 // PageStage loads the page profile and paginates the timeline. It emits
@@ -161,7 +162,7 @@ func (s *PageStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 			vars["cursor"] = st.Cursor
 		}
 		resp, err := d.GQL.Do(ctx, id, graphql.Request{Query: "timeline", Vars: vars, PageID: sc.PageId,
-			Fast: t.Lane == taskv1.Lane_LANE_P0, Referer: id.Base.String()})
+			Fast: t.Lane == taskv1.Lane_LANE_P0, Lane: topics.LaneName(t.Lane), Referer: id.Base.String()})
 		c["requests"]++
 		if err != nil {
 			return retry(t, st.Cursor, "30s", err.Error(), c)

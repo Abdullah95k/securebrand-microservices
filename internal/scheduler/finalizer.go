@@ -35,6 +35,9 @@ type Finalizer struct {
 	Timeout  time.Duration
 	// PersisterGroup defaults to persist.Group.
 	PersisterGroup string
+	// Adaptive, when set, re-tiers the page and registers post refreshes
+	// once a job's data is stored.
+	Adaptive *Adaptive
 
 	pending []finalBatch
 }
@@ -174,6 +177,11 @@ func (f *Finalizer) finalize(ctx context.Context, id string) error {
 		return err
 	}
 	metrics.Jobs.WithLabelValues(final, topics.LaneName(taskLane(lane))).Inc()
+	if f.Adaptive != nil && pageID != nil && final != "cancelled" {
+		if err := f.Adaptive.AfterJob(ctx, *pageID); err != nil {
+			slog.Warn("finalizer: adaptive schedule", "job", id, "page", *pageID, "err", err)
+		}
+	}
 	_ = f.Jobs.Expire(ctx, id, 24*time.Hour)
 	slog.Info("job finished", "job", id, "status", final, "posts", st.Counters["posts"], "comments", st.Counters["comments"],
 		"replies", st.Counters["replies"], "median_completeness", comp.MedianRatio)

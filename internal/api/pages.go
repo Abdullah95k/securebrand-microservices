@@ -93,9 +93,10 @@ func (s *Server) registerPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	interval := s.Cfg.Scheduler.DefaultInterval
-	enabled := true
+	enabled, adaptive := true, true
 	if req.Schedule != nil {
 		if req.Schedule.IntervalHours != nil {
+			adaptive = false // an explicit interval is kept; tiers no longer move it
 			if *req.Schedule.IntervalHours < 1 || *req.Schedule.IntervalHours > 24*30 {
 				problem(w, http.StatusBadRequest, "invalid schedule", "interval_hours must be between 1 and 720")
 				return
@@ -114,11 +115,13 @@ func (s *Server) registerPage(w http.ResponseWriter, r *http.Request) {
 		maxAge = req.MaxAgeDays
 	}
 	err = pgx.BeginFunc(r.Context(), s.DB, func(tx pgx.Tx) error {
-		_, err := tx.Exec(r.Context(), `INSERT INTO page_schedule (page_ref, enabled, interval_seconds, next_run_at, options, max_age_days, max_posts)
-			VALUES ($1,$2,$3,$4,$5,$6,$7)
+		_, err := tx.Exec(r.Context(), `INSERT INTO page_schedule (page_ref, enabled, interval_seconds, next_run_at, options, max_age_days, max_posts, adaptive)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
 			ON CONFLICT (page_ref) DO UPDATE SET enabled = page_schedule.enabled OR EXCLUDED.enabled,
-				interval_seconds = LEAST(page_schedule.interval_seconds, EXCLUDED.interval_seconds)`,
-			ref, enabled, int(interval.Seconds()), next, opts, maxAge, req.MaxPosts)
+				interval_seconds = CASE WHEN EXCLUDED.adaptive THEN page_schedule.interval_seconds
+					ELSE LEAST(page_schedule.interval_seconds, EXCLUDED.interval_seconds) END,
+				adaptive = page_schedule.adaptive AND EXCLUDED.adaptive`,
+			ref, enabled, int(interval.Seconds()), next, opts, maxAge, req.MaxPosts, adaptive)
 		if err != nil {
 			return err
 		}
@@ -129,7 +132,8 @@ func (s *Server) registerPage(w http.ResponseWriter, r *http.Request) {
 		serverError(w, err)
 		return
 	}
-	resp := map[string]any{"page_ref": ref, "schedule": map[string]any{"enabled": enabled, "interval_seconds": int(interval.Seconds()), "next_run_at": next}}
+	resp := map[string]any{"page_ref": ref, "schedule": map[string]any{"enabled": enabled, "interval_seconds": int(interval.Seconds()),
+		"next_run_at": next, "adaptive": adaptive}}
 	if req.Backfill == nil || *req.Backfill {
 		j, _, err := s.Dispatch.Create(r.Context(), dispatch.Request{ClientID: &c.ID, Kind: dispatch.KindBackfill,
 			Lane: taskv1.Lane_LANE_P2, Mode: "full", PageRef: ref, Limits: backfillLim,
@@ -154,12 +158,24 @@ type scheduleView struct {
 	LastRunAt       *time.Time      `json:"last_run_at,omitempty"`
 	Options         json.RawMessage `json:"options,omitempty"`
 	Failures        int             `json:"consecutive_failures"`
+	Adaptive        bool            `json:"adaptive"`
+	PostsPerDay     *float64        `json:"posts_per_day,omitempty"`
+	LastPostAt      *time.Time      `json:"last_post_at,omitempty"`
+}
+
+const scheduleColumns = `s.page_ref, s.page_id, s.enabled, s.tier, s.interval_seconds, s.next_run_at, s.last_run_at, s.options,
+	s.consecutive_failures, s.adaptive, s.posts_per_day, s.last_post_at`
+
+func scanSchedule(row pgx.Row) (scheduleView, error) {
+	var v scheduleView
+	err := row.Scan(&v.PageRef, &v.PageID, &v.Enabled, &v.Tier, &v.IntervalSeconds, &v.NextRunAt, &v.LastRunAt, &v.Options,
+		&v.Failures, &v.Adaptive, &v.PostsPerDay, &v.LastPostAt)
+	return v, err
 }
 
 func (s *Server) listPages(w http.ResponseWriter, r *http.Request) {
 	c := clientFrom(r.Context())
-	q := `SELECT s.page_ref, s.page_id, s.enabled, s.tier, s.interval_seconds, s.next_run_at, s.last_run_at, s.options,
-		s.consecutive_failures FROM page_schedule s`
+	q := `SELECT ` + scheduleColumns + ` FROM page_schedule s`
 	args := []any{}
 	if !c.Has(ScopeAdmin) {
 		q += ` JOIN page_registrations r ON r.page_ref = s.page_ref AND r.api_client_id = $1`
@@ -172,11 +188,7 @@ func (s *Server) listPages(w http.ResponseWriter, r *http.Request) {
 		serverError(w, err)
 		return
 	}
-	out, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (scheduleView, error) {
-		var v scheduleView
-		err := row.Scan(&v.PageRef, &v.PageID, &v.Enabled, &v.Tier, &v.IntervalSeconds, &v.NextRunAt, &v.LastRunAt, &v.Options, &v.Failures)
-		return v, err
-	})
+	out, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (scheduleView, error) { return scanSchedule(row) })
 	if err != nil {
 		serverError(w, err)
 		return
@@ -195,10 +207,8 @@ func (s *Server) getPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := map[string]any{"page": p, "page_ref": ref}
-	var v scheduleView
-	err = s.ReadDB.QueryRow(r.Context(), `SELECT page_ref, page_id, enabled, tier, interval_seconds, next_run_at, last_run_at, options,
-		consecutive_failures FROM page_schedule WHERE page_id = $1 OR page_ref = $2 LIMIT 1`, id, ref).
-		Scan(&v.PageRef, &v.PageID, &v.Enabled, &v.Tier, &v.IntervalSeconds, &v.NextRunAt, &v.LastRunAt, &v.Options, &v.Failures)
+	v, err := scanSchedule(s.ReadDB.QueryRow(r.Context(), `SELECT `+scheduleColumns+`
+		FROM page_schedule s WHERE s.page_id = $1 OR s.page_ref = $2 LIMIT 1`, id, ref))
 	if err == nil {
 		out["schedule"] = v
 	}
@@ -214,6 +224,8 @@ func (s *Server) updatePage(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Enabled       *bool `json:"enabled,omitempty"`
 		IntervalHours *int  `json:"interval_hours,omitempty"`
+		// Adaptive true hands the interval back to the adaptive tiers.
+		Adaptive *bool `json:"adaptive,omitempty"`
 	}
 	if err := decode(r, &req); err != nil {
 		problem(w, http.StatusBadRequest, "invalid body", err.Error())
@@ -228,9 +240,15 @@ func (s *Server) updatePage(w http.ResponseWriter, r *http.Request) {
 		v := *req.IntervalHours * 3600
 		interval = &v
 	}
+	adaptive := req.Adaptive
+	if interval != nil && adaptive == nil {
+		f := false
+		adaptive = &f // an explicit interval is kept
+	}
 	tag, err := s.DB.Exec(r.Context(), `UPDATE page_schedule SET enabled = COALESCE($2, enabled),
-		interval_seconds = COALESCE($3, interval_seconds) WHERE page_ref = $1 OR page_id::text = $4`,
-		ref, req.Enabled, interval, strings.TrimPrefix(ref, "id:"))
+		interval_seconds = COALESCE($3, interval_seconds), adaptive = COALESCE($5, adaptive)
+		WHERE page_ref = $1 OR page_id::text = $4`,
+		ref, req.Enabled, interval, strings.TrimPrefix(ref, "id:"), adaptive)
 	if err != nil {
 		serverError(w, err)
 		return

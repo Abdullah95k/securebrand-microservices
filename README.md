@@ -140,6 +140,10 @@ Settings that matter most:
 | `fb.aimd` | on, 5–500 rps | Moves the global ceiling with the fleet's block rate: ×0.7 above 6% blocks, +2% per 10s below 2% |
 | `fb.proxy.breaker`, `fb.query_breaker` | 15% / 50% | Circuit breakers per exit bucket (static /24, gateway+country) and per (query, doc_id) |
 | `limits.max_age_days` | 365 | Backfill window per job/page, capped by `limits.max_age_cap_days` |
+| `scheduler.tiers` | T0 3h … T3 72h, T4 7d | Adaptive re-scrape interval by posting rate (pages registered without `interval_hours`) |
+| `scheduler.post_refresh` | 24h / 72h / 7d by post age | Comment refresh of posts older than the timeline overlap, riding on the page's scheduled job; recrawls at 7 and 30 days |
+| `scheduler.budget` | unlimited | Daily request/byte budget: pauses backfill, then stretches slow tiers; never holds on-demand work |
+| `api.max_running_p0_jobs` | 0 (off) | Fleet-wide cap on running on-demand jobs (429 + Retry-After) |
 | `limits.video_policy` | `sd` (`thumbnail` for backfills) | `none`, `thumbnail`, `sd` or `hd` |
 | `crawler.slots`, `crawler.lanes`, `crawler.lane_min` | 240 / p2 ≤ 96 / 12 | In-flight tasks per pod and stage, shared by the lanes in priority order (on-demand > scheduled > backfill); backfill capped at 40%, each lane keeps a minimum |
 | `media.ttl`, `media.required_consumers` | 72h / `[analysis]` | Temporary media lifecycle |

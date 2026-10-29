@@ -57,6 +57,7 @@ type Stack struct {
 	Janitor  *media.Janitor
 	Eraser   *gdpr.Eraser
 	Planner  *scheduler.Planner
+	Adaptive *scheduler.Adaptive
 	Dispatch *dispatch.Dispatcher
 
 	cancel context.CancelFunc
@@ -179,8 +180,9 @@ func Start(t *testing.T, o Options) *Stack {
 	}
 	tracker := jobs.New(rdb)
 	s.Dispatch = &dispatch.Dispatcher{DB: db, Jobs: tracker, Producer: producer, BaseURL: cfg.FB.BaseURL}
-	fin := &scheduler.Finalizer{DB: db, Jobs: tracker, Producer: producer, Timeout: cfg.Scheduler.FinalizeTimeout}
-	s.Planner = &scheduler.Planner{DB: db, Dispatch: s.Dispatch, Cfg: cfg}
+	s.Adaptive = &scheduler.Adaptive{DB: db, Cfg: cfg}
+	fin := &scheduler.Finalizer{DB: db, Jobs: tracker, Producer: producer, Timeout: cfg.Scheduler.FinalizeTimeout, Adaptive: s.Adaptive}
+	s.Planner = &scheduler.Planner{DB: db, Dispatch: s.Dispatch, Cfg: cfg, Adaptive: s.Adaptive}
 	s.Eraser = &gdpr.Eraser{DB: db, S3: s3, Producer: producer}
 	dl := &media.Downloader{DB: db, S3: s3, Bucket: cfg.S3.MediaBucket, Producer: producer, HTTP: media.NewHTTPClient(),
 		TTL: cfg.Media.TTL, MaxBytes: cfg.Media.MaxBytes}

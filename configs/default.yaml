@@ -162,6 +162,46 @@ scheduler:
   reaper_after: 30m
   partition_months_ahead: 3
   incremental_overlap: 24h
+  # Adaptive tiers for pages registered without schedule.interval_hours:
+  # after each job the page's posting rate over rate_window picks the first
+  # tier whose min_posts_per_day it reaches. No post for dormant_after puts
+  # it on dormant_interval (T4).
+  rate_window: 336h          # 14 days
+  tiers:
+    - {name: T0, min_posts_per_day: 10, interval: 3h}
+    - {name: T1, min_posts_per_day: 1, interval: 12h}
+    - {name: T2, min_posts_per_day: 0.142857, interval: 24h}   # weekly or more
+    - {name: T3, min_posts_per_day: 0, interval: 72h}
+  dormant_after: 2160h       # 90 days
+  dormant_interval: 168h
+  # Comments on posts older than incremental_overlap are refreshed on the
+  # page's scheduled jobs (up to max_per_job posts each): a newest-first read
+  # that stops at the first comment already stored, so an unchanged post
+  # costs one request. Each refresh that finds nothing new doubles that
+  # post's interval (up to 2^max_backoff). Busy posts get a full recrawl at
+  # each recrawl_at age to pick up edits and deletions.
+  post_refresh:
+    enabled: true
+    max_per_job: 50
+    max_backoff: 3
+    windows:
+      - {max_age: 168h, interval: 24h}                   # up to 7 days old
+      - {max_age: 336h, interval: 72h}                   # 7-14 days
+      - {max_age: 720h, interval: 168h, tiers: [T0, T1]} # 14-30 days, active pages only
+    recrawl_at: [168h, 720h]
+    recrawl_min_comments: 20
+  # Daily Facebook traffic budget, fleet-wide (0 = unlimited). Every interval
+  # the leader projects the day's use from the last projection_span; when it
+  # would exceed the budget, backfill (p2) pauses; if p0 + p1 alone would,
+  # the stretch_tiers' intervals are multiplied by stretch. p0 is never held.
+  budget:
+    enabled: true
+    requests_per_day: 0
+    bytes_per_day: 0
+    interval: 1m
+    stretch: 2
+    stretch_tiers: [T4, T3, T2]
+    projection_span: 1h
 
 media:
   concurrency: 50
@@ -176,6 +216,7 @@ media:
 
 api:
   max_running_p0_jobs_per_client: 50
+  max_running_p0_jobs: 0       # on-demand jobs running fleet-wide; 0 = no cap
   default_rate_per_minute: 600
 
 privacy:

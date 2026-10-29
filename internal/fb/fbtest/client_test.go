@@ -293,7 +293,7 @@ func (c fixedCeiling) RPS() int { return int(c) }
 
 type countingOutcomes struct{ n, blocked int }
 
-func (c *countingOutcomes) Observe(cls detect.Class) {
+func (c *countingOutcomes) Observe(cls detect.Class, _ string, _ int64) {
 	c.n++
 	if cls.Blocking() {
 		c.blocked++

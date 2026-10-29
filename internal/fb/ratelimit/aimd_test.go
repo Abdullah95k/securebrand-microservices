@@ -63,8 +63,8 @@ func TestReporterControllerCeiling(t *testing.T) {
 		if i%10 == 0 {
 			c = detect.RateLimited
 		}
-		rep.Observe(c)
-		rep.Observe(detect.Transport)
+		rep.Observe(c, "p1", 100)
+		rep.Observe(detect.Transport, "p1", 0)
 	}
 	if err := rep.Flush(ctx); err != nil {
 		t.Fatal(err)
@@ -95,7 +95,7 @@ func TestReporterControllerCeiling(t *testing.T) {
 
 	// Window 2: busy and clean, so the ceiling grows by one step.
 	for i := 0; i < 340; i++ { // 340 / (35 x 10s) = 0.97
-		rep.Observe(detect.OK)
+		rep.Observe(detect.OK, "p0", 100)
 	}
 	_ = rep.Flush(ctx)
 	clk.t = clk.t.Add(Window)
@@ -138,8 +138,8 @@ func TestReporterKeepsCountsWhenRedisFails(t *testing.T) {
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	rep := NewReporter(rdb, "")
-	rep.Observe(detect.OK)
-	rep.Observe(detect.LoginWall)
+	rep.Observe(detect.OK, "p1", 10)
+	rep.Observe(detect.LoginWall, "p2", 10)
 	mr.Close()
 	if err := rep.Flush(context.Background()); err == nil {
 		t.Fatal("want an error")

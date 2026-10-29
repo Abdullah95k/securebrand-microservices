@@ -36,12 +36,14 @@ func windowKey(ns string, start time.Time) string {
 
 func ceilingKey(ns string) string { return ns + "aimd:global_rps" }
 
-// Reporter counts GraphQL outcomes and flushes them to Redis. It is safe for
-// concurrent use; Observe is a pair of atomic adds.
+// Reporter counts GraphQL outcomes and flushes them to Redis: block
+// counts for AIMD, and requests and wire bytes per lane for the traffic
+// budget. It is safe for concurrent use; Observe is a few atomic adds.
 type Reporter struct {
 	rdb            *redis.Client
 	ns             string
 	total, blocked atomic.Int64
+	reqs, bytes    [3]atomic.Int64 // per lane: p0, p1, p2
 	now            func() time.Time
 }
 
@@ -50,9 +52,27 @@ func NewReporter(rdb *redis.Client, ns string) *Reporter {
 	return &Reporter{rdb: rdb, ns: ns, now: time.Now}
 }
 
+// Lanes are the budget's lane names, by index.
+var Lanes = [3]string{"p0", "p1", "p2"}
+
+func laneIndex(lane string) int {
+	switch lane {
+	case "p0":
+		return 0
+	case "p2":
+		return 2
+	default:
+		return 1
+	}
+}
+
 // Observe counts one response. Transport failures are the proxy's, not
-// Facebook's answer, and are left out.
-func (r *Reporter) Observe(c detect.Class) {
+// Facebook's answer: they count for the budget (they used traffic) but
+// not for AIMD.
+func (r *Reporter) Observe(c detect.Class, lane string, wireBytes int64) {
+	i := laneIndex(lane)
+	r.reqs[i].Add(1)
+	r.bytes[i].Add(wireBytes)
 	if c == detect.Transport {
 		return
 	}
@@ -65,20 +85,43 @@ func (r *Reporter) Observe(c detect.Class) {
 // Flush writes the counts gathered since the last flush.
 func (r *Reporter) Flush(ctx context.Context) error {
 	total, blocked := r.total.Swap(0), r.blocked.Swap(0)
-	if total == 0 {
+	var reqs, bytes [3]int64
+	nonzero := total > 0
+	for i := range reqs {
+		reqs[i], bytes[i] = r.reqs[i].Swap(0), r.bytes[i].Swap(0)
+		nonzero = nonzero || reqs[i] > 0
+	}
+	if !nonzero {
 		return nil
 	}
-	key := windowKey(r.ns, r.now().Truncate(Window))
+	now := r.now()
 	_, err := r.rdb.TxPipelined(ctx, func(p redis.Pipeliner) error {
-		p.HIncrBy(ctx, key, "total", total)
-		p.HIncrBy(ctx, key, "blocked", blocked)
-		p.Expire(ctx, key, 10*time.Minute)
+		if total > 0 {
+			key := windowKey(r.ns, now.Truncate(Window))
+			p.HIncrBy(ctx, key, "total", total)
+			p.HIncrBy(ctx, key, "blocked", blocked)
+			p.Expire(ctx, key, 10*time.Minute)
+		}
+		for _, key := range []string{budgetDayKey(r.ns, now), budgetSliceKey(r.ns, now)} {
+			for i, lane := range Lanes {
+				if reqs[i] > 0 {
+					p.HIncrBy(ctx, key, "req:"+lane, reqs[i])
+					p.HIncrBy(ctx, key, "bytes:"+lane, bytes[i])
+				}
+			}
+		}
+		p.Expire(ctx, budgetDayKey(r.ns, now), 72*time.Hour)
+		p.Expire(ctx, budgetSliceKey(r.ns, now), 3*time.Hour)
 		return nil
 	})
 	if err != nil {
 		// Keep the counts for the next attempt.
 		r.total.Add(total)
 		r.blocked.Add(blocked)
+		for i := range reqs {
+			r.reqs[i].Add(reqs[i])
+			r.bytes[i].Add(bytes[i])
+		}
 	}
 	return err
 }

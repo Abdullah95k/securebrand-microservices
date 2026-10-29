@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/twmb/franz-go/pkg/kgo"
 
 	fbv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fb/v1"
 	taskv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fbs/task/v1"
@@ -41,6 +42,17 @@ type Request struct {
 	Limits         *taskv1.Limits
 	IdempotencyKey string
 	Params         map[string]any
+	// Posts are extra root tasks: comment refreshes of older posts that ride
+	// on the page's job.
+	Posts []PostRoot
+	// MaxRunningInLane caps jobs running in Lane fleet-wide (0 = no cap).
+	MaxRunningInLane int
+}
+
+// PostRoot is a post task to start with a job.
+type PostRoot struct {
+	Mode  fbv1.CrawlMode
+	Scope *taskv1.PostScope
 }
 
 // Job is a job row.
@@ -72,6 +84,9 @@ type Dispatcher struct {
 // ErrTooManyJobs is returned when a client exceeds its concurrent job cap.
 var ErrTooManyJobs = errors.New("dispatch: too many running jobs")
 
+// ErrLaneFull is returned when the lane's fleet-wide job cap is reached.
+var ErrLaneFull = errors.New("dispatch: the fleet is running its maximum of jobs in this lane")
+
 // ResolvePageID returns the page id for a normalised ref if known.
 func (d *Dispatcher) ResolvePageID(ctx context.Context, ref string) (int64, bool) {
 	if strings.HasPrefix(ref, "id:") {
@@ -102,6 +117,16 @@ func (d *Dispatcher) Create(ctx context.Context, r Request, maxRunning int) (*Jo
 		}
 		if running >= maxRunning {
 			return nil, false, ErrTooManyJobs
+		}
+	}
+	if r.MaxRunningInLane > 0 {
+		var running int
+		if err := d.DB.QueryRow(ctx, `SELECT count(*) FROM jobs WHERE lane = $1 AND status IN ('running','finalizing')`,
+			int16(r.Lane)).Scan(&running); err != nil {
+			return nil, false, err
+		}
+		if running >= r.MaxRunningInLane {
+			return nil, false, ErrLaneFull
 		}
 	}
 	pageID, known := d.ResolvePageID(ctx, r.PageRef)
@@ -153,15 +178,33 @@ func (d *Dispatcher) Create(ctx context.Context, r Request, maxRunning int) (*Jo
 		return nil, false, fmt.Errorf("dispatch: insert job: %w", err)
 	}
 	root := task.NewPage(id.String(), r.Lane, cm, r.PageRef, pageID, "", r.Limits)
-	if err := d.Jobs.Spawn(ctx, id.String(), root.TaskId); err != nil {
+	roots := []*taskv1.Task{root}
+	for _, p := range r.Posts {
+		pt := task.NewPost(root, p.Mode, p.Scope)
+		roots = append(roots, pt)
+		// Coverage of refreshed posts is reported with the job's.
+		if err := d.Jobs.SetPost(ctx, id.String(), p.Scope.PostId, p.Scope.PostCreatedAt.AsTime().Unix(),
+			p.Scope.ReportedCommentCount, jobs.PostPending); err != nil {
+			d.fail(ctx, id, err)
+			return nil, false, err
+		}
+	}
+	ids := make([]string, len(roots))
+	recs := make([]*kgo.Record, len(roots))
+	for i, t := range roots {
+		ids[i] = t.TaskId
+		rec, err := d.Producer.Record(topics.Task(t.Kind, t.Lane), task.ScopeKey(t), t)
+		if err != nil {
+			d.fail(ctx, id, err)
+			return nil, false, err
+		}
+		recs[i] = rec
+	}
+	if err := d.Jobs.Spawn(ctx, id.String(), ids...); err != nil {
 		d.fail(ctx, id, err)
 		return nil, false, err
 	}
-	rec, err := d.Producer.Record(topics.Task(root.Kind, root.Lane), task.ScopeKey(root), root)
-	if err == nil {
-		err = d.Producer.ProduceSync(ctx, rec)
-	}
-	if err != nil {
+	if err := d.Producer.ProduceSync(ctx, recs...); err != nil {
 		d.fail(ctx, id, err)
 		return nil, false, fmt.Errorf("dispatch: produce: %w", err)
 	}

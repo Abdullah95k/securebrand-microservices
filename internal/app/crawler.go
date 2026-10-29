@@ -43,6 +43,8 @@ type Crawler struct {
 	Registry    *registry.DB
 	Suppression *gdpr.Suppression
 	Components  []run.Func
+	// Lanes holds each stage's lane scheduler (shared slots only).
+	Lanes []*lanes.Scheduler
 }
 
 // CrawlerOptions customise construction (tests).
@@ -155,6 +157,9 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 			return nil, fmt.Errorf("unknown stage %q", s)
 		}
 		sched := laneScheduler(cfg.Crawler, s)
+		if sched != nil {
+			c.Lanes = append(c.Lanes, sched)
+		}
 		for i, lane := range []taskv1.Lane{taskv1.Lane_LANE_P0, taskv1.Lane_LANE_P1, taskv1.Lane_LANE_P2} {
 			n := cfg.Crawler.Lanes[topics.LaneName(lane)]
 			if n <= 0 {
@@ -175,6 +180,21 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 			c.Components = append(c.Components, cons.Run)
 		}
 		slog.Info("stage enabled", "stage", s)
+	}
+	if cfg.Scheduler.Budget.Enabled && len(c.Lanes) > 0 {
+		// The daily budget pauses backfill by closing the p2 lane.
+		gate := ratelimit.NewBudgetGate(rdb, cfg.Kafka.TopicPrefix)
+		gate.OnChange = func(st ratelimit.BudgetState) {
+			n := cfg.Crawler.Lanes["p2"]
+			if st.PauseP2 {
+				n = 0
+			}
+			for _, l := range c.Lanes {
+				l.SetMax(2, n)
+			}
+			slog.Warn("budget: backfill lane", "paused", st.PauseP2, "why", st.Explanation)
+		}
+		c.Components = append(c.Components, gate.Run)
 	}
 	return c, nil
 }

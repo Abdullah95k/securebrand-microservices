@@ -30,7 +30,14 @@ paths:
         "202": {description: Job accepted, content: {application/json: {schema: {$ref: '#/components/schemas/Job'}}}}
         "200": {description: Existing job for this Idempotency-Key, content: {application/json: {schema: {$ref: '#/components/schemas/Job'}}}}
         "400": {$ref: '#/components/responses/Problem'}
-        "429": {description: Too many running jobs for this client or rate limited, content: {application/problem+json: {schema: {$ref: '#/components/schemas/Problem'}}}}
+        "429":
+          description: >-
+            Too many running jobs for this client (api.max_running_p0_jobs_per_client), the fleet's
+            on-demand capacity is reached (api.max_running_p0_jobs), or rate limited. Retry after the
+            Retry-After seconds.
+          headers:
+            Retry-After: {schema: {type: integer}}
+          content: {application/problem+json: {schema: {$ref: '#/components/schemas/Problem'}}}
     get:
       summary: List jobs (own jobs; all jobs with admin)
       parameters:
@@ -121,7 +128,14 @@ paths:
               type: object
               properties:
                 enabled: {type: boolean}
-                interval_hours: {type: integer, minimum: 1, maximum: 720}
+                interval_hours:
+                  type: integer
+                  minimum: 1
+                  maximum: 720
+                  description: Fixed interval; turns adaptive scheduling off for the page
+                adaptive:
+                  type: boolean
+                  description: true hands the interval back to the adaptive tiers (by posting rate)
       responses:
         "204": {description: Updated}
     delete:
@@ -308,7 +322,11 @@ components:
               type: object
               properties:
                 enabled: {type: boolean, default: true}
-                interval_hours: {type: integer, default: 24}
+                interval_hours:
+                  type: integer
+                  description: >-
+                    Fixed re-scrape interval. Without it the page is scheduled adaptively: its tier
+                    (T0 3h ... T4 7d) follows its posting rate after every job.
             backfill: {type: boolean, default: true}
     JobStatus:
       type: string
