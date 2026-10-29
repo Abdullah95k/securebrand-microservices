@@ -2,6 +2,7 @@
 //
 //	fbctl migrate up|down|status        apply schema migrations, registry seed and partitions
 //	fbctl kafka apply                    create/grow topics from configs/topics.yaml
+//	fbctl schemas apply|check            register the fb.v1 schemas (BACKWARD_TRANSITIVE) / dry run
 //	fbctl apikey create --name N --scopes jobs:write,data:read
 //	fbctl apikey revoke --prefix P
 //	fbctl registry list
@@ -29,6 +30,7 @@ func usage() {
 commands:
   migrate up|down|status
   kafka apply [--partitions-cap N] [--replicas N]
+  schemas apply | schemas check
   apikey create --name NAME --scopes s1,s2 [--rate N]
   apikey revoke --prefix PREFIX
   registry list | registry set --file query.json
@@ -63,6 +65,8 @@ func main() {
 		err = migrate(ctx, cfg, sub)
 	case "kafka apply":
 		err = kafkaApply(ctx, cfg, rest)
+	case "schemas apply", "schemas check":
+		err = schemasApply(ctx, cfg, sub == "check")
 	case "apikey create":
 		err = apikeyCreate(ctx, cfg, rest)
 	case "apikey revoke":

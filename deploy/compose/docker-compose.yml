@@ -14,6 +14,7 @@ x-fbs: &fbs
     FBS_POSTGRES__DSN: postgres://fbs:fbs@postgres:5432/fbs?sslmode=disable
     FBS_REDIS__ADDR: valkey:6379
     FBS_KAFKA__BROKERS: redpanda:9092
+    FBS_KAFKA__SCHEMA_REGISTRY__URL: http://redpanda:8081
     FBS_S3__ENDPOINT: s3:9000
     FBS_FB__BASE_URL: ${FBS_FB_BASE_URL:-http://fakefb:8090}
   volumes:
@@ -37,7 +38,8 @@ services:
       redpanda start --mode dev-container --smp 1 --memory 1G
       --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
       --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
-    ports: ["19092:19092"]
+    # 18081: Redpanda's Schema Registry (kafka.schema_registry.url).
+    ports: ["19092:19092", "18081:8081"]
     healthcheck: {test: ["CMD", "rpk", "cluster", "health", "--exit-when-healthy"], interval: 3s, retries: 30}
 
   valkey:
@@ -73,6 +75,15 @@ services:
     volumes:
       - ./local.yaml:/etc/fbs/local.yaml:ro
     entrypoint: ["/usr/local/bin/fbctl", "kafka", "apply", "--partitions-cap", "3", "--replicas", "1"]
+    depends_on:
+      redpanda: {condition: service_healthy}
+
+  schemas:
+    image: ${FBS_IMAGE:-fbs:dev}
+    environment: *fbs-env
+    volumes:
+      - ./local.yaml:/etc/fbs/local.yaml:ro
+    entrypoint: ["/usr/local/bin/fbctl", "schemas", "apply"]
     depends_on:
       redpanda: {condition: service_healthy}
 

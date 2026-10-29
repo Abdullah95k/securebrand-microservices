@@ -31,6 +31,13 @@ kafka:
   topic_prefix: ""        # prepended to every topic name (useful for shared clusters)
   produce_linger: 5ms
   compression: zstd
+  # Schema Registry for the public fb.v1 contract (`fbctl schemas apply`).
+  # Records stay plain protobuf with the type in the fbs-type header; the
+  # registry documents the schemas and rejects incompatible changes.
+  schema_registry:
+    url: ""                # e.g. http://localhost:18081 (Redpanda dev)
+    username: ""
+    password: ""
 
 s3:
   endpoint: "localhost:9000"
