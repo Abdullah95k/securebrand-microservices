@@ -21,6 +21,7 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/jobs"
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/lanes"
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/rawsink"
+	"github.com/abdullah95k/securebrand-microservices/internal/crawl/shadow"
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/stage"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/browser"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/detect"
@@ -154,6 +155,7 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 		gql.Raw, gql.CaptureAll = sink, cfg.FB.CaptureRaw == "all"
 		c.Components = append(c.Components, func(ctx context.Context) error { return sink.Run(ctx, time.Minute) })
 	}
+	deps.Shadow = shadow.Configured(cfg.FB.ShadowRate, gql.Raw)
 	kcfg := kafka.ClientConfig{Brokers: cfg.Kafka.Brokers, ClientID: cfg.Kafka.ClientID + "-crawler",
 		TopicPrefix: cfg.Kafka.TopicPrefix, Linger: cfg.Kafka.ProduceLinger}
 	stages := o.Stages

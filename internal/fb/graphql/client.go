@@ -20,9 +20,11 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/metrics"
 )
 
-// RawSink receives raw responses for replay and drift debugging.
+// RawSink receives raw responses for replay and drift debugging, with the
+// request's template values (page_id, feedback_id, ...) so they can be
+// parsed again with their context.
 type RawSink interface {
-	Capture(ctx context.Context, query string, cls detect.Class, body []byte)
+	Capture(ctx context.Context, query string, cls detect.Class, body []byte, vars map[string]any)
 }
 
 // Request is one logical GraphQL call.
@@ -45,6 +47,8 @@ type Response struct {
 	Reason  string
 	Errors  []detect.GQLError
 	Elapsed time.Duration
+	// Vars are the request's template values.
+	Vars map[string]any
 	// Wire bytes (compressed, as billed by proxies).
 	BytesIn  int64
 	BytesOut int64
@@ -78,10 +82,20 @@ type Client struct {
 func breakerKey(q registry.Query) string { return q.Name + "|" + q.DocID }
 
 // Parsed reports whether a response of resp's query parsed with every
-// required field. Stages call it after parsing; it feeds the breakers.
+// required field. Stages call it after parsing; it feeds the breakers, and
+// a drifted response is captured (the transport classed it OK, so the
+// capture of failures did not see it).
 func (c *Client) Parsed(resp *Response, ok bool) {
-	if c.Breakers != nil && resp != nil && resp.Query.DocID != "" {
+	if resp == nil {
+		return
+	}
+	if c.Breakers != nil && resp.Query.DocID != "" {
 		c.Breakers.Observe(breakerKey(resp.Query), !ok)
+	}
+	// Also with CaptureAll: that copy is under raw/ as OK, and the drifted
+	// ones belong under raw-failures/ where replay looks first.
+	if !ok && c.Raw != nil && resp.Class == detect.OK {
+		c.Raw.Capture(context.Background(), resp.Query.Name, detect.SchemaDrift, resp.Body, resp.Vars)
 	}
 }
 
@@ -185,10 +199,10 @@ func (c *Client) do(ctx context.Context, id *session.Identity, q registry.Query,
 	}
 	metrics.FBRequests.WithLabelValues(q.Name, cls.String(), tier).Inc()
 	if c.Raw != nil && (c.CaptureAll || cls != detect.OK) {
-		c.Raw.Capture(ctx, q.Name, cls, tr.Body)
+		c.Raw.Capture(ctx, q.Name, cls, tr.Body, req.Vars)
 	}
 	return &Response{Query: q, Parts: parts, Body: tr.Body, Status: tr.Status, Class: cls,
-		Reason: reason, Errors: errs, Elapsed: elapsed, BytesIn: tr.BytesIn, BytesOut: tr.BytesOut}, nil
+		Reason: reason, Errors: errs, Elapsed: elapsed, Vars: req.Vars, BytesIn: tr.BytesIn, BytesOut: tr.BytesOut}, nil
 }
 
 // pace applies identity pacing, then the per-page and global fleet limits.

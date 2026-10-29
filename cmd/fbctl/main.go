@@ -8,6 +8,7 @@
 //	fbctl registry list
 //	fbctl registry set --file query.json
 //	fbctl dlq replay [--reason R] [--max N]
+//	fbctl replay [--query Q] [--since 24h] [--fixtures-dir DIR]   re-parse captured raw responses; exit 3 while some drift
 //	fbctl fixtures scrub --dir testdata/fb/<query>/<case>
 //	fbctl media ack --consumer analysis [--status processed]   (dev: simulate analysis-service acks)
 package main
@@ -35,6 +36,7 @@ commands:
   apikey revoke --prefix PREFIX
   registry list | registry set --file query.json
   dlq replay [--reason R] [--max N]
+  replay [--prefix raw-failures] [--query Q,..] [--since 168h] [--fixtures-dir DIR --name N --samples 3]
   fixtures scrub --dir DIR
   media ack --consumer NAME [--status processed|failed_permanent|failed_retryable] [--max N]`)
 	os.Exit(2)
@@ -75,6 +77,8 @@ func main() {
 		err = registryList(ctx, cfg)
 	case "registry set":
 		err = registrySet(ctx, cfg, rest)
+	case "replay ":
+		err = replayRaw(ctx, cfg, rest)
 	case "dlq replay":
 		err = dlqReplay(ctx, cfg, rest)
 	case "fixtures scrub":

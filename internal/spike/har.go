@@ -13,6 +13,7 @@ import (
 
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/parse"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/registry"
+	"github.com/abdullah95k/securebrand-microservices/internal/fixtures"
 )
 
 // HAR import: a browser recording of a logged-out session is the most
@@ -266,25 +267,6 @@ func compareQuery(q registry.Query, ops []HAROperation, docID string) HARQueryRe
 	return r
 }
 
-// feedbackIDs decodes a feedback id ("feedback:<post>" or
-// "feedback:<post>_<comment>", base64) into its numeric parts.
-func feedbackIDs(id string) (post, comment int64) {
-	b, err := base64.StdEncoding.DecodeString(id)
-	if err != nil {
-		if b, err = base64.RawStdEncoding.DecodeString(id); err != nil {
-			return 0, 0
-		}
-	}
-	s, ok := strings.CutPrefix(string(b), "feedback:")
-	if !ok {
-		return 0, 0
-	}
-	p, c, _ := strings.Cut(s, "_")
-	post, _ = strconv.ParseInt(p, 10, 64)
-	comment, _ = strconv.ParseInt(c, 10, 64)
-	return post, comment
-}
-
 func varString(vars map[string]any, k string) string {
 	switch v := vars[k].(type) {
 	case string:
@@ -324,7 +306,7 @@ func harFixtures(c HARCapture, seed registry.Seed, root, name string) ([]string,
 	}
 	keep := []string{strconv.FormatInt(pageID, 10)}
 	if pageHTML != nil {
-		d, err := writeFixture(root, "page_html", date+"_"+name, "response.html", pageHTML,
+		d, err := fixtures.Write(root, "page_html", date+"_"+name, "response.html", pageHTML,
 			map[string]any{"page_id": pageID, "source": "har"}, keep)
 		if err != nil {
 			return written, err
@@ -342,14 +324,14 @@ func harFixtures(c HARCapture, seed registry.Seed, root, name string) ([]string,
 				continue
 			}
 			meta := map[string]any{"page_id": pageID, "source": "har", "doc_id": op.DocID}
-			post, comment := feedbackIDs(varString(op.Variables, "id"))
+			post, comment := parse.FeedbackTarget(varString(op.Variables, "id"))
 			switch q.Parser {
 			case "comments":
 				meta["post_id"] = post
 			case "replies":
 				meta["post_id"], meta["parent_comment_id"] = post, comment
 			}
-			d, err := writeFixture(root, q.Parser, date+"_"+name, "response.ndjson", op.Body, meta, keep)
+			d, err := fixtures.Write(root, q.Parser, date+"_"+name, "response.ndjson", op.Body, meta, keep)
 			if err != nil {
 				return written, err
 			}

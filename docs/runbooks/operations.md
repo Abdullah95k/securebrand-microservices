@@ -14,7 +14,7 @@ All metric names start with `fbs_`.
 | Lanes | `fbs_lane_slots{stage,lane,state}` | `waiting` on p0 ≈ 0 |
 | Schedule | `fbs_scheduled_pages{tier}`, `fbs_schedule_lag_seconds{tier}`, `fbs_post_refreshes_total{kind}` | lag < tier interval |
 | Budget | `fbs_budget_used{kind,lane}`, `fbs_budget_projected{kind}`, `fbs_budget_limit{kind}`, `fbs_budget_backfill_paused`, `fbs_budget_stretch` | projected < limit |
-| Parser health | `fbs_parse_total{outcome="drift"}`, `fbs_parse_missing_field_total` | drift ≈ 0 |
+| Parser health | `fbs_parse_total{outcome="drift"}`, `fbs:parse_missing_per_response:rate1h` (vs 7d ago), `fbs_parse_shadow_total` | drift ≈ 0; optional fields as last week |
 | Registry | `fbs_registry_query_healthy{query}`, `fbs_registry_sync_last_success_timestamp_seconds`, `fbs_registry_promotions_total{query}`, `fbs_registry_checks_total{query,status,verdict}` | all 1; last success < 1h ago |
 | Coverage | `fbs_comment_completeness_ratio` | median at the Phase 0 baseline |
 | Truncation | `fbs_timeline_truncated_total` | flat |
@@ -119,17 +119,23 @@ Signals:
 
 ## Schema drift
 
-Symptom: `fbs_parse_total{outcome="drift"}` or a new
-`fbs_parse_missing_field_total{field}` series. When half the responses of a
-query fail to parse (`fb.query_breaker`), its breaker opens and the query
-stops being sent until a probe parses again. This saves the requests that
-would be wasted until the fix ships.
+Symptom: `fbs_parse_total{outcome="drift"}` (alert `FbsSchemaDrift`), or a field going missing more often than a week ago (`FbsOptionalFieldDrift`). When half the responses of a query fail to parse (`fb.query_breaker`), its breaker opens and the query stops being sent until a probe parses again. This saves the requests that would be wasted until the fix ships.
 
-1. Raw failing responses are in the raw bucket under `raw-failures/<query>/`
-   (`fb.capture_raw: failures`).
-2. Add the response as a fixture (`fbctl fixtures scrub --dir ...`), fix the
-   candidate paths in `internal/fb/parse`, `make golden`, ship.
-3. Replay the DLQ: `fbctl dlq replay --reason max_attempts`.
+**Required fields** (a post or comment cannot be built):
+
+1. The drifted responses are in the raw bucket under `raw-failures/<query>/` (`fb.capture_raw: failures`). They are captured with the request's variables (page, feedback id), so they can be parsed again with their context.
+2. See what fails, and turn some of them into scrubbed fixtures:
+   `fbctl replay --query timeline --since 24h --fixtures-dir testdata/fb --name drift`
+3. Fix the candidate paths in `internal/fb/parse`, `make golden`, and check the fix against the production responses before shipping: `fbctl replay --query timeline --since 24h`. It exits 3 while some still drift.
+4. Ship, then replay the DLQ: `fbctl dlq replay --reason max_attempts`.
+
+**Optional fields** (text, reactions, media and the like) never fail a parse, so their loss is silent. `fbs:parse_missing_per_response:rate1h` is how often each field is missing per response. `FbsOptionalFieldDrift` fires when that is more than twice last week's rate plus 5 points, or above 25% with no history. The "Optional fields missing per response" panel shows both curves. To look at the responses, set `fb.capture_raw: all` for a while and run `fbctl replay --prefix raw --query <q>`.
+
+**Proving a new parser version on live traffic:** register it as a candidate in `internal/crawl/shadow` (`shadow.Candidates.Timeline` or `.Comments`, from its file's `init`). A share of responses (`fb.shadow_rate`, 5%) is then parsed by both versions; only the active result is emitted.
+- `fbs_parse_shadow_total{query,outcome}` counts `same`, `differs` and `drift`.
+- Responses the two parse differently are captured under `raw-failures/shadow-<query>/`, apart from real drift. Replay them with `fbctl replay --query shadow-<query>`. A candidate that panics only counts as `error`.
+- `FbsShadowParserDiffers` (info) fires above 1%.
+- Promote the candidate once it stays `same`.
 
 ## Kafka lag
 

@@ -2,12 +2,9 @@ package spike
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
-	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"time"
@@ -47,7 +44,7 @@ func (r *Runner) Capture(ctx context.Context, page, dir, name string) ([]string,
 	var written []string
 	write := func(query, file string, body []byte, meta map[string]any) error {
 		meta["source"] = "capture"
-		d, err := writeFixture(dir, query, date+"_"+name, file, body, meta, keep)
+		d, err := fixtures.Write(dir, query, date+"_"+name, file, body, meta, keep)
 		if d != "" {
 			written = append(written, d)
 		}
@@ -87,24 +84,6 @@ func (r *Runner) Capture(ctx context.Context, page, dir, name string) ([]string,
 	}
 	err = write("replies", "response.ndjson", rresp.Body, map[string]any{"page_id": pg.PageId, "post_id": p.PostId, "parent_comment_id": th.CommentID})
 	return written, err
-}
-
-// writeFixture writes body and meta.json to root/<query>/<caseName>/ and
-// scrubs them; ids in keep (the page id) survive the scrub.
-func writeFixture(root, query, caseName, file string, body []byte, meta map[string]any, keep []string) (string, error) {
-	d := filepath.Join(root, query, caseName)
-	if err := os.MkdirAll(d, 0o755); err != nil {
-		return "", err
-	}
-	if err := os.WriteFile(filepath.Join(d, file), body, 0o644); err != nil {
-		return "", err
-	}
-	meta["captured_at"] = time.Now().UTC()
-	mb, _ := json.MarshalIndent(meta, "", "  ")
-	if err := os.WriteFile(filepath.Join(d, "meta.json"), mb, 0o644); err != nil {
-		return "", err
-	}
-	return d, fixtures.ScrubDir(d, keep)
 }
 
 // errNotOK is reported when a response came back but was not OK.

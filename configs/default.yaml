@@ -99,6 +99,10 @@ fb:
     min_utilization: 0.8
   bootstrap_attempts: 3
   capture_raw: failures    # all | failures | none
+  # Share of responses a candidate parser (internal/crawl/shadow) also
+  # parses, to prove a new parser version on live traffic before it becomes
+  # active. Nothing runs unless a candidate is compiled in.
+  shadow_rate: 0.05
   proxy:
     tiers: []
     # - name: isp
