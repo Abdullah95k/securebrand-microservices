@@ -242,6 +242,10 @@ paths:
   /admin/queries:
     get:
       summary: Facebook query registry (admin)
+      description: >-
+        Every entry with its status and, when fbs-registry-sync checked it,
+        last_check (ok | stale | drift | inconclusive, with the reason),
+        last_checked_at and last_ok_at.
       responses:
         "200": {description: Registry entries}
   /admin/queries/{name}:
@@ -266,6 +270,18 @@ paths:
                 variables: {type: object, description: 'JSON template; "{{name}}" placeholders are filled at request time'}
       responses:
         "200": {description: Saved}
+  /admin/registry-sync/runs:
+    get:
+      summary: Latest fbs-registry-sync runs, newest first (admin)
+      description: >-
+        Each run's report lists the canary page loads, the doc_ids found in
+        the bundles, new candidates, every check and its verdict, promotions,
+        retired entries, failing queries (active doc_id stale or drifted with
+        no replacement) and unchecked ones.
+      parameters:
+        - {in: query, name: limit, schema: {type: integer, minimum: 1, maximum: 200, default: 20}}
+      responses:
+        "200": {description: Runs}
 components:
   securitySchemes:
     apiKey:

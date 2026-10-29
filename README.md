@@ -46,6 +46,7 @@ fbs-crawler --stages page ─PostTask─▶ post ─ThreadTask─▶ thread     
 | `fbs-crawler --stages page,post,thread,retry` | Fetch, parse and emit. Run one Deployment per stage. |
 | `fbs-persister` | Writes `fb.*` topics into partitioned Postgres (COPY + no-op upserts) |
 | `fbs-media-downloader` / `fbs-media-janitor` | Temporary media lifecycle ([contract](docs/contracts/media-handoff.md)) |
+| `fbs-registry-sync` | Follows Facebook's doc_id rotations. It scans canary pages' bundles, checks new ids with real requests and promotes working ones ([runbook](docs/runbooks/operations.md#registry-stale-doc_id-rotated)). |
 | `fbctl` | Migrations, topics, API keys, registry, DLQ replay, fixture scrub, dev media acks |
 | `fbs-spike` | Phase 0 harness against real Facebook: `phase0` runs everything; also `preflight`, `docids`, `har`, `capture`, `check-fixtures`, `run`, `report` (no infrastructure needed) |
 | `fakefb`, `devs3` | Synthetic Facebook and in-memory S3, for development and tests |
@@ -143,6 +144,7 @@ Settings that matter most:
 | `scheduler.tiers` | T0 3h … T3 72h, T4 7d | Adaptive re-scrape interval by posting rate (pages registered without `interval_hours`) |
 | `scheduler.post_refresh` | 24h / 72h / 7d by post age | Comment refresh of posts older than the timeline overlap, riding on the page's scheduled job; recrawls at 7 and 30 days |
 | `scheduler.budget` | unlimited | Daily request/byte budget: pauses backfill, then stretches slow tiers; never holds on-demand work |
+| `registry_sync.canary_pages`, `registry_sync.interval` | none / 30m | Public pages fbs-registry-sync checks doc_ids on; set at least three in production. `promote: false` makes it a dry run. |
 | `api.max_running_p0_jobs` | 0 (off) | Fleet-wide cap on running on-demand jobs (429 + Retry-After) |
 | `limits.video_policy` | `sd` (`thumbnail` for backfills) | `none`, `thumbnail`, `sd` or `hd` |
 | `crawler.slots`, `crawler.lanes`, `crawler.lane_min` | 240 / p2 ≤ 96 / 12 | In-flight tasks per pod and stage, shared by the lanes in priority order (on-demand > scheduled > backfill); backfill capped at 40%, each lane keeps a minimum |
@@ -184,7 +186,8 @@ The Helm chart is at `deploy/helm/fbs`.
 - KEDA ScaledObjects on consumer-group lag;
 - PodDisruptionBudgets;
 - pre-install/upgrade Jobs for `fbctl migrate up` and `fbctl kafka apply`;
-- an optional PodMonitor and NetworkPolicy.
+- an optional PodMonitor and NetworkPolicy;
+- optional alerting and recording rules as a PrometheusRule (`alerts.enabled`), and a Grafana dashboard ConfigMap for the Grafana sidecar (`dashboards.enabled`). The sources are `deploy/helm/fbs/files/alerts.yaml` and `deploy/helm/fbs/files/dashboards/`; they also load into a plain Prometheus or Grafana.
 
 **Secrets:**
 - environment variables come from `secretEnv.existingSecret` (DSNs, S3 keys, HMAC key);

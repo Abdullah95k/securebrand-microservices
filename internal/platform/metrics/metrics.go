@@ -82,6 +82,7 @@ var (
 	PostRefreshes        = counterVec("post_refreshes_total", "Post comment refreshes dispatched, by kind (refresh, recrawl).", "kind")
 	BreakerState         = gaugeVec("breaker_state", "Circuit breaker state (0 closed, 1 half-open, 2 open).", "name")
 	QueryShortCircuit    = counterVec("fb_query_short_circuit_total", "Requests not sent because the query's breaker is open.", "query")
+	SchedulerLeader      = gauge("scheduler_leader", "1 on the scheduler pod that holds the leader lock.")
 	AIMDCeiling          = gauge("aimd_ceiling_rps", "Fleet-wide Facebook request ceiling set by AIMD.")
 	AIMDAdjustments      = counterVec("aimd_adjustments_total", "AIMD ceiling changes by direction.", "direction")
 	FleetRPS             = gauge("fleet_rps", "Facebook GraphQL responses per second across the fleet (last AIMD window).")
@@ -95,4 +96,13 @@ var (
 	APIRequests          = counterVec("api_requests_total", "API requests.", "route", "code")
 	KafkaProduce         = counterVec("kafka_produce_total", "Produced records.", "topic", "outcome")
 	KafkaCommitted       = counterVec("kafka_commits_total", "Offset commits.", "group", "outcome")
+	ConsumerLag          = gaugeVec("kafka_consumer_lag", "Records behind the end of each topic, per fbs consumer group (leader scheduler).", "group", "topic")
+
+	// Registry sync (fbs-registry-sync).
+	RegistrySyncRuns        = counterVec("registry_sync_runs_total", "Registry sync runs by status (ok, degraded, error).", "status")
+	RegistrySyncLastSuccess = gauge("registry_sync_last_success_timestamp_seconds", "When the last registry sync run completed (ok or degraded).")
+	RegistryChecks          = counterVec("registry_checks_total", "Registry entry checks on canary pages by entry status and verdict.", "query", "status", "verdict")
+	RegistryPromotions      = counterVec("registry_promotions_total", "doc_ids promoted to active.", "query")
+	RegistryQueryHealthy    = gaugeVec("registry_query_healthy", "1 when the query's active doc_id parsed on a canary page (or a replacement was promoted), 0 when it failed with none to promote.", "query")
+	RegistryDiscovered      = gauge("registry_discovered_operations", "Relay operations found in the canary pages' bundles in the last run.")
 )

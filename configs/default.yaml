@@ -230,3 +230,20 @@ privacy:
     raw_payload_days: 7
     media_rows_days: 30
     jobs_days: 90
+
+# fbs-registry-sync: every interval it loads the canary pages, scans them and
+# their JS bundles for Relay doc_ids, records new ones as candidates, checks
+# each candidate and the active entry with a real request on a canary page
+# (timeline -> comments -> replies), and promotes a candidate that parses.
+# The former active entry stays as a fallback.
+registry_sync:
+  interval: 30m
+  canary_pages: []       # vanity names or URLs; set at least three in production
+  tier: ""
+  max_bundles: 60
+  bundles_via_proxy: false
+  promote: true
+  keep_fallbacks: 2
+  retire_after: 3
+  recheck_retired: 24h
+  timeout: 10m

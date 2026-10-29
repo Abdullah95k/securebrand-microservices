@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"io"
 	mrand "math/rand/v2"
 	"net/http"
@@ -25,7 +26,10 @@ type Faults struct {
 	Latency        time.Duration `json:"latency"`
 	ConsentWall    bool          `json:"consent_wall"`
 	Drift          bool          `json:"drift"` // rename story.message
-	MediaTTL       time.Duration `json:"media_ttl"`
+	// DriftRequired renames the stories' creation_time: the timeline parser
+	// misses a required field.
+	DriftRequired bool          `json:"drift_required"`
+	MediaTTL      time.Duration `json:"media_ttl"`
 }
 
 // Options configures a Server.
@@ -100,7 +104,23 @@ func (s *Server) renderer(r *http.Request) *renderer {
 		scheme = "https"
 	}
 	return &renderer{base: scheme + "://" + r.Host, mediaKey: s.mediaKey, mediaTTL: s.opts.Faults.MediaTTL,
-		topN: s.opts.TopReactions, inlineRepl: s.opts.InlineReply, drift: s.opts.Faults.Drift}
+		topN: s.opts.TopReactions, inlineRepl: s.opts.InlineReply, drift: s.opts.Faults.Drift, driftReq: s.opts.Faults.DriftRequired,
+		bundle: s.bundlePath()}
+}
+
+// bundlePath is the relay bundle's URL path. Like Facebook's, it is content
+// addressed: it changes whenever the accepted doc_ids do. Callers hold s.mu.
+func (s *Server) bundlePath() string {
+	names := make([]string, 0, len(s.opts.Docs))
+	for name := range s.opts.Docs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	h := fnv.New64a()
+	for _, name := range names {
+		_, _ = fmt.Fprintf(h, "%s=%v;", name, s.opts.Docs[name])
+	}
+	return fmt.Sprintf("/rsrc.php/v3/%x/relay.js", h.Sum64())
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
