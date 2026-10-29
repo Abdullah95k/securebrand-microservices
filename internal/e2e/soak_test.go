@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"runtime/pprof"
 	"strings"
 	"testing"
 	"time"
@@ -25,7 +26,9 @@ import (
 // job and on goroutine growth. At the end, a full job per page must leave
 // the store exactly like the world: every comment visible with its current
 // text, and every deleted one marked deleted. Opt-in: FBS_SOAK=1
-// (make soak); FBS_SOAK_PAGES (default 6); FBS_SOAK_OUT writes the report.
+// (make soak); FBS_SOAK_PAGES (default 6); FBS_SOAK_OUT writes the report;
+// FBS_SOAK_HEAPPROFILE=prefix writes heap profiles after 2 minutes and at
+// the end (prefix-base.pprof, prefix-end.pprof).
 func TestSoak(t *testing.T) {
 	if os.Getenv("FBS_SOAK") == "" {
 		t.Skip("set FBS_SOAK=1 (make soak)")
@@ -67,9 +70,29 @@ func TestSoak(t *testing.T) {
 	mutations := map[string]int{}
 	restarts := map[string]int{}
 	var maxGoroutines, baseGoroutines int
-	var maxHeap uint64
+	var maxHeap, baseLive uint64
+	// liveHeap is the heap left after a full collection; heap profiles are
+	// written after one too, so they show what is retained.
+	liveHeap := func(profile string) uint64 {
+		runtime.GC()
+		var m runtime.MemStats
+		runtime.ReadMemStats(&m)
+		if prefix := os.Getenv("FBS_SOAK_HEAPPROFILE"); prefix != "" {
+			f, err := os.Create(prefix + "-" + profile + ".pprof")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := pprof.Lookup("heap").WriteTo(f, 0); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.Close(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return m.HeapAlloc
+	}
 	var report strings.Builder
-	fmt.Fprintf(&report, "# Soak: %d pages, %s, restart every %s\n\n| t | goroutines | heap MB | redis keys | jobs done | running | oldest running |\n|---|---|---|---|---|---|---|\n",
+	fmt.Fprintf(&report, "# Soak: %d pages, %s, restart every %s\n\n| t | goroutines | heap in use MB | redis keys | jobs done | running | oldest running |\n|---|---|---|---|---|---|---|\n",
 		nPages, duration, restartEvery)
 
 	mutate := func() {
@@ -152,7 +175,7 @@ func TestSoak(t *testing.T) {
 		g := runtime.NumGoroutine()
 		maxGoroutines, maxHeap = max(maxGoroutines, g), max(maxHeap, m.HeapInuse)
 		if baseGoroutines == 0 && elapsed > 2*time.Minute {
-			baseGoroutines = g
+			baseGoroutines, baseLive = g, liveHeap("base")
 		}
 		keys, _ := s.Redis.DBSize(ctx).Result()
 		fmt.Fprintf(&report, "| %s | %d | %.0f | %d | %d | %d | %s |\n", elapsed.Round(time.Second), g, float64(m.HeapInuse)/1e6,
@@ -273,15 +296,17 @@ func TestSoak(t *testing.T) {
 		t.Fatalf("%d seen lists left behind, e.g. %s", len(left), left[0])
 	}
 	// Goroutines must not grow with the restarts.
-	runtime.GC()
+	endLive := liveHeap("end")
 	g := runtime.NumGoroutine()
 	if baseGoroutines > 0 && g > baseGoroutines*3/2+50 {
 		t.Fatalf("goroutines grew from %d to %d", baseGoroutines, g)
 	}
 	jobsRun := count(t, s, `SELECT count(*) FROM jobs`)
 	fmt.Fprintf(&report, "\n- jobs: %d; comments stored %d (%d visible, %d marked deleted)\n- mutations: %v\n- restarts: %v\n"+
-		"- edited comments: %d, with an edit counted: %d\n- goroutines: %d after 2 minutes, %d max, %d at the end; heap max %.0f MB\n",
-		jobsRun, stored, visible, markedDeleted, mutations, restarts, len(edited), counted, baseGoroutines, maxGoroutines, g, float64(maxHeap)/1e6)
+		"- edited comments: %d, with an edit counted: %d\n- goroutines: %d after 2 minutes, %d max, %d at the end; heap in use at most %.0f MB\n"+
+		"- live heap after a collection: %.0f MB after 2 minutes, %.0f MB at the end\n",
+		jobsRun, stored, visible, markedDeleted, mutations, restarts, len(edited), counted, baseGoroutines, maxGoroutines, g, float64(maxHeap)/1e6,
+		float64(baseLive)/1e6, float64(endLive)/1e6)
 	t.Log("\n" + report.String())
 	if out := os.Getenv("FBS_SOAK_OUT"); out != "" {
 		if err := os.WriteFile(out, []byte(report.String()), 0o644); err != nil {
