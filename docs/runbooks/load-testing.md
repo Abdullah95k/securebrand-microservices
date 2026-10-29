@@ -103,9 +103,14 @@ A 90-minute run there ([run 40882655887](https://github.com/Abdullah95k/securebr
 - 44 restarts: the crawler 21 times, the finalizer 17, the persister 6;
 - 19,683 comments stored. All 18,910 comments left in fakefb's world are stored, visible and with their current text. The other 773 are marked deleted, and each is one the test deleted or a reply under one;
 - 328 of the 336 edited comments still up have an edit counted. An edit made before a comment is first stored is not an edit for us, so some are expected to go uncounted; the test does not check the 8 one by one;
-- goroutines 300 after 2 minutes, at most 495, and 279 at the end: they did not grow with the restarts. Heap in use peaked at 359 MB; see the note on memory below.
+- goroutines 300 after 2 minutes, at most 495, and 279 at the end: they did not grow with the restarts. Heap in use rose steadily, to a peak of 359 MB; see **Memory** below.
 
 An earlier run with the same settings on the development container got through its 90 minutes (2,844 jobs, all completed, none partial or failed), but the container's Docker daemon stopped during the final checks.
+
+**Memory.** Every component runs in the test's one process, together with fakefb and an in-memory S3, so the heap in use covers all of them. The report gives the heap left after a full collection after 2 minutes and at the end, and `FBS_SOAK_HEAPPROFILE` writes a heap profile at both points (the workflow prints the difference). In a 30-minute run with the same settings ([run 40905417646](https://github.com/Abdullah95k/securebrand-microservices/actions/runs/40905417646)):
+- the live heap went from 64 MB after 2 minutes to 114 MB at the end;
+- 47.6 MB of the 50 MB growth is the in-memory S3 holding the downloaded media. Nothing in the test acknowledges media, so it stays until `media.ttl` (72h). In production, media goes to the S3 bucket;
+- everything else, fbs's own code included, came to within a megabyte of where it started.
 
 **What these tests found, all fixed:**
 - **Lost posts (load test):** when a page's timeline held both a post and a share of it, the parser returned the post only once, quoted inside the share. The post itself and its 654 comments were never crawled, and the jobs still completed. The parser now drops only true repeats (the same object at the same place) and keeps a quoted post as well as the post itself.
