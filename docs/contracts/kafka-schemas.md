@@ -18,6 +18,16 @@ Schema Registry subjects, get `kafka.topic_prefix` prepended.
 
 The files are in `api/proto/securebrand/fb/v1/`. Generated Go is in `gen/go/securebrand/fb/v1`.
 
+## Comment versions and deletions
+
+`fb.comment.v1` carries every observation of a comment, so a consumer sees each version:
+
+- **Edits:** a later record of the same `comment_id` with other `text` is an edit. The store counts them (`edit_count`, `edited_at` in the API).
+- **Deletions:** when a full read of a post (a recrawl, or a full job on a post crawled before) no longer returns a known top-level comment, the job finalizer publishes a record with `status: COMMENT_STATUS_DELETED`. Only `comment_id`, `post_id`, `page_id`, `post_created_at`, `depth` and `obs` are set; keep the content you already have. "Deleted" means no longer publicly visible: deleted by its author, removed or hidden by the page, or filtered by Facebook. Replies are not checked.
+- **Re-sightings:** a later ordinary record of a deleted comment (status unspecified) means it is visible again.
+
+Crawled records leave `status` unspecified, which means visible.
+
 ## Wire format
 
 - A value is the plain protobuf encoding of the message. There is no Schema Registry framing: no magic byte, schema id or message indexes.

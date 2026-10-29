@@ -83,6 +83,11 @@ func (c *Consumer) Run(ctx context.Context) error {
 			continue
 		}
 		if err := c.flush(ctx, recs); err != nil {
+			if ctx.Err() != nil {
+				// Shutting down: the batch is not committed and is read again.
+				c.cl.AllowRebalance()
+				return nil
+			}
 			slog.Error("persist: batch failed; retrying", "records", len(recs), "err", err)
 			// Re-write the same batch until it succeeds: never commit past
 			// unwritten data.

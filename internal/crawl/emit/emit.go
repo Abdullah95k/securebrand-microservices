@@ -93,6 +93,15 @@ func (e *Emitter) Comment(ctx context.Context, b *kafka.Batch, src Source, c *fb
 	return keep, b.AddProto(ctx, topics.Comment, strconv.FormatInt(c.PostId, 10), c)
 }
 
+// CommentDeleted publishes that a known comment is no longer visible: a
+// Comment with status DELETED and only its keys set.
+func (e *Emitter) CommentDeleted(ctx context.Context, b *kafka.Batch, src Source, c *fbv1.Comment) error {
+	d := &fbv1.Comment{CommentId: c.CommentId, PostId: c.PostId, PageId: c.PageId, PostCreatedAt: c.PostCreatedAt,
+		Depth: c.Depth, Status: fbv1.CommentStatus_COMMENT_STATUS_DELETED}
+	e.stamp(src, "comment:"+strconv.FormatInt(c.CommentId, 10), d, func(o *fbv1.Observation) { d.Obs = o })
+	return b.AddProto(ctx, topics.Comment, strconv.FormatInt(c.PostId, 10), d)
+}
+
 // Privatize sets the author key, applies pseudonymisation and redacts
 // suppressed authors. It returns false if the comment was redacted.
 func (e *Emitter) Privatize(c *fbv1.Comment) bool {

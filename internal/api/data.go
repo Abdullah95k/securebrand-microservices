@@ -175,10 +175,16 @@ type Comment struct {
 	Reactions       json.RawMessage `json:"reactions,omitempty"`
 	ReplyCount      *int64          `json:"reply_count,omitempty"`
 	URL             *string         `json:"url,omitempty"`
-	Status          string          `json:"status"`
-	Redacted        bool            `json:"redacted"`
-	FirstSeenAt     time.Time       `json:"first_seen_at"`
-	LastSeenAt      time.Time       `json:"last_seen_at"`
+	// Status is visible or deleted (no longer returned by a full read of the
+	// post since DeletedAt); a deleted comment keeps its last content.
+	Status    string     `json:"status"`
+	DeletedAt *time.Time `json:"deleted_at,omitempty"`
+	// EditCount counts text changes seen across scrapes, the last at EditedAt.
+	EditCount   int        `json:"edit_count"`
+	EditedAt    *time.Time `json:"edited_at,omitempty"`
+	Redacted    bool       `json:"redacted"`
+	FirstSeenAt time.Time  `json:"first_seen_at"`
+	LastSeenAt  time.Time  `json:"last_seen_at"`
 }
 
 type CommentAuthor struct {
@@ -190,9 +196,10 @@ type CommentAuthor struct {
 	Verified   *bool   `json:"verified,omitempty"`
 }
 
-func (s *Server) queryComments(ctx context.Context, postID int64, postCreated time.Time, parent *int64, depth *int, cur *cursorPos, limit int, pii bool) ([]Comment, error) {
+func (s *Server) queryComments(ctx context.Context, postID int64, postCreated time.Time, parent *int64, depth *int, status string, cur *cursorPos, limit int, pii bool) ([]Comment, error) {
 	q := `SELECT c.comment_id, c.post_id, c.parent_comment_id, c.root_comment_id, c.depth, c.author_key, c.text, c.text_ranges,
-		c.attachments, c.created_at, c.edited, c.is_op, c.reaction_count, c.reactions, c.reply_count, c.url, c.status, c.redacted,
+		c.attachments, c.created_at, c.edited, c.is_op, c.reaction_count, c.reactions, c.reply_count, c.url, c.status,
+		c.deleted_at, c.edit_count, c.edited_at, c.redacted,
 		c.first_seen_at, c.last_seen_at, a.author_id, a.name, a.profile_url, a.avatar_url, a.author_type, a.verified
 		FROM comments c LEFT JOIN comment_authors a ON a.author_key = c.author_key AND NOT c.redacted
 		WHERE c.post_created_at = $1 AND c.post_id = $2`
@@ -204,6 +211,10 @@ func (s *Server) queryComments(ctx context.Context, postID int64, postCreated ti
 	if depth != nil {
 		args = append(args, *depth)
 		q += fmt.Sprintf(" AND c.depth = $%d", len(args))
+	}
+	if status != "" {
+		args = append(args, status)
+		q += fmt.Sprintf(" AND c.status = $%d", len(args))
 	}
 	if cur != nil {
 		args = append(args, cur.T, cur.ID)
@@ -221,7 +232,7 @@ func (s *Server) queryComments(ctx context.Context, postID int64, postCreated ti
 		var a CommentAuthor
 		err := row.Scan(&c.CommentID, &c.PostID, &c.ParentCommentID, &c.RootCommentID, &c.Depth, &key, &c.Text, &c.TextRanges,
 			&c.Attachments, &c.CreatedAt, &c.Edited, &c.IsOP, &c.ReactionCount, &c.Reactions, &c.ReplyCount, &c.URL, &c.Status,
-			&c.Redacted, &c.FirstSeenAt, &c.LastSeenAt, &a.ID, &a.Name, &a.ProfileURL, &a.AvatarURL, &a.Type, &a.Verified)
+			&c.DeletedAt, &c.EditCount, &c.EditedAt, &c.Redacted, &c.FirstSeenAt, &c.LastSeenAt, &a.ID, &a.Name, &a.ProfileURL, &a.AvatarURL, &a.Type, &a.Verified)
 		if len(key) > 0 {
 			c.AuthorKey = hex.EncodeToString(key)
 		}
@@ -263,12 +274,17 @@ func (s *Server) listComments(w http.ResponseWriter, r *http.Request) {
 		}
 		depth = &d
 	}
+	status := r.URL.Query().Get("status")
+	if status != "" && status != "visible" && status != "deleted" {
+		problem(w, http.StatusBadRequest, "invalid status", "status must be visible or deleted")
+		return
+	}
 	var cur *cursorPos
 	if c, ok := decodeCursor(r.URL.Query().Get("cursor")); ok {
 		cur = &c
 	}
 	limit := limitParam(r)
-	cs, err := s.queryComments(r.Context(), id, t, parent, depth, cur, limit, clientFrom(r.Context()).Has(ScopePIIRead))
+	cs, err := s.queryComments(r.Context(), id, t, parent, depth, status, cur, limit, clientFrom(r.Context()).Has(ScopePIIRead))
 	if err != nil {
 		serverError(w, err)
 		return

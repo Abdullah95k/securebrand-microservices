@@ -18,6 +18,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	fbv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fb/v1"
+	"github.com/abdullah95k/securebrand-microservices/internal/crawl/emit"
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/jobs"
 	"github.com/abdullah95k/securebrand-microservices/internal/persist"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/kafka"
@@ -38,8 +39,12 @@ type Finalizer struct {
 	// Adaptive, when set, re-tiers the page and registers post refreshes
 	// once a job's data is stored.
 	Adaptive *Adaptive
+	// Deletions, when enabled, marks known top-level comments deleted when a
+	// full read of their post during the job no longer returned them.
+	Deletions Deletions
 
 	pending []finalBatch
+	held    map[string]bool // jobs in pending
 }
 
 type finalBatch struct {
@@ -48,25 +53,36 @@ type finalBatch struct {
 	since time.Time
 }
 
-// Tick pops ready jobs and finalises those the persister has caught up on.
+// Tick takes ready jobs and finalises those the persister has caught up
+// on. A job leaves the finalize set only once it is finalised, so jobs held
+// here while the persister catches up are not lost when the leader changes.
 func (f *Finalizer) Tick(ctx context.Context) error {
-	ids, err := f.Jobs.PopFinalize(ctx, 500)
+	ids, err := f.Jobs.ReadyToFinalize(ctx, 500)
 	if err != nil {
 		return err
 	}
-	if len(ids) > 0 {
+	if f.held == nil {
+		f.held = map[string]bool{}
+	}
+	var fresh []string
+	for _, id := range ids {
+		if !f.held[id] {
+			fresh = append(fresh, id)
+		}
+	}
+	if len(fresh) > 0 {
 		ts := make([]string, len(topics.Entity))
 		for i, t := range topics.Entity {
 			ts[i] = f.Producer.Topic(t)
 		}
 		ends, err := kafka.EndOffsets(ctx, f.Producer.Client(), ts...)
 		if err != nil {
-			for _, id := range ids {
-				_ = f.Jobs.Requeue(ctx, id)
-			}
 			return err
 		}
-		f.pending = append(f.pending, finalBatch{jobs: ids, ends: ends, since: time.Now()})
+		for _, id := range fresh {
+			f.held[id] = true
+		}
+		f.pending = append(f.pending, finalBatch{jobs: fresh, ends: ends, since: time.Now()})
 	}
 	group := f.PersisterGroup
 	if group == "" {
@@ -87,9 +103,14 @@ func (f *Finalizer) Tick(ctx context.Context) error {
 			slog.Warn("finalizer: persister lag; finalising anyway", "jobs", len(b.jobs))
 		}
 		for _, id := range b.jobs {
+			delete(f.held, id)
 			if err := f.finalize(ctx, id); err != nil {
+				// Still in the set: taken again on the next tick.
 				slog.Error("finalizer: job failed to finalise", "job", id, "err", err)
-				_ = f.Jobs.Requeue(ctx, id)
+				continue
+			}
+			if err := f.Jobs.Finalized(ctx, id); err != nil {
+				slog.Warn("finalizer: could not clear a finalised job", "job", id, "err", err)
 			}
 		}
 	}
@@ -133,6 +154,13 @@ func (f *Finalizer) finalize(ctx context.Context, id string) error {
 	posts, err := f.Jobs.Posts(ctx, id)
 	if err != nil {
 		return err
+	}
+	deleted, err := f.deletions(ctx, id, status == "cancelling")
+	if err != nil {
+		return fmt.Errorf("deletions: %w", err)
+	}
+	if deleted > 0 {
+		st.Counters["comments_deleted"] += deleted
 	}
 	comp, err := f.coverage(ctx, posts, topics.LaneName(taskLane(lane)))
 	if err != nil {
@@ -190,6 +218,151 @@ func (f *Finalizer) finalize(ctx context.Context, id string) error {
 	return nil
 }
 
+// Deletions configures deletion detection.
+type Deletions struct {
+	Enabled bool
+	// MaxShare: unless the comments left account for Facebook's count, a
+	// post is skipped when more of its known comments than this share were
+	// not seen (a partial answer rather than deletions).
+	MaxShare float64
+}
+
+// deletionMinSkip: a post is only skipped for MaxShare when more than this
+// many comments would be marked deleted, so small threads are not exempt.
+const deletionMinSkip = 3
+
+// deletions compares the stored top-level comments of each post read in full
+// during the job with the ids that read saw. A comment stored before the
+// read began and not seen by it is published as deleted on fb.comment.v1,
+// with its replies, and marked deleted in the store. It returns how many
+// were marked; a cancelled job only drops its pass records.
+func (f *Finalizer) deletions(ctx context.Context, job string, cancelled bool) (int64, error) {
+	passes, posts, err := f.Jobs.Passes(ctx, job)
+	if err != nil || len(posts) == 0 {
+		return 0, err
+	}
+	var marked int64
+	if f.Deletions.Enabled && !cancelled {
+		em := emit.Emitter{Producer: f.Producer}
+		src := emit.Source{JobID: job, Query: "comments", Mode: fbv1.CrawlMode_CRAWL_MODE_RECRAWL}
+		var dels []*fbv1.Comment
+		for _, p := range passes {
+			ds, err := f.missing(ctx, job, p)
+			if err != nil {
+				return 0, err
+			}
+			dels = append(dels, ds...)
+		}
+		if len(dels) > 0 {
+			b := f.Producer.NewBatch()
+			for _, d := range dels {
+				if err := em.CommentDeleted(ctx, b, src, d); err != nil {
+					return 0, err
+				}
+			}
+			if err := b.Wait(ctx); err != nil {
+				return 0, err
+			}
+			if marked, err = persist.MarkDeleted(ctx, f.DB, dels); err != nil {
+				return 0, err
+			}
+			// Before the pass records go: a retry finds these already
+			// marked and does not count them again.
+			if err := f.Jobs.AddCounters(ctx, job, map[string]int64{"comments_deleted": marked}); err != nil {
+				return 0, err
+			}
+		}
+	}
+	return marked, f.Jobs.ClearPasses(ctx, job, posts)
+}
+
+// missing returns the top-level comments of p's post stored before the pass
+// began and not seen by it, with their replies. When what stays visible
+// still covers the comment count Facebook gave at the end of the read, the
+// read was complete and they are all gone. Otherwise the read may have been
+// a partial answer, and the post is skipped when it returned nothing or
+// when more than Deletions.MaxShare of the known comments are unseen.
+func (f *Finalizer) missing(ctx context.Context, job string, p jobs.Pass) ([]*fbv1.Comment, error) {
+	seen, err := f.Jobs.Seen(ctx, job, p.PostID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := f.DB.Query(ctx, `SELECT comment_id, page_id FROM comments
+		WHERE post_created_at = $1 AND post_id = $2 AND depth = 0 AND status = 'visible' AND NOT redacted
+		  AND first_seen_at < $3`, p.PostCreated, p.PostID, p.Start)
+	if err != nil {
+		return nil, err
+	}
+	var known int
+	var out []*fbv1.Comment
+	for rows.Next() {
+		var id, page int64
+		if err := rows.Scan(&id, &page); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		known++
+		if _, ok := seen[id]; !ok {
+			out = append(out, &fbv1.Comment{CommentId: id, PostId: p.PostID, PageId: page,
+				PostCreatedAt: timestamppb.New(p.PostCreated)})
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(out) == 0 {
+		metrics.DeletionChecks.WithLabelValues("checked").Inc()
+		return nil, nil
+	}
+	top := len(out)
+	// Deleting a comment deletes its replies.
+	roots := make([]int64, top)
+	for i, c := range out {
+		roots[i] = c.CommentId
+	}
+	rows, err = f.DB.Query(ctx, `SELECT comment_id, page_id, depth FROM comments
+		WHERE post_created_at = $1 AND post_id = $2 AND root_comment_id = ANY($3) AND depth > 0
+		  AND status = 'visible' AND NOT redacted`, p.PostCreated, p.PostID, roots)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var id, page int64
+		var depth int16
+		if err := rows.Scan(&id, &page, &depth); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out = append(out, &fbv1.Comment{CommentId: id, PostId: p.PostID, PageId: page,
+			PostCreatedAt: timestamppb.New(p.PostCreated), Depth: int32(depth)})
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	var visible int64
+	if err := f.DB.QueryRow(ctx, `SELECT count(*) FROM comments WHERE post_created_at = $1 AND post_id = $2 AND status = 'visible'`,
+		p.PostCreated, p.PostID).Scan(&visible); err != nil {
+		return nil, err
+	}
+	consistent := p.Reported > 0 && visible-int64(len(out)) >= p.Reported
+	switch {
+	case consistent:
+	case len(seen) == 0:
+		// The read returned no comments at all: not a deletion signal.
+		metrics.DeletionChecks.WithLabelValues("skipped_empty").Inc()
+		return nil, nil
+	case top > deletionMinSkip && float64(top) > f.Deletions.MaxShare*float64(known):
+		metrics.DeletionChecks.WithLabelValues("skipped_share").Inc()
+		slog.Warn("finalizer: too many comments unseen for the reported count; not marking them deleted", "job", job,
+			"post", p.PostID, "unseen", top, "known", known, "reported", p.Reported, "visible", visible)
+		return nil, nil
+	}
+	metrics.DeletionChecks.WithLabelValues("checked").Inc()
+	return out, nil
+}
+
 // coverage writes per-post collected counts and completeness, and returns
 // the job summary.
 func (f *Finalizer) coverage(ctx context.Context, posts []jobs.PostState, lane string) (Completeness, error) {
@@ -227,8 +400,10 @@ func (f *Finalizer) coverage(ctx context.Context, posts []jobs.PostState, lane s
 			SELECT unnest($1::bigint[]) AS post_id, unnest($2::timestamptz[]) AS created, unnest($3::text[]) AS state
 		), counts AS (
 			SELECT t.post_id, t.created, t.state,
-				(SELECT count(*) FROM comments c WHERE c.post_created_at = t.created AND c.post_id = t.post_id AND c.depth = 0) AS top,
-				(SELECT count(*) FROM comments c WHERE c.post_created_at = t.created AND c.post_id = t.post_id AND c.depth > 0) AS replies
+				(SELECT count(*) FROM comments c WHERE c.post_created_at = t.created AND c.post_id = t.post_id AND c.depth = 0
+					AND c.status = 'visible') AS top,
+				(SELECT count(*) FROM comments c WHERE c.post_created_at = t.created AND c.post_id = t.post_id AND c.depth > 0
+					AND c.status = 'visible') AS replies
 			FROM t
 		)
 		UPDATE posts p SET comments_collected = counts.top, replies_collected = counts.replies,

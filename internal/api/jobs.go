@@ -226,7 +226,7 @@ func (s *Server) jobResults(w http.ResponseWriter, r *http.Request) {
 	for _, p := range posts {
 		_ = enc.Encode(map[string]any{"type": "post", "post": p})
 		if withComments {
-			cs, err := s.queryComments(r.Context(), p.PostID, p.CreatedAt, nil, nil, nil, 1_000_000, pii)
+			cs, err := s.queryComments(r.Context(), p.PostID, p.CreatedAt, nil, nil, "", nil, 1_000_000, pii)
 			if err != nil {
 				return
 			}

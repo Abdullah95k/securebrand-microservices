@@ -5,7 +5,7 @@ PG_DSN ?= postgres://fbs:fbs@localhost:5432/fbs?sslmode=disable
 TEST_ENV = FBS_TEST_PG_DSN="$(PG_DSN)" FBS_TEST_REDIS_ADDR=localhost:6379 FBS_TEST_KAFKA_BROKERS=localhost:19092 FBS_TEST_SCHEMA_REGISTRY=http://localhost:18081
 COMPOSE = docker compose -f deploy/compose/docker-compose.yml
 
-.PHONY: all build test lint vet generate golden fixtures infra-up infra-down test-integration e2e loadtest docker docker-prebuilt compose-up compose-down spike-report phase0 phase0-dryrun spike-bin clean
+.PHONY: all build test lint vet generate golden fixtures infra-up infra-down test-integration e2e loadtest soak docker docker-prebuilt compose-up compose-down spike-report phase0 phase0-dryrun spike-bin clean
 
 all: generate build test
 
@@ -51,6 +51,12 @@ test-integration:
 ## FBS_LOADTEST_PAGES, _POSTS, _COMMENTS, _ROWS, _LATENCY; FBS_LOADTEST_OUT=file.
 loadtest:
 	$(TEST_ENV) FBS_LOADTEST=1 $(GO) test -count=1 -v -timeout 45m -run 'TestLoad' ./internal/e2e/
+
+## Soak test (opt-in): scheduled crawls of a changing fakefb world with
+## component restarts. FBS_SOAK_DURATION (20m), FBS_SOAK_PAGES (6),
+## FBS_SOAK_RESTART_EVERY (90s, 0 = none), FBS_SOAK_OUT=file for the report.
+soak:
+	$(TEST_ENV) FBS_SOAK=1 $(GO) test -count=1 -v -timeout 6h -run 'TestSoak' ./internal/e2e/
 
 ## Full pipeline end-to-end test only.
 e2e:

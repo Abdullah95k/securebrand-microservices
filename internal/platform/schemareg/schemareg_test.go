@@ -136,7 +136,7 @@ func TestApplyGatesIncompatibleChanges(t *testing.T) {
 
 	// Adding a field is compatible: a new version.
 	grown := copyFS(t)
-	edit(t, grown, "securebrand/fb/v1/comment.proto", "string extra_json = 22;", "string extra_json = 22;\n  string language = 23;")
+	edit(t, grown, "securebrand/fb/v1/comment.proto", "string extra_json = 22;", "string extra_json = 22;\n  string language = 1000;")
 	if _, err := Apply(ctx, c, grown, prefix, topics.ValueSchemas, true); err != nil {
 		t.Fatalf("check refused an added field: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestApplyGatesIncompatibleChanges(t *testing.T) {
 	edit(t, hidden, "securebrand/fb/v1/comment.proto", `import "securebrand/fb/v1/common.proto";`,
 		"import \"securebrand/fb/v1/common.proto\";\nimport \"securebrand/fb/v1/lang.proto\";")
 	edit(t, hidden, "securebrand/fb/v1/comment.proto", "string text = 11;", "int64 text = 11;\n  Lang lang = 24;")
-	edit(t, hidden, "securebrand/fb/v1/comment.proto", "string extra_json = 22;", "string extra_json = 22;\n  string language = 23;")
+	edit(t, hidden, "securebrand/fb/v1/comment.proto", "string extra_json = 22;", "string extra_json = 22;\n  string language = 1000;")
 	if _, err := Apply(ctx, c, hidden, prefix, topics.ValueSchemas, true); err == nil {
 		t.Fatal("check passed a type change made alongside a new import")
 	}
@@ -164,7 +164,7 @@ func TestApplyGatesIncompatibleChanges(t *testing.T) {
 	// check resolves the dependent against the new import, then apply
 	// registers both.
 	shared := copyFS(t)
-	edit(t, shared, "securebrand/fb/v1/comment.proto", "string extra_json = 22;", "string extra_json = 22;\n  string language = 23;")
+	edit(t, shared, "securebrand/fb/v1/comment.proto", "string extra_json = 22;", "string extra_json = 22;\n  string language = 1000;")
 	shared["securebrand/fb/v1/common.proto"] = &fstest.MapFile{Data: append(shared["securebrand/fb/v1/common.proto"].Data,
 		[]byte("\nmessage Geo {\n  double lat = 1;\n  double lng = 2;\n}\n")...)}
 	edit(t, shared, "securebrand/fb/v1/post.proto", "message Post {", "message Post {\n  Geo geo = 99;")

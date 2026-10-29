@@ -31,6 +31,18 @@ message Attachment {
   int32 height = 6;
 }
 
+enum CommentStatus {
+  // Crawled comments: visible when observed.
+  COMMENT_STATUS_UNSPECIFIED = 0;
+  COMMENT_STATUS_VISIBLE = 1;
+  // No longer publicly visible: deleted by its author, removed or hidden by
+  // the page, or filtered by Facebook. Published by the job finalizer when a
+  // full re-read of the post no longer returns a known top-level comment;
+  // only the ids, post_created_at, depth and obs are set. A later sighting
+  // of the comment makes it visible again.
+  COMMENT_STATUS_DELETED = 2;
+}
+
 // Comment is published on fb.comment.v1, keyed by post_id so a post's thread
 // stays ordered. Replies are comments with depth > 0.
 message Comment {
@@ -58,4 +70,5 @@ message Comment {
   // True when content was removed because of an erasure/suppression rule.
   bool redacted = 21;
   string extra_json = 22;
+  CommentStatus status = 23;
 }

@@ -297,6 +297,20 @@ groups:
             Posts end with fewer comments than Facebook reports. Compare
             orderings, look for login walls (timelines_truncated) and drift.
           runbook_url: https://github.com/abdullah95k/securebrand-microservices/blob/main/docs/runbooks/operations.md#key-signals
+      - alert: FbsDeletionChecksSkipped
+        expr: |
+          sum(rate(fbs_deletion_checks_total{outcome=~"skipped_.*"}[6h]))
+            / clamp_min(sum(rate(fbs_deletion_checks_total[6h])), 1e-9) > 0.25
+          and sum(increase(fbs_deletion_checks_total[6h])) > 20
+        for: 1h
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $value | humanizePercentage }} of full comment reads look partial; deletions are not being detected"
+          description: >-
+            Full reads of known posts return far fewer comments than are
+            stored, and fewer than Facebook's count, so no comment is marked
+            deleted. Facebook is likely serving partial comment lists.
+          runbook_url: https://github.com/abdullah95k/securebrand-microservices/blob/main/docs/runbooks/operations.md#comment-edits-and-deletions
       - alert: FbsBudgetOverrun
         expr: |
           max by (kind) (fbs:leader:budget_projected)

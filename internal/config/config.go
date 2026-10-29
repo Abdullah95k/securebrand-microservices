@@ -284,6 +284,14 @@ type PostRefresh struct {
 	// they reach each age in RecrawlAt, to pick up edits and deletions.
 	RecrawlAt          []time.Duration `koanf:"recrawl_at"`
 	RecrawlMinComments int64           `koanf:"recrawl_min_comments"`
+	// DetectDeletions marks a known top-level comment (and its replies)
+	// deleted when a full read of its post (a recrawl, or a full job on a
+	// post crawled before) no longer returns it. Unless the comments left
+	// account for the count Facebook gave, a post is skipped when the read
+	// returned nothing or more than DeletionMaxShare of its known comments
+	// would be marked (a partial answer rather than deletions).
+	DetectDeletions  bool    `koanf:"detect_deletions"`
+	DeletionMaxShare float64 `koanf:"deletion_max_share"`
 }
 
 // RefreshWindow is one post-age band.
@@ -408,6 +416,9 @@ func (c *Config) Validate() error {
 			errs = append(errs, errors.New("scheduler.post_refresh.windows need intervals and ascending max_age"))
 			break
 		}
+	}
+	if pr := c.Scheduler.PostRefresh; pr.DetectDeletions && (pr.DeletionMaxShare <= 0 || pr.DeletionMaxShare > 1) {
+		errs = append(errs, errors.New("scheduler.post_refresh.deletion_max_share must be in (0, 1]"))
 	}
 	if c.RegistrySync.Interval <= 0 || c.RegistrySync.Timeout <= 0 {
 		errs = append(errs, errors.New("registry_sync.interval and registry_sync.timeout must be > 0"))

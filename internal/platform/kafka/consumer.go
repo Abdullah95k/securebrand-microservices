@@ -197,8 +197,11 @@ func (c *Consumer) Run(ctx context.Context) error {
 					<-psem
 					<-c.global
 				}()
-				c.process(handlerCtx, r)
-				c.tr.markDone(e)
+				// A record abandoned at shutdown is not done: leaving its
+				// offset uncommitted hands it to the partition's next owner.
+				if c.process(handlerCtx, r) {
+					c.tr.markDone(e)
+				}
 			}()
 		})
 		if stop {
@@ -237,22 +240,24 @@ func acquire(ctx context.Context, sem chan struct{}) bool {
 	}
 }
 
-func (c *Consumer) process(ctx context.Context, r *kgo.Record) {
+// process runs the handler until it succeeds (true) or ctx is cancelled
+// (false: the record was abandoned).
+func (c *Consumer) process(ctx context.Context, r *kgo.Record) bool {
 	backoff := 200 * time.Millisecond
 	for attempt := 1; ; attempt++ {
 		err := c.h(ctx, r)
 		if err == nil {
-			return
+			return true
 		}
 		if ctx.Err() != nil {
-			return
+			return false
 		}
 		slog.Warn("kafka: handler failed; retrying", "topic", r.Topic, "partition", r.Partition,
 			"offset", r.Offset, "attempt", attempt, "err", err)
 		jitter := time.Duration(rand.Int64N(int64(backoff) / 2))
 		select {
 		case <-ctx.Done():
-			return
+			return false
 		case <-time.After(backoff + jitter):
 		}
 		if backoff < 30*time.Second {

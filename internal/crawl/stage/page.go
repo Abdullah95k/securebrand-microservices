@@ -49,6 +49,7 @@ func (s *PageStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	if err != nil {
 		return retry(t, "", "30s", "checkpoint: "+err.Error(), c)
 	}
+	st.Resume(c)
 	if st.Cursor == "" {
 		st.Cursor = t.Cursor
 		st.PostsSeen = sc.PostsSeen
@@ -174,7 +175,7 @@ func (s *PageStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 				metrics.TimelineTruncated.WithLabelValues("login_wall").Inc()
 				break
 			}
-			_ = d.Ckpt.Save(ctx, t.LineageId, t.Seq, st)
+			_ = d.saveCkpt(ctx, t, st, c)
 		}
 		if resp.Class != detect.OK {
 			return classOutcome(t, resp.Class, resp.Reason, st.Cursor, c)
@@ -250,7 +251,7 @@ func (s *PageStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 			st.Cursor = tl.PageInfo.EndCursor
 		}
 		st.Walls, st.WallCursor = 0, ""
-		if err := d.Ckpt.Save(ctx, t.LineageId, t.Seq, st); err != nil {
+		if err := d.saveCkpt(ctx, t, st, c); err != nil {
 			slog.Warn("page: checkpoint save failed", "err", err)
 		}
 	}

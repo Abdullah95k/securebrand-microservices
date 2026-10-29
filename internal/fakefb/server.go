@@ -461,7 +461,12 @@ func (s *Server) comments(rd *renderer, vars map[string]any) []byte {
 	if !ok {
 		return ndjson(obj{"errors": []any{obj{"code": 1357004, "message": "invalid cursor"}}})
 	}
-	list := append([]*Comment(nil), post.Comments...)
+	var list []*Comment
+	for _, c := range post.Comments {
+		if !c.Withheld {
+			list = append(list, c)
+		}
+	}
 	switch str(vars["commentsIntentToken"]) {
 	case "RECENT_ACTIVITY_INTENT_V1":
 		sort.SliceStable(list, func(i, j int) bool { return list[i].CreatedAt.After(list[j].CreatedAt) })

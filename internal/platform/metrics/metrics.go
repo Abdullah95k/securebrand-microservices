@@ -51,7 +51,7 @@ var (
 	// Parsing.
 	ParseTotal        = counterVec("parse_total", "Parser runs by outcome.", "query", "parser_version", "outcome")
 	ParseMissingField = counterVec("parse_missing_field_total", "Optional or required fields missing from responses.", "query", "field")
-	ParseShadow       = counterVec("parse_shadow_total", "Responses a candidate (shadow) parser also parsed, by outcome (same, differs, drift).", "query", "outcome")
+	ParseShadow       = counterVec("parse_shadow_total", "Responses a candidate (shadow) parser also parsed, by outcome (same, differs, drift, error).", "query", "outcome")
 
 	// Identities.
 	IdentityActive  = gaugeVec("identity_active", "Live identities in this pod.", "tier")
@@ -76,6 +76,8 @@ var (
 
 	// Persistence and jobs.
 	PersistRows          = counterVec("persist_rows_total", "Rows written by the persister.", "entity", "op")
+	CommentChanges       = counterVec("comment_changes_total", "Stored comments edited, marked deleted or seen again after a deletion, by kind (edited, deleted, restored).", "kind")
+	DeletionChecks       = counterVec("deletion_checks_total", "Full comment reads of a post checked for deleted comments, by outcome (checked, skipped_share, skipped_empty).", "outcome")
 	PersistBatch         = histVec("persist_batch_seconds", "Persister batch flush duration.", prometheus.ExponentialBuckets(0.005, 2, 12), "entity")
 	Jobs                 = counterVec("jobs_total", "Jobs reaching a terminal state.", "status", "lane")
 	ScheduleLag          = gaugeVec("schedule_lag_seconds", "Age of the oldest due page in the schedule.", "tier")

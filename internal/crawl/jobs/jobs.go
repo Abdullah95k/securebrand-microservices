@@ -5,6 +5,7 @@ package jobs
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"strconv"
@@ -107,15 +108,39 @@ func (t *Tracker) Done(ctx context.Context, job, taskID string, counters map[str
 	return pending, nil
 }
 
-// SetPost records a post's comment-collection state for the job.
-func (t *Tracker) SetPost(ctx context.Context, job string, postID int64, createdUnix int64, reported int64, state string) error {
-	k := key(job, "posts")
-	v := strconv.FormatInt(createdUnix, 10) + "|" + strconv.FormatInt(reported, 10) + "|" + state
+// AddCounters adds to the job's counters outside of a task (the finalizer).
+func (t *Tracker) AddCounters(ctx context.Context, job string, counters map[string]int64) error {
+	k := key(job, "counters")
 	pipe := t.r.TxPipeline()
-	pipe.HSet(ctx, k, strconv.FormatInt(postID, 10), v)
+	for n, v := range counters {
+		pipe.HIncrBy(ctx, k, n, v)
+	}
 	pipe.PExpire(ctx, k, ttl)
 	_, err := pipe.Exec(ctx)
 	return err
+}
+
+var setPostScript = redis.NewScript(`
+local cur = redis.call('HGET', KEYS[1], ARGV[1])
+if cur then
+  local st = string.match(cur, '[^|]*$')
+  if st == 'complete' or st == 'truncated' or st == 'failed' then
+    redis.call('PEXPIRE', KEYS[1], ARGV[3])
+    return 0
+  end
+end
+redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+redis.call('PEXPIRE', KEYS[1], ARGV[3])
+return 1
+`)
+
+// SetPost records a post's comment-collection state for the job. A post
+// already collected in this job keeps its state: the job's refresh of an
+// older post may finish before the timeline reaches the same post, whose
+// task is then the finished one again.
+func (t *Tracker) SetPost(ctx context.Context, job string, postID int64, createdUnix int64, reported int64, state string) error {
+	v := strconv.FormatInt(createdUnix, 10) + "|" + strconv.FormatInt(reported, 10) + "|" + state
+	return setPostScript.Run(ctx, t.r, []string{key(job, "posts")}, strconv.FormatInt(postID, 10), v, ttl.Milliseconds()).Err()
 }
 
 // UpdatePostState changes only the state part of a recorded post.
@@ -162,6 +187,131 @@ func (t *Tracker) Posts(ctx context.Context, job string) ([]PostState, error) {
 	return out, nil
 }
 
+// Full passes. A post task that reads a known post's comments from the
+// start (a recrawl, or a full job on a post crawled before) begins a pass
+// for its lineage, appends the top-level comment ids of every page it reads
+// to the post's seen list, and marks the post when it reached the last
+// page. The finalizer then compares the post's stored comments with the
+// seen list. Ids are packed 8 bytes each, appended, so a retried page only
+// repeats ids, and several lineages of one post only add to the list.
+
+// BeginPass records the start of lineage's full pass over post. Calling it
+// again keeps the first start.
+func (t *Tracker) BeginPass(ctx context.Context, job, lineage string, postID int64, start time.Time) error {
+	k := key(job, "passes")
+	pipe := t.r.TxPipeline()
+	pipe.HSetNX(ctx, k, lineage, strconv.FormatInt(postID, 10)+"|"+strconv.FormatInt(start.UnixMilli(), 10))
+	pipe.PExpire(ctx, k, ttl)
+	_, err := pipe.Exec(ctx)
+	return err
+}
+
+// InPass reports whether lineage began a full pass.
+func (t *Tracker) InPass(ctx context.Context, job, lineage string) (bool, error) {
+	return t.r.HExists(ctx, key(job, "passes"), lineage).Result()
+}
+
+func seenKey(job string, postID int64) string { return key(job, "seen:"+strconv.FormatInt(postID, 10)) }
+
+// AddSeen appends comment ids to post's seen list.
+func (t *Tracker) AddSeen(ctx context.Context, job string, postID int64, ids []int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	buf := make([]byte, 0, 8*len(ids))
+	for _, id := range ids {
+		buf = binary.BigEndian.AppendUint64(buf, uint64(id))
+	}
+	k := seenKey(job, postID)
+	pipe := t.r.TxPipeline()
+	pipe.Append(ctx, k, string(buf))
+	pipe.PExpire(ctx, k, ttl)
+	_, err := pipe.Exec(ctx)
+	return err
+}
+
+// EndPass marks post as read to its last page by lineage's pass; reported
+// is the comment count Facebook gave on that page (0 = none).
+func (t *Tracker) EndPass(ctx context.Context, job, lineage string, postID int64, postCreated time.Time, reported int64) error {
+	v, err := t.r.HGet(ctx, key(job, "passes"), lineage).Result()
+	if err != nil {
+		return fmt.Errorf("jobs: end pass: %w", err)
+	}
+	_, start, _ := strings.Cut(v, "|")
+	k := key(job, "passed")
+	pipe := t.r.TxPipeline()
+	pipe.HSet(ctx, k, strconv.FormatInt(postID, 10),
+		strconv.FormatInt(postCreated.Unix(), 10)+"|"+start+"|"+strconv.FormatInt(reported, 10))
+	pipe.PExpire(ctx, k, ttl)
+	_, err = pipe.Exec(ctx)
+	return err
+}
+
+// Pass is a post read in full during the job.
+type Pass struct {
+	PostID      int64
+	PostCreated time.Time
+	Start       time.Time
+	Reported    int64 // Facebook's comment count at the end of the pass (0 = unknown)
+}
+
+// Passes returns the posts read in full, and every post with a seen list
+// (complete or not), so the caller can clear them all.
+func (t *Tracker) Passes(ctx context.Context, job string) (done []Pass, posts []int64, err error) {
+	m, err := t.r.HGetAll(ctx, key(job, "passed")).Result()
+	if err != nil {
+		return nil, nil, err
+	}
+	for f, v := range m {
+		id, _ := strconv.ParseInt(f, 10, 64)
+		parts := strings.Split(v, "|")
+		if len(parts) != 3 {
+			continue
+		}
+		cu, _ := strconv.ParseInt(parts[0], 10, 64)
+		su, _ := strconv.ParseInt(parts[1], 10, 64)
+		rep, _ := strconv.ParseInt(parts[2], 10, 64)
+		done = append(done, Pass{PostID: id, PostCreated: time.Unix(cu, 0).UTC(), Start: time.UnixMilli(su).UTC(), Reported: rep})
+	}
+	begun, err := t.r.HVals(ctx, key(job, "passes")).Result()
+	if err != nil {
+		return nil, nil, err
+	}
+	uniq := map[int64]bool{}
+	for _, v := range begun {
+		p, _, _ := strings.Cut(v, "|")
+		if id, err := strconv.ParseInt(p, 10, 64); err == nil && !uniq[id] {
+			uniq[id] = true
+			posts = append(posts, id)
+		}
+	}
+	return done, posts, nil
+}
+
+// Seen returns post's seen comment ids.
+func (t *Tracker) Seen(ctx context.Context, job string, postID int64) (map[int64]struct{}, error) {
+	b, err := t.r.Get(ctx, seenKey(job, postID)).Bytes()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return nil, err
+	}
+	out := make(map[int64]struct{}, len(b)/8)
+	for i := 0; i+8 <= len(b); i += 8 {
+		out[int64(binary.BigEndian.Uint64(b[i:]))] = struct{}{}
+	}
+	return out, nil
+}
+
+// ClearPasses drops the pass records and seen lists of posts.
+func (t *Tracker) ClearPasses(ctx context.Context, job string, posts []int64) error {
+	pipe := t.r.TxPipeline()
+	for _, p := range posts {
+		pipe.Del(ctx, seenKey(job, p))
+	}
+	pipe.Del(ctx, key(job, "passed"), key(job, "passes"))
+	_, err := pipe.Exec(ctx)
+	return err
+}
+
 // Status is the live state of a job.
 type Status struct {
 	Pending      int64
@@ -206,20 +356,22 @@ func (t *Tracker) Cancelled(ctx context.Context, job string) bool {
 	return err == nil && n > 0
 }
 
-// PopFinalize returns up to n jobs ready for finalisation.
-func (t *Tracker) PopFinalize(ctx context.Context, n int64) ([]string, error) {
-	return t.r.SPopN(ctx, FinalizeSet, n).Result()
+// ReadyToFinalize returns up to n jobs ready for finalisation. They stay
+// in the set until Finalized, so a finaliser that stops before finishing
+// them leaves them to the next one.
+func (t *Tracker) ReadyToFinalize(ctx context.Context, n int64) ([]string, error) {
+	return t.r.SRandMemberN(ctx, FinalizeSet, n).Result()
 }
 
-// Requeue puts a job back in the finalize set (finaliser not ready yet).
-func (t *Tracker) Requeue(ctx context.Context, job string) error {
-	return t.r.SAdd(ctx, FinalizeSet, job).Err()
+// Finalized removes a finalised job from the set.
+func (t *Tracker) Finalized(ctx context.Context, job string) error {
+	return t.r.SRem(ctx, FinalizeSet, job).Err()
 }
 
 // Expire shortens the retention of a finished job's keys.
 func (t *Tracker) Expire(ctx context.Context, job string, d time.Duration) error {
 	pipe := t.r.Pipeline()
-	for _, n := range []string{"spawned", "done", "pending", "counters", "last", "posts", "cancel"} {
+	for _, n := range []string{"spawned", "done", "pending", "counters", "last", "posts", "cancel", "passes", "passed"} {
 		pipe.PExpire(ctx, key(job, n), d)
 	}
 	_, err := pipe.Exec(ctx)

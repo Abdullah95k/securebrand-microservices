@@ -184,6 +184,7 @@ paths:
         - {$ref: '#/components/parameters/Post'}
         - {in: query, name: parent_id, schema: {type: integer, format: int64}, description: Only direct replies to this comment}
         - {in: query, name: depth, schema: {type: integer}, description: "0 = top-level comments"}
+        - {in: query, name: status, schema: {type: string, enum: [visible, deleted]}, description: Only comments in this status}
         - {$ref: '#/components/parameters/Limit'}
         - {$ref: '#/components/parameters/Cursor'}
       responses:
@@ -450,6 +451,16 @@ components:
         reaction_count: {type: integer, format: int64}
         reactions: {type: object}
         reply_count: {type: integer, format: int64}
+        status:
+          type: string
+          enum: [visible, deleted]
+          description: >-
+            deleted: a full read of the post no longer returned this top-level comment (deleted by its
+            author, removed or hidden by the page, or filtered by Facebook). The last content seen is kept.
+            A later sighting makes it visible again.
+        deleted_at: {type: string, format: date-time}
+        edit_count: {type: integer, description: Text changes seen across scrapes}
+        edited_at: {type: string, format: date-time, description: When the last text change was seen}
         redacted: {type: boolean}
     Media:
       type: object

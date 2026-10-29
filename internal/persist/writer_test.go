@@ -124,3 +124,113 @@ func TestWriterUpsertsAndDedupes(t *testing.T) {
 		t.Fatalf("on-demand partition: %v", err)
 	}
 }
+
+// TestCommentEditsDeletionsAndRestores follows one comment through an edit,
+// a deletion (also replayed out of order) and a later sighting.
+func TestCommentEditsDeletionsAndRestores(t *testing.T) {
+	db := testenv.Postgres(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	if _, err := store.EnsurePartitions(ctx, db, now, store.PartitionWindow{MonthsBack: 2, MonthsAhead: 1, DaysBack: 1, DaysAhead: 1}); err != nil {
+		t.Fatal(err)
+	}
+	w := &Writer{DB: db}
+	created := timestamppb.New(now.Add(-72 * time.Hour))
+	cm := func(at time.Time, hash, text string) *fbv1.Comment {
+		return &fbv1.Comment{Obs: obs(at, hash), CommentId: 500, PostId: 5, PageId: 9, PostCreatedAt: created, Text: text,
+			Author: &fbv1.Author{Id: "a1", AuthorKey: []byte("k1")}, Reactions: &fbv1.Reactions{Total: 1}}
+	}
+	deleted := func(at time.Time) *fbv1.Comment {
+		return &fbv1.Comment{Obs: obs(at, "del"), CommentId: 500, PostId: 5, PageId: 9, PostCreatedAt: created,
+			Status: fbv1.CommentStatus_COMMENT_STATUS_DELETED}
+	}
+	type row struct {
+		Text      *string
+		Status    string
+		EditCount int
+		EditedAt  *time.Time
+		DeletedAt *time.Time
+	}
+	get := func() row {
+		t.Helper()
+		var r row
+		if err := db.QueryRow(ctx, `SELECT text, status, edit_count, edited_at, deleted_at FROM comments WHERE comment_id = 500`).
+			Scan(&r.Text, &r.Status, &r.EditCount, &r.EditedAt, &r.DeletedAt); err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	t0 := now.Add(-10 * time.Hour)
+	if err := w.Comments(ctx, []*fbv1.Comment{cm(t0, "v1", "first")}); err != nil {
+		t.Fatal(err)
+	}
+	// Same text, more reactions: not an edit.
+	again := cm(t0.Add(time.Hour), "v1b", "first")
+	again.Reactions.Total = 3
+	if err := w.Comments(ctx, []*fbv1.Comment{again}); err != nil {
+		t.Fatal(err)
+	}
+	if r := get(); r.EditCount != 0 || r.EditedAt != nil || r.Status != "visible" {
+		t.Fatalf("after a reaction change: %+v", r)
+	}
+	// New text: an edit.
+	t2 := t0.Add(2 * time.Hour)
+	if err := w.Comments(ctx, []*fbv1.Comment{cm(t2, "v2", "first, edited")}); err != nil {
+		t.Fatal(err)
+	}
+	if r := get(); r.EditCount != 1 || r.EditedAt == nil || !r.EditedAt.Equal(t2) || *r.Text != "first, edited" {
+		t.Fatalf("after an edit: %+v", r)
+	}
+	// An older observation replayed late changes nothing.
+	if err := w.Comments(ctx, []*fbv1.Comment{cm(t0.Add(30*time.Minute), "v0", "stale text")}); err != nil {
+		t.Fatal(err)
+	}
+	if r := get(); r.EditCount != 1 || *r.Text != "first, edited" {
+		t.Fatalf("a stale observation was applied: %+v", r)
+	}
+
+	// Deleted: the content is kept.
+	t3 := t0.Add(5 * time.Hour)
+	if err := w.Comments(ctx, []*fbv1.Comment{deleted(t3)}); err != nil {
+		t.Fatal(err)
+	}
+	if r := get(); r.Status != "deleted" || r.DeletedAt == nil || !r.DeletedAt.Equal(t3) || r.Text == nil {
+		t.Fatalf("after the deletion: %+v", r)
+	}
+	// An observation from before the deletion does not restore it.
+	if err := w.Comments(ctx, []*fbv1.Comment{cm(t3.Add(-time.Minute), "v2", "first, edited")}); err != nil {
+		t.Fatal(err)
+	}
+	if r := get(); r.Status != "deleted" {
+		t.Fatalf("an older sighting restored the comment: %+v", r)
+	}
+	// Seen again later, unchanged: visible again.
+	t4 := t3.Add(time.Hour)
+	if err := w.Comments(ctx, []*fbv1.Comment{cm(t4, "v2", "first, edited")}); err != nil {
+		t.Fatal(err)
+	}
+	if r := get(); r.Status != "visible" || r.DeletedAt != nil || r.EditCount != 1 {
+		t.Fatalf("after the re-sighting: %+v", r)
+	}
+	// The deletion replayed after the re-sighting changes nothing.
+	if n, err := MarkDeleted(ctx, db, []*fbv1.Comment{deleted(t3)}); err != nil || n != 0 {
+		t.Fatalf("replayed deletion: %d rows, %v", n, err)
+	}
+	if r := get(); r.Status != "visible" {
+		t.Fatalf("a replayed deletion hid a newer sighting: %+v", r)
+	}
+	// A deletion and a later sighting in one batch: the later one wins.
+	if err := w.Comments(ctx, []*fbv1.Comment{deleted(t4.Add(time.Hour)), cm(t4.Add(2*time.Hour), "v2", "first, edited")}); err != nil {
+		t.Fatal(err)
+	}
+	if r := get(); r.Status != "visible" {
+		t.Fatalf("batch with a deletion and a later sighting: %+v", r)
+	}
+	// A redacted comment is never marked deleted.
+	if _, err := db.Exec(ctx, "UPDATE comments SET redacted = true, text = NULL WHERE comment_id = 500"); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := MarkDeleted(ctx, db, []*fbv1.Comment{deleted(now)}); err != nil || n != 0 {
+		t.Fatalf("redacted comment marked deleted: %d, %v", n, err)
+	}
+}

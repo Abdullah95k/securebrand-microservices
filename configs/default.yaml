@@ -214,6 +214,12 @@ scheduler:
       - {max_age: 720h, interval: 168h, tiers: [T0, T1]} # 14-30 days, active pages only
     recrawl_at: [168h, 720h]
     recrawl_min_comments: 20
+    # Mark known top-level comments (and their replies) deleted when a full
+    # read of their post no longer returns them. Unless the comments left
+    # match Facebook's count, skip a post when the read returned nothing or
+    # more than deletion_max_share of its known comments would be marked.
+    detect_deletions: true
+    deletion_max_share: 0.5
   # Daily Facebook traffic budget, fleet-wide (0 = unlimited). Every interval
   # the leader projects the day's use from the last projection_span; when it
   # would exceed the budget, backfill (p2) pauses; if p0 + p1 alone would,

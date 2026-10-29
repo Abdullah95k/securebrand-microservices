@@ -2,13 +2,14 @@ package stage
 
 import (
 	"context"
-
 	"fmt"
-	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/known/timestamppb"
 	"log/slog"
+	"maps"
 	"strconv"
 	"time"
+
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	fbv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fb/v1"
 	taskv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fbs/task/v1"
@@ -55,6 +56,7 @@ func (s *PostStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	if err != nil {
 		return retry(t, "", "30s", "checkpoint: "+err.Error(), c)
 	}
+	st.Resume(c)
 	if st.Cursor == "" {
 		st.Cursor = t.Cursor
 	}
@@ -70,9 +72,15 @@ func (s *PostStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	cc := parse.CommentContext{PostID: sc.PostId, PageID: sc.PageId, PostCreatedAt: sc.PostCreatedAt,
 		PageAuthorID: strconv.FormatInt(sc.PageId, 10)}
 
+	pass, err := d.fullPass(ctx, t, &st)
+	if err != nil {
+		return retry(t, st.Cursor, "30s", "full pass: "+err.Error(), c)
+	}
+
 	started := time.Now()
-	finished, truncated := false, false
+	finished, truncated, exhausted := false, false, false
 	var olderRun int
+	var reported int64 // Facebook's comment count on the last page read
 	for !finished {
 		if kafka.IsDraining(ctx) || st.Pages >= d.Cfg.Crawler.YieldPages || time.Since(started) > d.Cfg.Crawler.YieldAfter {
 			break
@@ -95,7 +103,7 @@ func (s *PostStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 				truncated = true
 				break
 			}
-			_ = d.Ckpt.Save(ctx, t.LineageId, t.Seq, st)
+			_ = d.saveCkpt(ctx, t, st, c)
 		}
 		if resp.Class != detect.OK {
 			return classOutcome(t, resp.Class, resp.Reason, st.Cursor, c)
@@ -137,13 +145,21 @@ func (s *PostStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 		if err := d.spawn(ctx, threads...); err != nil {
 			return retry(t, st.Cursor, "30s", err.Error(), c)
 		}
+		if res.TotalCount > 0 {
+			reported = res.TotalCount
+		}
+		if pass {
+			if err := d.Jobs.AddSeen(ctx, t.JobId, sc.PostId, topLevelIDs(res)); err != nil {
+				return retry(t, st.Cursor, "30s", "seen: "+err.Error(), c)
+			}
+		}
 		c["threads_spawned"] += int64(len(threads))
 		st.Pages++
 		st.Walls, st.WallCursor = 0, ""
 		max := t.Limits.GetMaxCommentsPerPost()
 		switch {
 		case !res.PageInfo.HasNext || res.PageInfo.EndCursor == "":
-			finished = true
+			finished, exhausted = true, true
 		case max > 0 && st.ItemsSeen >= max:
 			finished = true
 		case !watermark.IsZero() && olderRun >= incrementalOlderStop:
@@ -151,13 +167,18 @@ func (s *PostStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 		default:
 			st.Cursor = res.PageInfo.EndCursor
 		}
-		if err := d.Ckpt.Save(ctx, t.LineageId, t.Seq, st); err != nil {
+		if err := d.saveCkpt(ctx, t, st, c); err != nil {
 			slog.Warn("post: checkpoint save failed", "err", err)
 		}
 	}
 	c["comment_pages"] += int64(st.Pages)
 
 	if finished || truncated {
+		if pass && exhausted && !truncated {
+			if err := d.Jobs.EndPass(ctx, t.JobId, t.LineageId, sc.PostId, sc.PostCreatedAt.AsTime(), reported); err != nil {
+				return retry(t, st.Cursor, "30s", "full pass: "+err.Error(), c)
+			}
+		}
 		state := jobs.PostComplete
 		if truncated {
 			state = jobs.PostTruncated
@@ -185,6 +206,45 @@ func (s *PostStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	next := task.Continuation(t, st.Cursor)
 	metrics.TaskYields.WithLabelValues("post").Inc()
 	return Outcome{Result: Continue, Next: next, Counters: c}
+}
+
+// saveCkpt saves the segment's resume point with its counters so far.
+func (d *Deps) saveCkpt(ctx context.Context, t *taskv1.Task, st checkpoint.State, c map[string]int64) error {
+	st.Counters = maps.Clone(c)
+	return d.Ckpt.Save(ctx, t.LineageId, t.Seq, st)
+}
+
+// fullPass reports whether this segment belongs to a full pass over a
+// known post's comments, whose seen ids let the finalizer find deleted
+// comments. Only a lineage that starts from the first page, on a recrawl or
+// on a full read of a post crawled before, begins a pass; later segments and
+// retries follow that decision.
+func (d *Deps) fullPass(ctx context.Context, t *taskv1.Task, st *checkpoint.State) (bool, error) {
+	sc := t.GetPost()
+	if !d.Cfg.Scheduler.PostRefresh.DetectDeletions || t.JobId == "" ||
+		(t.Mode != fbv1.CrawlMode_CRAWL_MODE_RECRAWL && t.Mode != fbv1.CrawlMode_CRAWL_MODE_FULL) {
+		return false, nil
+	}
+	if t.Seq == 0 && st.Pages == 0 && st.Cursor == "" {
+		known := t.Mode == fbv1.CrawlMode_CRAWL_MODE_RECRAWL
+		if !known {
+			_, known = d.Ckpt.GetPost(ctx, sc.PostId)
+		}
+		if known {
+			return true, d.Jobs.BeginPass(ctx, t.JobId, t.LineageId, sc.PostId, time.Now())
+		}
+	}
+	return d.Jobs.InPass(ctx, t.JobId, t.LineageId)
+}
+
+func topLevelIDs(res parse.CommentsResult) []int64 {
+	ids := make([]int64, 0, len(res.Comments))
+	for _, cb := range res.Comments {
+		if cb.Comment.Depth == 0 {
+			ids = append(ids, cb.Comment.CommentId)
+		}
+	}
+	return ids
 }
 
 func cloneScope(sc *taskv1.PostScope) *taskv1.PostScope {
@@ -293,6 +353,7 @@ func (s *ThreadStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	if err != nil {
 		return retry(t, "", "30s", "checkpoint: "+err.Error(), c)
 	}
+	st.Resume(c)
 	if st.Cursor == "" {
 		st.Cursor = t.Cursor
 	}
@@ -326,7 +387,7 @@ func (s *ThreadStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 				truncated = true
 				break
 			}
-			_ = d.Ckpt.Save(ctx, t.LineageId, t.Seq, st)
+			_ = d.saveCkpt(ctx, t, st, c)
 		}
 		if resp.Class != detect.OK {
 			return classOutcome(t, resp.Class, resp.Reason, st.Cursor, c)
@@ -360,7 +421,7 @@ func (s *ThreadStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 		} else {
 			st.Cursor = res.PageInfo.EndCursor
 		}
-		if err := d.Ckpt.Save(ctx, t.LineageId, t.Seq, st); err != nil {
+		if err := d.saveCkpt(ctx, t, st, c); err != nil {
 			slog.Warn("thread: checkpoint save failed", "err", err)
 		}
 	}
