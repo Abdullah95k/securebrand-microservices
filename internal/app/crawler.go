@@ -61,6 +61,9 @@ type CrawlerOptions struct {
 	Stages      []string
 	DoerFactory session.DoerFactory // nil = fingerprinted tls-client
 	RawS3       *minio.Client       // nil disables raw capture
+	// DrainTimeout bounds how long in-flight tasks may run at shutdown
+	// before they are abandoned (default 75s).
+	DrainTimeout time.Duration
 }
 
 // NewCrawler builds the crawler: identity pool, GraphQL client, stages,
@@ -162,6 +165,10 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 	if len(stages) == 0 {
 		stages = cfg.Crawler.Stages
 	}
+	drain := o.DrainTimeout
+	if drain <= 0 {
+		drain = 75 * time.Second
+	}
 	kinds := map[string]taskv1.Kind{"page": taskv1.Kind_KIND_PAGE, "post": taskv1.Kind_KIND_POST, "thread": taskv1.Kind_KIND_THREAD}
 	for _, s := range stages {
 		s = strings.TrimSpace(s)
@@ -201,7 +208,7 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 			}
 			cons, err := kafka.NewConsumer(kafka.ConsumerConfig{
 				ClientConfig: kcfg, Group: "fbs-crawler-" + s + "-" + topics.LaneName(lane), Topics: []string{topics.Task(kind, lane)},
-				MaxInflight: n, MaxInflightPerPartition: cfg.Crawler.MaxInflightPerPartition, DrainTimeout: 75 * time.Second,
+				MaxInflight: n, MaxInflightPerPartition: cfg.Crawler.MaxInflightPerPartition, DrainTimeout: drain,
 				Slots: shared,
 			}, worker.Handle)
 			if err != nil {

@@ -49,6 +49,7 @@ func (s *PageStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	if err != nil {
 		return retry(t, "", "30s", "checkpoint: "+err.Error(), c)
 	}
+	st.Resume(c)
 	if st.Cursor == "" {
 		st.Cursor = t.Cursor
 		st.PostsSeen = sc.PostsSeen
@@ -174,7 +175,7 @@ func (s *PageStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 				metrics.TimelineTruncated.WithLabelValues("login_wall").Inc()
 				break
 			}
-			_ = d.Ckpt.Save(ctx, t.LineageId, t.Seq, st)
+			_ = d.saveCkpt(ctx, t, st, c)
 		}
 		if resp.Class != detect.OK {
 			return classOutcome(t, resp.Class, resp.Reason, st.Cursor, c)
@@ -231,10 +232,13 @@ func (s *PageStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 			c["posts"]++
 			c["media_queued"] += n
 			if child, state := s.commentsTask(ctx, t, mode, p); child != nil {
-				children = append(children, child)
-				_ = d.Jobs.SetPost(ctx, t.JobId, p.PostId, created.Unix(), p.GetCommentCount(), jobs.PostPending)
+				// Not again when this job already collected the post (a
+				// refresh riding on the job).
+				if collected, _ := d.Jobs.SetPost(ctx, t.JobId, p.PostId, created.Unix(), p.GetCommentCount(), jobs.PostPending); !collected {
+					children = append(children, child)
+				}
 			} else {
-				_ = d.Jobs.SetPost(ctx, t.JobId, p.PostId, created.Unix(), p.GetCommentCount(), state)
+				_, _ = d.Jobs.SetPost(ctx, t.JobId, p.PostId, created.Unix(), p.GetCommentCount(), state)
 			}
 		}
 		if err := b.Wait(ctx); err != nil {
@@ -250,7 +254,7 @@ func (s *PageStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 			st.Cursor = tl.PageInfo.EndCursor
 		}
 		st.Walls, st.WallCursor = 0, ""
-		if err := d.Ckpt.Save(ctx, t.LineageId, t.Seq, st); err != nil {
+		if err := d.saveCkpt(ctx, t, st, c); err != nil {
 			slog.Warn("page: checkpoint save failed", "err", err)
 		}
 	}

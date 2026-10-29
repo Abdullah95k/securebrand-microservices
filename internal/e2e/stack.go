@@ -60,9 +60,18 @@ type Stack struct {
 	Adaptive *scheduler.Adaptive
 	Dispatch *dispatch.Dispatcher
 
+	mu      sync.Mutex
+	groups  map[string]*group
+	kcfg    kafka.ClientConfig
+	copts   app.CrawlerOptions
+	tracker *jobs.Tracker
+}
+
+// group is a set of components started and stopped together, so a test can
+// restart one part of the pipeline.
+type group struct {
 	cancel context.CancelFunc
-	wg     sync.WaitGroup
-	err    error
+	done   chan struct{}
 }
 
 // Options tweak the stack.
@@ -70,6 +79,9 @@ type Options struct {
 	Spec   fakefb.Spec
 	Faults fakefb.Faults
 	Config func(*config.Config)
+	// CrawlerDrain overrides how long a stopping crawler lets in-flight
+	// tasks run before abandoning them (a short one is a crash).
+	CrawlerDrain time.Duration
 }
 
 // Start brings up the stack; it stops at test cleanup.
@@ -167,21 +179,18 @@ func Start(t *testing.T, o Options) *Stack {
 		_, _ = kadm.NewClient(producer.Client()).DeleteTopics(cctx, names...)
 	})
 
-	s := &Stack{Cfg: cfg, DB: db, Redis: rdb, Producer: producer, S3: s3, Fake: fake, FakeURL: fhs.URL}
 	kcfg := kafka.ClientConfig{Brokers: brokers, ClientID: "e2e", TopicPrefix: prefix, Linger: time.Millisecond}
+	s := &Stack{Cfg: cfg, DB: db, Redis: rdb, Producer: producer, S3: s3, Fake: fake, FakeURL: fhs.URL,
+		groups: map[string]*group{}, kcfg: kcfg, tracker: jobs.New(rdb),
+		copts: app.CrawlerOptions{Stages: []string{"page", "post", "thread", "retry"}, DrainTimeout: o.CrawlerDrain}}
+	t.Cleanup(s.Stop)
 
-	s.Crawler, err = app.NewCrawler(ctx, cfg, db, rdb, producer, app.CrawlerOptions{Stages: []string{"page", "post", "thread", "retry"}})
+	s.Crawler, err = app.NewCrawler(ctx, cfg, db, rdb, producer, s.copts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	pc, err := persist.NewConsumer(kcfg, &persist.Writer{DB: db}, 2000, 100*time.Millisecond)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tracker := jobs.New(rdb)
-	s.Dispatch = &dispatch.Dispatcher{DB: db, Jobs: tracker, Producer: producer, BaseURL: cfg.FB.BaseURL}
+	s.Dispatch = &dispatch.Dispatcher{DB: db, Jobs: s.tracker, Producer: producer, BaseURL: cfg.FB.BaseURL}
 	s.Adaptive = &scheduler.Adaptive{DB: db, Cfg: cfg}
-	fin := &scheduler.Finalizer{DB: db, Jobs: tracker, Producer: producer, Timeout: cfg.Scheduler.FinalizeTimeout, Adaptive: s.Adaptive}
 	s.Planner = &scheduler.Planner{DB: db, Dispatch: s.Dispatch, Cfg: cfg, Adaptive: s.Adaptive}
 	s.Eraser = &gdpr.Eraser{DB: db, S3: s3, Producer: producer}
 	dl := &media.Downloader{DB: db, S3: s3, Bucket: cfg.S3.MediaBucket, Producer: producer, HTTP: media.NewHTTPClient(),
@@ -202,32 +211,93 @@ func Start(t *testing.T, o Options) *Stack {
 	s.API = httptest.NewServer(srv.Handler())
 	t.Cleanup(s.API.Close)
 
-	comps := append([]run.Func{}, s.Crawler.Components...)
 	aimd := ratelimit.NewController(rdb, prefix, cfg.FB.AIMD, cfg.FB.GlobalRPS)
-	comps = append(comps, pc.Run, dlc.Run, jc.Run,
-		func(ctx context.Context) error {
-			return scheduler.Every(ctx, "finalizer", 200*time.Millisecond, fin.Tick)
-		},
-		func(ctx context.Context) error { return scheduler.Every(ctx, "aimd", time.Second, aimd.Tick) },
-	)
-	rctx, cancel := context.WithCancel(ctx)
-	s.cancel = cancel
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		s.err = run.Group(rctx, comps...)
-	}()
-	t.Cleanup(s.Stop)
+	s.start("crawler", s.Crawler.Components...)
+	s.RestartPersister(t)
+	s.RestartFinalizer()
+	s.start("media", dlc.Run, jc.Run)
+	s.start("aimd", func(ctx context.Context) error { return scheduler.Every(ctx, "aimd", time.Second, aimd.Tick) })
 	return s
+}
+
+func (s *Stack) start(name string, comps ...run.Func) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	g := &group{cancel: cancel, done: make(chan struct{})}
+	s.groups[name] = g
+	go func() {
+		defer close(g.done)
+		if err := run.Group(ctx, comps...); err != nil && ctx.Err() == nil {
+			slog.Error("e2e: component group failed", "group", name, "err", err)
+		}
+	}()
+}
+
+func (s *Stack) stop(name string) {
+	s.mu.Lock()
+	g := s.groups[name]
+	delete(s.groups, name)
+	s.mu.Unlock()
+	if g != nil {
+		g.cancel()
+		<-g.done
+	}
+}
+
+// RestartCrawler stops the crawler (in-flight tasks get Options.CrawlerDrain
+// to finish) and starts a new one, as a pod replacement would.
+func (s *Stack) RestartCrawler(t *testing.T) {
+	t.Helper()
+	s.stop("crawler")
+	c, err := app.NewCrawler(context.Background(), s.Cfg, s.DB, s.Redis, s.Producer, s.copts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Crawler = c
+	s.start("crawler", c.Components...)
+}
+
+// RestartPersister replaces the persister consumer.
+func (s *Stack) RestartPersister(t *testing.T) {
+	t.Helper()
+	s.stop("persister")
+	pc, err := persist.NewConsumer(s.kcfg, &persist.Writer{DB: s.DB}, 2000, 100*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.start("persister", pc.Run)
+}
+
+// RestartFinalizer replaces the finalizer, as a scheduler leader change
+// would: whatever the old one held in memory is gone.
+func (s *Stack) RestartFinalizer() {
+	s.stop("finalizer")
+	cfg := s.Cfg
+	fin := &scheduler.Finalizer{DB: s.DB, Jobs: s.tracker, Producer: s.Producer, Timeout: cfg.Scheduler.FinalizeTimeout, Adaptive: s.Adaptive,
+		Deletions: scheduler.DeletionsFrom(cfg)}
+	s.start("finalizer", func(ctx context.Context) error {
+		return scheduler.Every(ctx, "finalizer", 200*time.Millisecond, fin.Tick)
+	})
 }
 
 // Stop shuts the stack down.
 func (s *Stack) Stop() {
-	if s.cancel != nil {
-		s.cancel()
-		s.wg.Wait()
-		s.cancel = nil
+	s.mu.Lock()
+	names := make([]string, 0, len(s.groups))
+	for n := range s.groups {
+		names = append(names, n)
 	}
+	s.mu.Unlock()
+	var wg sync.WaitGroup
+	for _, n := range names {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.stop(n)
+		}()
+	}
+	wg.Wait()
 }
 
 // Key creates an API key with scopes.

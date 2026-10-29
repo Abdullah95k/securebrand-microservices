@@ -62,8 +62,14 @@ type Comment struct {
 	Parent    *Comment
 	Media     *MediaItem
 	Filtered  bool // hidden by the "most relevant" ordering
-	IsOP      bool
-	Edited    bool
+	// Withheld comments are left out of every ordering but still counted,
+	// as when Facebook serves a logged-out visitor a partial list.
+	Withheld bool
+	// Hidden (top-level) comments, hidden by the page, are left out of the
+	// lists, the counts and the truth, with their replies.
+	Hidden bool
+	IsOP   bool
+	Edited bool
 }
 
 type Post struct {
@@ -348,12 +354,21 @@ func (w *World) TruthFor(pageID int64, since time.Time) (Truth, bool) {
 		var walk func(cs []*Comment)
 		walk = func(cs []*Comment) {
 			for _, c := range cs {
+				if c.Hidden {
+					continue
+				}
 				pt.CommentIDs = append(pt.CommentIDs, c.ID)
 				walk(c.Replies)
 			}
 		}
 		walk(post.Comments)
 		pt.TotalComments = len(pt.CommentIDs)
+		pt.TopLevel = 0
+		for _, c := range post.Comments {
+			if !c.Hidden {
+				pt.TopLevel++
+			}
+		}
 		t.Posts = append(t.Posts, pt)
 	}
 	return t, true
@@ -410,10 +425,87 @@ func (w *World) AddComments(postID int64, n int) error {
 	return fmt.Errorf("fakefb: no post %d", postID)
 }
 
+// DeleteComment removes a comment (and its replies), as if its author
+// deleted it.
+func (w *World) DeleteComment(id int64) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	c, ok := w.comments[id]
+	if !ok {
+		return fmt.Errorf("fakefb: no comment %d", id)
+	}
+	drop := func(cs []*Comment) []*Comment {
+		out := cs[:0]
+		for _, x := range cs {
+			if x.ID != id {
+				out = append(out, x)
+			}
+		}
+		return out
+	}
+	if c.Parent != nil {
+		c.Parent.Replies = drop(c.Parent.Replies)
+	} else {
+		post := w.posts[c.PostID]
+		post.Comments = drop(post.Comments)
+	}
+	var forget func(c *Comment)
+	forget = func(c *Comment) {
+		delete(w.comments, c.ID)
+		for _, r := range c.Replies {
+			forget(r)
+		}
+	}
+	forget(c)
+	return nil
+}
+
+// WithholdComments leaves the first n top-level comments of post postID out
+// of the comment lists while still counting them.
+func (w *World) WithholdComments(postID int64, n int) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	post, ok := w.posts[postID]
+	if !ok {
+		return fmt.Errorf("fakefb: no post %d", postID)
+	}
+	for _, c := range post.Comments[:min(n, len(post.Comments))] {
+		c.Withheld = true
+	}
+	return nil
+}
+
+// HideComment hides (or shows again) a top-level comment, as a page
+// moderating its comments would.
+func (w *World) HideComment(id int64, hidden bool) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	c, ok := w.comments[id]
+	if !ok || c.Parent != nil {
+		return fmt.Errorf("fakefb: no top-level comment %d", id)
+	}
+	c.Hidden = hidden
+	return nil
+}
+
+// EditComment replaces a comment's text and flags it edited.
+func (w *World) EditComment(id int64, text string) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	c, ok := w.comments[id]
+	if !ok {
+		return fmt.Errorf("fakefb: no comment %d", id)
+	}
+	c.Text, c.Edited = text, true
+	return nil
+}
+
 func countAll(cs []*Comment) int {
 	n := 0
 	for _, c := range cs {
-		n += 1 + countAll(c.Replies)
+		if !c.Hidden {
+			n += 1 + countAll(c.Replies)
+		}
 	}
 	return n
 }

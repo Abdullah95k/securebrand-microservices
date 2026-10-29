@@ -24,6 +24,16 @@ type State struct {
 	// Walls counts login walls hit at WallCursor on distinct identities.
 	Walls      int    `json:"walls,omitempty"`
 	WallCursor string `json:"wall_cursor,omitempty"`
+	// Counters of the pages this segment already read, so a retried or
+	// redelivered segment that resumes at Cursor reports them too.
+	Counters map[string]int64 `json:"counters,omitempty"`
+}
+
+// Resume adds the saved counters to c.
+func (s State) Resume(c map[string]int64) {
+	for k, v := range s.Counters {
+		c[k] += v
+	}
 }
 
 // Store is the Redis-backed store.

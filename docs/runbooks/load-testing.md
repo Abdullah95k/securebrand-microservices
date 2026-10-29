@@ -32,3 +32,43 @@ These are measured with every component in one process on a 4-CPU container. The
 
 - Use a bigger world: for example `FBS_LOADTEST_PAGES=300 FBS_LOADTEST_POSTS=40 make loadtest`.
 - For production-like numbers, run the services as separate processes against compose or a staging cluster, pointed at fakefb (`deploy/compose`). Watch the "fbs / Overview" dashboard while it runs: lane slots, consumer lag and persister batch time show which stage saturates first.
+
+## Soak and chaos tests
+
+Both check that restarts lose nothing and that the store ends up exactly like the fakefb world.
+
+**`TestChaosRestartsAndFaults`** runs in `make test-integration`.
+- **Setup:** three pages are crawled with rate limits and latency. Each page is paced at 5 requests a second, so the jobs run through the restarts.
+- **Chaos:** while the jobs run, the test makes 12 restarts at random:
+  - the crawler, which abandons its in-flight tasks after 20 ms, as a killed pod would;
+  - the persister;
+  - the finalizer, as a scheduler leader change would.
+- **Checks:**
+  - every job completes;
+  - every post and comment is stored exactly once, nothing extra, at full completeness;
+  - the job counters undercount nothing.
+- **Second round:** full jobs over the same pages, also under restarts, find nothing deleted or edited.
+
+**`make soak`** (`TestSoak`) is opt-in and runs for `FBS_SOAK_DURATION` (20m).
+- **Setup:** `FBS_SOAK_PAGES` (6) pages are scheduled every 30 seconds. Short refresh windows and recrawl ages make post refreshes and recrawls run along the way.
+- **Changes and restarts:**
+  - every few seconds the world changes: new posts and comments, comments on older posts, edits and deletions;
+  - every `FBS_SOAK_RESTART_EVERY` (90s; 0 = never), a component restarts.
+- **Every 30 seconds it records** goroutines, heap, Redis keys and jobs. It fails on a failed, partial or stuck job.
+- **At the end:**
+  1. A full job per page.
+  2. Every comment on Facebook must be stored, visible and with its current text. Every comment the test deleted must be marked deleted.
+  3. No job may be left in the finalize set, no seen list in Redis, and goroutines must not have grown.
+- **Report:** `FBS_SOAK_OUT=file.md` writes the report.
+
+A 6-minute run on this container (4 pages, a restart every 40s), from `FBS_SOAK_DURATION=6m FBS_SOAK_PAGES=4 FBS_SOAK_RESTART_EVERY=40s make soak`:
+- 48 jobs; 133 changes, including 27 deletions and 25 edits; 8 restarts;
+- 59 comments marked deleted: the 27 deletions and their replies;
+- edits counted on 19 of the 22 edited comments that are still up. The other edits came before the comment was first stored;
+- goroutines between 190 and 324, heap at most 66 MB.
+
+**What these tests found, all fixed:**
+- **Lost tasks:** a crawler that hit its drain timeout committed the offsets of the tasks it abandoned, so those tasks were lost and their jobs never finished. Abandoned records are now left for the partition's next owner.
+- **Lost jobs:** the finalizer removed ready jobs from Redis before finalising them. A scheduler restart while it waited for the persister lost them; they stayed `running`. Jobs now leave the set only once finalised.
+- **Undercounted jobs:** job counters dropped the pages read before a retry or redelivery. They are now saved with the checkpoint.
+- **False partial jobs:** a post refreshed by a job, then reached again by the same job's timeline scan, went back to `pending`. The job then ended `partial`.

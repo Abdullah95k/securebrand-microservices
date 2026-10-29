@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"sync/atomic"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -58,6 +59,9 @@ type Consumer struct {
 	tr      *tracker
 	global  chan struct{}
 	drainCh chan struct{}
+	// abandoned is set once the drain timeout gave up on in-flight records:
+	// they will never be done, so a revoke does not wait for them.
+	abandoned atomic.Bool
 }
 
 type drainKey struct{}
@@ -197,8 +201,11 @@ func (c *Consumer) Run(ctx context.Context) error {
 					<-psem
 					<-c.global
 				}()
-				c.process(handlerCtx, r)
-				c.tr.markDone(e)
+				// A record abandoned at shutdown is not done: leaving its
+				// offset uncommitted hands it to the partition's next owner.
+				if c.process(handlerCtx, r) {
+					c.tr.markDone(e)
+				}
 			}()
 		})
 		if stop {
@@ -215,6 +222,7 @@ func (c *Consumer) Run(ctx context.Context) error {
 		case c.global <- struct{}{}:
 		case <-deadline.C:
 			slog.Warn("kafka: drain timeout; abandoning in-flight records", "group", c.cfg.Group)
+			c.abandoned.Store(true)
 			cancelHandlers()
 			i = cap(c.global)
 		}
@@ -237,22 +245,24 @@ func acquire(ctx context.Context, sem chan struct{}) bool {
 	}
 }
 
-func (c *Consumer) process(ctx context.Context, r *kgo.Record) {
+// process runs the handler until it succeeds (true) or ctx is cancelled
+// (false: the record was abandoned).
+func (c *Consumer) process(ctx context.Context, r *kgo.Record) bool {
 	backoff := 200 * time.Millisecond
 	for attempt := 1; ; attempt++ {
 		err := c.h(ctx, r)
 		if err == nil {
-			return
+			return true
 		}
 		if ctx.Err() != nil {
-			return
+			return false
 		}
 		slog.Warn("kafka: handler failed; retrying", "topic", r.Topic, "partition", r.Partition,
 			"offset", r.Offset, "attempt", attempt, "err", err)
 		jitter := time.Duration(rand.Int64N(int64(backoff) / 2))
 		select {
 		case <-ctx.Done():
-			return
+			return false
 		case <-time.After(backoff + jitter):
 		}
 		if backoff < 30*time.Second {
@@ -293,7 +303,7 @@ func (c *Consumer) onRevoked(ctx context.Context, _ *kgo.Client, revoked map[str
 	// Give in-flight records of the revoked partitions a short window to
 	// finish so the new owner does not redo them, then commit what is done.
 	deadline := time.Now().Add(15 * time.Second)
-	for c.tr.pending(revoked) > 0 && time.Now().Before(deadline) {
+	for !c.abandoned.Load() && c.tr.pending(revoked) > 0 && time.Now().Before(deadline) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	c.commit(ctx, revoked)

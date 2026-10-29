@@ -5,7 +5,7 @@
 `fbs` scrapes public Facebook pages and collects:
 
 - every post in a configurable window;
-- every comment and reply (nested to `max_depth`);
+- every comment and reply (nested to `max_depth`), with edits counted and deletions detected on full re-reads ([runbook](docs/runbooks/operations.md#comment-edits-and-deletions));
 - all media, with as much metadata as Facebook exposes.
 
 It runs self-hosted, on Kubernetes or Docker Compose, and is built for hundreds of thousands of pages per day:
@@ -229,6 +229,7 @@ Commenter data is personal data.
 | `make infra-up && make test-integration` | Persister, e2e, spike, registry-sync and Schema Registry tests against real Postgres, Redpanda and Valkey |
 | `make e2e` | The whole pipeline in-process |
 | `make loadtest` | Opt-in load tests: many concurrent backfills through the whole pipeline, and the persister alone ([results](docs/runbooks/load-testing.md)) |
+| `make soak` | Opt-in soak test: scheduled crawls of a changing world (new comments, edits, deletions) with component restarts, ending with an exact comparison ([how](docs/runbooks/load-testing.md#soak-and-chaos-tests)) |
 | `make golden` | Regenerate parser `expected.json` after an intended change |
 | `make fixtures` | Regenerate the synthetic fakefb fixtures |
 | `make generate` | Regenerate protobuf Go code (`buf generate`) |

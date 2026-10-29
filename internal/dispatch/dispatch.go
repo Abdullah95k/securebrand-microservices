@@ -212,7 +212,7 @@ func (d *Dispatcher) Create(ctx context.Context, r Request, maxRunning int) (*Jo
 		pt := task.NewPost(root, p.Mode, p.Scope)
 		roots = append(roots, pt)
 		// Coverage of refreshed posts is reported with the job's.
-		if err := d.Jobs.SetPost(ctx, id.String(), p.Scope.PostId, p.Scope.PostCreatedAt.AsTime().Unix(),
+		if _, err := d.Jobs.SetPost(ctx, id.String(), p.Scope.PostId, p.Scope.PostCreatedAt.AsTime().Unix(),
 			p.Scope.ReportedCommentCount, jobs.PostPending); err != nil {
 			d.fail(ctx, id, err)
 			return nil, false, err

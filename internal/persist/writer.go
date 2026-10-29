@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	fbv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fb/v1"
@@ -170,7 +171,10 @@ func copyMetrics(ctx context.Context, tx pgx.Tx, rows [][]any) error {
 	return err
 }
 
-// Comments upserts comments and their authors.
+// Comments upserts comments and their authors and applies deletions. An
+// observation older than the stored one (a replayed batch) changes nothing;
+// a newer one with other text counts as an edit, and one newer than the
+// comment's deletion makes it visible again.
 func (w *Writer) Comments(ctx context.Context, cs []*fbv1.Comment) error {
 	cs = latest(cs, func(c *fbv1.Comment) string { return strconv.FormatInt(c.CommentId, 10) })
 	if len(cs) == 0 {
@@ -178,42 +182,39 @@ func (w *Writer) Comments(ctx context.Context, cs []*fbv1.Comment) error {
 	}
 	start := time.Now()
 	rows := make([][]any, 0, len(cs))
+	var dels []*fbv1.Comment
 	var months []time.Time
 	authors := map[string][]any{}
 	for _, c := range cs {
 		if c.PostCreatedAt == nil {
 			continue
 		}
-		rows = append(rows, commentRow(c))
 		months = append(months, c.PostCreatedAt.AsTime())
+		if c.Status == fbv1.CommentStatus_COMMENT_STATUS_DELETED {
+			dels = append(dels, c)
+			continue
+		}
+		rows = append(rows, commentRow(c))
 		if a := c.Author; a != nil && len(a.AuthorKey) > 0 && !c.Redacted {
 			seen := observed(c.Obs)
 			authors[string(a.AuthorKey)] = []any{a.AuthorKey, nilIfEmpty(a.Id), nilIfEmpty(a.Name), nilIfEmpty(a.Url),
 				nilIfEmpty(a.AvatarUrl), nilIfEmpty(a.Type), a.Verified, seen, seen}
 		}
 	}
-	var written int64
+	var written, edited, restored int64
 	err := w.withPartitions(ctx, "comments", months, func() error {
+		written, edited, restored = 0, 0, 0
 		return pgx.BeginFunc(ctx, w.DB, func(tx pgx.Tx) error {
-			if err := copyTemp(ctx, tx, "tmp_comments", "comments", commentCols, rows); err != nil {
-				return err
-			}
-			set := make([]string, 0, len(commentCols))
-			for _, c := range commentCols {
-				if c == "post_created_at" || c == "post_id" || c == "comment_id" || c == "first_seen_at" {
-					continue
+			if len(rows) > 0 {
+				if err := upsertComments(ctx, tx, rows, &written, &edited, &restored); err != nil {
+					return err
 				}
-				set = append(set, c+" = EXCLUDED."+c)
 			}
-			tag, err := tx.Exec(ctx, `INSERT INTO comments AS t (`+strings.Join(commentCols, ",")+`)
-				SELECT `+strings.Join(commentCols, ",")+` FROM tmp_comments
-				ON CONFLICT (post_created_at, post_id, comment_id) DO UPDATE SET `+strings.Join(set, ", ")+`
-				WHERE NOT t.redacted AND (t.content_hash IS DISTINCT FROM EXCLUDED.content_hash
-				   OR t.last_seen_at < EXCLUDED.last_seen_at - interval '1 day')`)
-			if err != nil {
-				return err
+			if len(dels) > 0 {
+				if _, err := markDeleted(ctx, tx, dels); err != nil {
+					return err
+				}
 			}
-			written = tag.RowsAffected()
 			if len(authors) == 0 {
 				return nil
 			}
@@ -225,7 +226,7 @@ func (w *Writer) Comments(ctx context.Context, cs []*fbv1.Comment) error {
 			if err := copyTemp(ctx, tx, "tmp_authors", "comment_authors", acols, arows); err != nil {
 				return err
 			}
-			_, err = tx.Exec(ctx, `INSERT INTO comment_authors AS a SELECT * FROM tmp_authors
+			_, err := tx.Exec(ctx, `INSERT INTO comment_authors AS a SELECT * FROM tmp_authors
 				ON CONFLICT (author_key) DO UPDATE SET author_id = EXCLUDED.author_id, name = EXCLUDED.name,
 					profile_url = EXCLUDED.profile_url, avatar_url = EXCLUDED.avatar_url,
 					author_type = EXCLUDED.author_type, verified = EXCLUDED.verified,
@@ -240,8 +241,125 @@ func (w *Writer) Comments(ctx context.Context, cs []*fbv1.Comment) error {
 	}
 	metrics.PersistRows.WithLabelValues("comment", "written").Add(float64(written))
 	metrics.PersistRows.WithLabelValues("comment", "unchanged").Add(float64(int64(len(rows)) - written))
+	metrics.CommentChanges.WithLabelValues("edited").Add(float64(edited))
+	metrics.CommentChanges.WithLabelValues("restored").Add(float64(restored))
 	metrics.PersistBatch.WithLabelValues("comment").Observe(time.Since(start).Seconds())
 	return nil
+}
+
+const (
+	// Other text is an edit (redaction is not).
+	commentEdited = `(NOT EXCLUDED.redacted AND t.text IS DISTINCT FROM EXCLUDED.text)`
+	// An observation newer than the deletion: the comment is visible again.
+	commentRestored = `(t.status = 'deleted' AND EXCLUDED.last_seen_at > t.deleted_at)`
+)
+
+func upsertComments(ctx context.Context, tx pgx.Tx, rows [][]any, written, edited, restored *int64) error {
+	if err := copyTemp(ctx, tx, "tmp_comments", "comments", commentCols, rows); err != nil {
+		return err
+	}
+	set := make([]string, 0, len(commentCols)+4)
+	for _, c := range commentCols {
+		if c == "post_created_at" || c == "post_id" || c == "comment_id" || c == "first_seen_at" {
+			continue
+		}
+		set = append(set, c+" = EXCLUDED."+c)
+	}
+	set = append(set,
+		"edit_count = t.edit_count + CASE WHEN "+commentEdited+" THEN 1 ELSE 0 END",
+		"edited_at = CASE WHEN "+commentEdited+" THEN EXCLUDED.last_seen_at ELSE t.edited_at END",
+		"status = CASE WHEN "+commentRestored+" THEN 'visible' ELSE t.status END",
+		"deleted_at = CASE WHEN "+commentRestored+" THEN NULL ELSE t.deleted_at END")
+	r, err := tx.Query(ctx, `INSERT INTO comments AS t (`+strings.Join(commentCols, ",")+`)
+		SELECT `+strings.Join(commentCols, ",")+` FROM tmp_comments
+		ON CONFLICT (post_created_at, post_id, comment_id) DO UPDATE SET `+strings.Join(set, ", ")+`
+		WHERE NOT t.redacted AND EXCLUDED.last_seen_at >= t.last_seen_at
+		  AND (t.content_hash IS DISTINCT FROM EXCLUDED.content_hash
+		   OR t.last_seen_at < EXCLUDED.last_seen_at - interval '1 day'
+		   OR `+commentRestored+`)
+		RETURNING new.edit_count > coalesce(old.edit_count, 0),
+			coalesce(old.status = 'deleted' AND new.status = 'visible', false),
+			new.post_created_at, new.post_id, new.comment_id, new.depth, old.deleted_at`)
+	if err != nil {
+		return err
+	}
+	var (
+		created []time.Time
+		posts   []int64
+		roots   []int64
+		at      []time.Time
+	)
+	for r.Next() {
+		var e, rs bool
+		var pc time.Time
+		var post, id int64
+		var depth int16
+		var deletedAt *time.Time
+		if err := r.Scan(&e, &rs, &pc, &post, &id, &depth, &deletedAt); err != nil {
+			r.Close()
+			return err
+		}
+		*written++
+		if e {
+			*edited++
+		}
+		if rs {
+			*restored++
+			if depth == 0 && deletedAt != nil {
+				created, posts, roots, at = append(created, pc), append(posts, post), append(roots, id), append(at, *deletedAt)
+			}
+		}
+	}
+	r.Close()
+	if err := r.Err(); err != nil || len(roots) == 0 {
+		return err
+	}
+	// The replies deleted with a comment that is visible again were only
+	// deleted because of it.
+	tag, err := tx.Exec(ctx, `UPDATE comments c SET status = 'visible', deleted_at = NULL
+		FROM unnest($1::timestamptz[], $2::bigint[], $3::bigint[], $4::timestamptz[]) AS d(created, post_id, root, at)
+		WHERE c.post_created_at = d.created AND c.post_id = d.post_id AND c.root_comment_id = d.root AND c.depth > 0
+		  AND c.status = 'deleted' AND c.deleted_at = d.at`, created, posts, roots, at)
+	if err != nil {
+		return err
+	}
+	*restored += tag.RowsAffected()
+	return nil
+}
+
+type execer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+// MarkDeleted sets visible comments to deleted, as of their observation
+// time, unless they were seen after it. It returns how many it changed.
+func MarkDeleted(ctx context.Context, db *pgxpool.Pool, cs []*fbv1.Comment) (int64, error) {
+	return markDeleted(ctx, db, cs)
+}
+
+func markDeleted(ctx context.Context, db execer, cs []*fbv1.Comment) (int64, error) {
+	created := make([]time.Time, 0, len(cs))
+	posts := make([]int64, 0, len(cs))
+	ids := make([]int64, 0, len(cs))
+	at := make([]time.Time, 0, len(cs))
+	for _, c := range cs {
+		if c.PostCreatedAt == nil {
+			continue
+		}
+		created = append(created, c.PostCreatedAt.AsTime())
+		posts = append(posts, c.PostId)
+		ids = append(ids, c.CommentId)
+		at = append(at, observed(c.Obs))
+	}
+	tag, err := db.Exec(ctx, `UPDATE comments c SET status = 'deleted', deleted_at = d.at
+		FROM unnest($1::timestamptz[], $2::bigint[], $3::bigint[], $4::timestamptz[]) AS d(created, post_id, comment_id, at)
+		WHERE c.post_created_at = d.created AND c.post_id = d.post_id AND c.comment_id = d.comment_id
+		  AND c.status = 'visible' AND NOT c.redacted AND c.last_seen_at < d.at`, created, posts, ids, at)
+	if err != nil {
+		return 0, err
+	}
+	metrics.CommentChanges.WithLabelValues("deleted").Add(float64(tag.RowsAffected()))
+	return tag.RowsAffected(), nil
 }
 
 // Pages upserts page profiles, records follower snapshots and resolves
