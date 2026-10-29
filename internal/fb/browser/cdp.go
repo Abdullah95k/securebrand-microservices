@@ -214,6 +214,9 @@ func launch(ctx context.Context, binary string, noSandbox bool, args []string) (
 	// children too instead of orphaning them.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	// A helper that leaves the group can keep the stderr pipe open: Wait
+	// returns this long after Chromium itself exits, whatever holds it.
+	cmd.WaitDelay = 2 * time.Second
 	if err := cmd.Start(); err != nil {
 		_ = os.RemoveAll(profile)
 		return nil, fmt.Errorf("browser: start %s: %w", binary, err)
@@ -238,13 +241,21 @@ func launch(ctx context.Context, binary string, noSandbox bool, args []string) (
 				return p, nil
 			}
 		}
+		if err := ctx.Err(); err != nil {
+			p.stop()
+			return nil, fmt.Errorf("browser: launch: %w", err)
+		}
 		select {
 		case <-p.done:
 			p.stop()
-			return nil, fmt.Errorf("browser: chromium exited before opening its DevTools port (%w): %s", p.exitErr, p.stderr)
+			exit := "exit status 0"
+			if p.exitErr != nil {
+				exit = p.exitErr.Error()
+			}
+			return nil, fmt.Errorf("browser: chromium exited before opening its DevTools port (%s): %s", exit, p.stderr)
 		default:
 		}
-		if time.Now().After(deadline) || ctx.Err() != nil {
+		if time.Now().After(deadline) {
 			p.stop()
 			return nil, fmt.Errorf("browser: chromium did not open its DevTools port within 20s: %s", p.stderr)
 		}

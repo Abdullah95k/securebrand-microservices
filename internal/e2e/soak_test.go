@@ -82,15 +82,17 @@ func TestSoak(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer func() { _ = f.Close() }()
 			if err := pprof.Lookup("heap").WriteTo(f, 0); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.Close(); err != nil {
 				t.Fatal(err)
 			}
 		}
 		return m.HeapAlloc
 	}
 	var report strings.Builder
-	fmt.Fprintf(&report, "# Soak: %d pages, %s, restart every %s\n\n| t | goroutines | heap MB | redis keys | jobs done | running | oldest running |\n|---|---|---|---|---|---|---|\n",
+	fmt.Fprintf(&report, "# Soak: %d pages, %s, restart every %s\n\n| t | goroutines | heap in use MB | redis keys | jobs done | running | oldest running |\n|---|---|---|---|---|---|---|\n",
 		nPages, duration, restartEvery)
 
 	mutate := func() {
@@ -301,7 +303,7 @@ func TestSoak(t *testing.T) {
 	}
 	jobsRun := count(t, s, `SELECT count(*) FROM jobs`)
 	fmt.Fprintf(&report, "\n- jobs: %d; comments stored %d (%d visible, %d marked deleted)\n- mutations: %v\n- restarts: %v\n"+
-		"- edited comments: %d, with an edit counted: %d\n- goroutines: %d after 2 minutes, %d max, %d at the end; heap max %.0f MB\n"+
+		"- edited comments: %d, with an edit counted: %d\n- goroutines: %d after 2 minutes, %d max, %d at the end; heap in use at most %.0f MB\n"+
 		"- live heap after a collection: %.0f MB after 2 minutes, %.0f MB at the end\n",
 		jobsRun, stored, visible, markedDeleted, mutations, restarts, len(edited), counted, baseGoroutines, maxGoroutines, g, float64(maxHeap)/1e6,
 		float64(baseLive)/1e6, float64(endLive)/1e6)
