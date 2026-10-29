@@ -83,12 +83,16 @@ keda:
   pollingInterval: 15
   cooldownPeriod: 120
 
-# Hooks run `fbctl migrate up` and `fbctl kafka apply` before installs and
-# upgrades.
+# Hooks run `fbctl migrate up`, `fbctl kafka apply` and, when enabled,
+# `fbctl schemas apply` before installs and upgrades.
 hooks:
   migrate: true
   topics: true
   topicReplicas: 3
+  # `fbctl schemas apply`: registers the fb.v1 schemas with
+  # config.kafka.schema_registry.url (BACKWARD_TRANSITIVE). An incompatible
+  # contract change fails the hook, and with it the upgrade.
+  schemas: false
 
 api:
   service:

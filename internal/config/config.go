@@ -100,6 +100,15 @@ type Kafka struct {
 	TopicPrefix   string        `koanf:"topic_prefix"`
 	ProduceLinger time.Duration `koanf:"produce_linger"`
 	Compression   string        `koanf:"compression"`
+	// SchemaRegistry receives the fb.v1 schemas (`fbctl schemas apply`).
+	SchemaRegistry SchemaRegistry `koanf:"schema_registry"`
+}
+
+// SchemaRegistry is a Confluent-compatible registry (Redpanda's on :8081).
+type SchemaRegistry struct {
+	URL      string `koanf:"url"`
+	Username string `koanf:"username"`
+	Password string `koanf:"password"`
 }
 
 type S3 struct {

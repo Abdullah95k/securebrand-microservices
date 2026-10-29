@@ -47,7 +47,7 @@ fbs-crawler --stages page ─PostTask─▶ post ─ThreadTask─▶ thread     
 | `fbs-persister` | Writes `fb.*` topics into partitioned Postgres (COPY + no-op upserts) |
 | `fbs-media-downloader` / `fbs-media-janitor` | Temporary media lifecycle ([contract](docs/contracts/media-handoff.md)) |
 | `fbs-registry-sync` | Follows Facebook's doc_id rotations. It scans canary pages' bundles, checks new ids with real requests and promotes working ones ([runbook](docs/runbooks/operations.md#registry-stale-doc_id-rotated)). |
-| `fbctl` | Migrations, topics, API keys, registry, DLQ replay, fixture scrub, dev media acks |
+| `fbctl` | Migrations, topics, Schema Registry, API keys, query registry, DLQ replay, fixture scrub, dev media acks |
 | `fbs-spike` | Phase 0 harness against real Facebook: `phase0` runs everything; also `preflight`, `docids`, `har`, `capture`, `check-fixtures`, `run`, `report` (no infrastructure needed) |
 | `fakefb`, `devs3` | Synthetic Facebook and in-memory S3, for development and tests |
 
@@ -152,6 +152,7 @@ Settings that matter most:
 | `privacy.pii_mode` | `full` | `pseudonymized` drops author identity and keeps `author_key` |
 | `privacy.author_hmac_key` | dev key | Must be set in prod (validated) |
 | `kafka.topic_prefix` | empty | Namespaces topics **and** consumer groups |
+| `kafka.schema_registry.url` | empty | Registry for the fb.v1 schemas (`fbctl schemas apply`, Helm `hooks.schemas`); see the [record schemas contract](docs/contracts/kafka-schemas.md) |
 
 ### Phase 0, before scraping real Facebook at volume
 
@@ -193,7 +194,7 @@ The Helm chart is at `deploy/helm/fbs`.
 - environment variables come from `secretEnv.existingSecret` (DSNs, S3 keys, HMAC key);
 - proxy tiers come from `secretFiles.existingSecret`, a `proxies.yaml` layered over the ConfigMap.
 
-Operational guidance is in [docs/runbooks/operations.md](docs/runbooks/operations.md).
+Operational guidance is in [docs/runbooks/operations.md](docs/runbooks/operations.md). Load tests and measured pipeline throughput are in [docs/runbooks/load-testing.md](docs/runbooks/load-testing.md).
 
 **Rough sizing** for about 300k pages/day incremental plus 2k new pages/day backfilled to 365 days. These are estimates until Phase 0 measures real numbers.
 
@@ -224,8 +225,9 @@ Commenter data is personal data.
 | Command | What it does |
 |---|---|
 | `make test` | Unit tests, including the full client layer against fakefb and parser goldens |
-| `make infra-up && make test-integration` | Persister, e2e and spike tests against real Postgres, Redpanda and Valkey |
+| `make infra-up && make test-integration` | Persister, e2e, spike, registry-sync and Schema Registry tests against real Postgres, Redpanda and Valkey |
 | `make e2e` | The whole pipeline in-process |
+| `make loadtest` | Opt-in load tests: many concurrent backfills through the whole pipeline, and the persister alone ([results](docs/runbooks/load-testing.md)) |
 | `make golden` | Regenerate parser `expected.json` after an intended change |
 | `make fixtures` | Regenerate the synthetic fakefb fixtures |
 | `make generate` | Regenerate protobuf Go code (`buf generate`) |

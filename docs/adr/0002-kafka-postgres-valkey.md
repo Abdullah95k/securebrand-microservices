@@ -28,5 +28,7 @@ Status: accepted
   means "queryable".
 * Redis state is short-lived; durable progress (timeline watermarks) lives in
   Postgres, so losing Valkey costs at most re-crawling recent pages.
-* Protobuf records carry their type in a header; a Schema Registry is optional
-  (Phase 2).
+* Protobuf records carry their type in a header. The schemas are registered
+  with a Schema Registry (`fbctl schemas apply`, BACKWARD_TRANSITIVE) for
+  documentation and as a deploy-time compatibility gate; the wire format
+  stays plain protobuf ([contract](../contracts/kafka-schemas.md)).
