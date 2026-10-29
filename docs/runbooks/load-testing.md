@@ -110,7 +110,7 @@ An earlier run with the same settings on the development container got through i
 **Memory.** Every component runs in the test's one process, together with fakefb and an in-memory S3, so the heap in use covers all of them. The report gives the heap left after a full collection after 2 minutes and at the end, and `FBS_SOAK_HEAPPROFILE` writes a heap profile at both points (the workflow prints the difference). In a 30-minute run with the same settings ([run 40905417646](https://github.com/Abdullah95k/securebrand-microservices/actions/runs/40905417646)):
 - the live heap went from 64 MB after 2 minutes to 114 MB at the end;
 - 47.6 MB of the 50 MB growth is the in-memory S3 holding the downloaded media. Nothing in the test acknowledges media, so it stays until `media.ttl` (72h). In production, media goes to the S3 bucket;
-- everything else, fbs's own code included, came to within a megabyte of where it started.
+- the other 2–3 MB is spread over entries of half a megabyte or less, up and down: connection buffers, fakefb's growing world. Nothing in fbs's own code grew with the run.
 
 **What these tests found, all fixed:**
 - **Lost posts (load test):** when a page's timeline held both a post and a share of it, the parser returned the post only once, quoted inside the share. The post itself and its 654 comments were never crawled, and the jobs still completed. The parser now drops only true repeats (the same object at the same place) and keeps a quoted post as well as the post itself.
