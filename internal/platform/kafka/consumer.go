@@ -115,9 +115,7 @@ func NewConsumer(cfg ConsumerConfig, h Handler) (*Consumer, error) {
 	if cfg.ResetToLatest {
 		reset = kgo.NewOffset().AtEnd()
 	}
-	cl, err := kgo.NewClient(
-		kgo.SeedBrokers(cfg.Brokers...),
-		kgo.ClientID(cfg.ClientID),
+	cl, err := kgo.NewClient(append(cfg.Opts(),
 		kgo.ConsumerGroup(cfg.TopicPrefix+cfg.Group),
 		kgo.ConsumeTopics(topics...),
 		kgo.DisableAutoCommit(),
@@ -126,7 +124,7 @@ func NewConsumer(cfg ConsumerConfig, h Handler) (*Consumer, error) {
 		kgo.FetchMaxWait(500*time.Millisecond),
 		kgo.OnPartitionsRevoked(c.onRevoked),
 		kgo.OnPartitionsLost(c.onLost),
-	)
+	)...)
 	if err != nil {
 		return nil, fmt.Errorf("kafka: consumer %s: %w", cfg.Group, err)
 	}

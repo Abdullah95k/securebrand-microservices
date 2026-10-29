@@ -161,7 +161,7 @@
         "created_at": "2026-09-29T19:31:15Z",
         "story_id": "UzpfSTEwMDA2NDAwMDAwMDAwMDoxMjAwMDAxMDAwODIxOjEyMDAwMDEwMDA4MjE=",
         "permalink": "https://www.facebook.com/brand0/posts/1200001000821",
-        "type": "POST_TYPE_STATUS",
+        "type": "POST_TYPE_SHARE",
         "text": "scam restock great delivery love restock shipping love #awesome #brand",
         "text_ranges": [
           {
@@ -183,6 +183,8 @@
           "awesome",
           "brand"
         ],
+        "shared_post_id": "1200001000070",
+        "shared_post_url": "https://www.facebook.com/brand0/posts/1200001000070",
         "author_id": "100064000000000",
         "author_name": "Brand 0 Official",
         "reactions": {

@@ -22,7 +22,7 @@ spec:
       securityContext: {{- toYaml $root.Values.podSecurityContext | nindent 8 }}
       containers:
         - name: {{ .name }}
-          image: "{{ $root.Values.image.repository }}:{{ $root.Values.image.tag }}"
+          image: "{{ $root.Values.image.repository }}:{{ $root.Values.image.tag | default $root.Chart.AppVersion }}"
           command: ["/usr/local/bin/fbctl"]
           args: {{- toYaml .args | nindent 12 }}
           env: {{- include "fbs.env" $root | nindent 12 }}

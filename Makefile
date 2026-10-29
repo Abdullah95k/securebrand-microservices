@@ -5,7 +5,7 @@ PG_DSN ?= postgres://fbs:fbs@localhost:5432/fbs?sslmode=disable
 TEST_ENV = FBS_TEST_PG_DSN="$(PG_DSN)" FBS_TEST_REDIS_ADDR=localhost:6379 FBS_TEST_KAFKA_BROKERS=localhost:19092 FBS_TEST_SCHEMA_REGISTRY=http://localhost:18081
 COMPOSE = docker compose -f deploy/compose/docker-compose.yml
 
-.PHONY: all build test lint vet generate golden fixtures infra-up infra-down test-integration e2e loadtest soak docker docker-prebuilt compose-up compose-down spike-report phase0 phase0-dryrun spike-bin clean
+.PHONY: all build test lint vet generate golden fixtures infra-up infra-down test-integration e2e loadtest soak docker docker-prebuilt compose-up compose-down spike-report phase0 phase0-dryrun spike-bin chart-check chart-smoke clean
 
 all: generate build test
 
@@ -69,6 +69,26 @@ docker:
 docker-prebuilt:
 	CGO_ENABLED=0 GOOS=linux $(GO) build -trimpath -ldflags="-s -w" -o bin/ ./cmd/...
 	docker build -f deploy/docker/Dockerfile.prebuilt -t $(IMAGE) .
+
+HELM ?= helm
+KUBECONFORM ?= kubeconform
+KUBECONFORM_ARGS = -strict -summary -kubernetes-version 1.30.0 -schema-location default \
+	-schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+
+## Lint the Helm chart and validate its renders (defaults, every optional
+## object, the staging example) against the Kubernetes and CRD schemas.
+chart-check:
+	$(HELM) lint deploy/helm/fbs
+	$(HELM) lint deploy/helm/fbs -f deploy/helm/fbs/examples/fakefb.yaml
+	set -o pipefail; $(HELM) template fbs deploy/helm/fbs | $(KUBECONFORM) $(KUBECONFORM_ARGS)
+	set -o pipefail; $(HELM) template fbs deploy/helm/fbs --set keda.authSecret=fbs-keda-kafka,tlsFiles.existingSecret=fbs-tls,alerts.enabled=true,dashboards.enabled=true,serviceMonitor.enabled=true,api.ingress.enabled=true,networkPolicy.enabled=true,hooks.schemas=true \
+	  | $(KUBECONFORM) $(KUBECONFORM_ARGS)
+	set -o pipefail; $(HELM) template fbs deploy/helm/fbs -f deploy/helm/fbs/examples/fakefb.yaml | $(KUBECONFORM) $(KUBECONFORM_ARGS)
+
+## Run the chart's hooks and Deployments in Docker exactly as rendered, then
+## real backfills against fakefb (make infra-up and make docker first).
+chart-smoke:
+	python3 scripts/chart-smoke.py --image $(IMAGE) --helm $(HELM)
 
 compose-up:
 	$(COMPOSE) up -d

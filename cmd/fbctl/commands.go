@@ -17,6 +17,7 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/configs"
 	fbv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fb/v1"
 	"github.com/abdullah95k/securebrand-microservices/internal/api"
+	"github.com/abdullah95k/securebrand-microservices/internal/app"
 	"github.com/abdullah95k/securebrand-microservices/internal/config"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/registry"
 	"github.com/abdullah95k/securebrand-microservices/internal/fixtures"
@@ -90,7 +91,11 @@ func kafkaApply(ctx context.Context, cfg *config.Config, args []string) error {
 			doc.Topics[i].Partitions = int32(*pcap)
 		}
 	}
-	p, err := kafka.NewProducer(kafka.ClientConfig{Brokers: cfg.Kafka.Brokers, ClientID: "fbctl"})
+	kcfg, err := app.KafkaClient(cfg, "-fbctl")
+	if err != nil {
+		return err
+	}
+	p, err := kafka.NewProducer(kcfg)
 	if err != nil {
 		return err
 	}
@@ -186,13 +191,17 @@ func dlqReplay(ctx context.Context, cfg *config.Config, args []string) error {
 	max := fs.Int("max", 1000, "maximum records")
 	idle := fs.Duration("idle", 10*time.Second, "stop after this long without records")
 	_ = fs.Parse(args)
-	p, err := kafka.NewProducer(kafka.ClientConfig{Brokers: cfg.Kafka.Brokers, ClientID: "fbctl", TopicPrefix: cfg.Kafka.TopicPrefix})
+	kcfg, err := app.KafkaClient(cfg, "-fbctl")
+	if err != nil {
+		return err
+	}
+	p, err := kafka.NewProducer(kcfg)
 	if err != nil {
 		return err
 	}
 	defer p.Close()
-	cl, err := kgo.NewClient(kgo.SeedBrokers(cfg.Kafka.Brokers...), kgo.ConsumerGroup(cfg.Kafka.TopicPrefix+"fbctl-dlq-replay"),
-		kgo.ConsumeTopics(cfg.Kafka.TopicPrefix+topics.DLQ), kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()), kgo.DisableAutoCommit())
+	cl, err := kgo.NewClient(append(kcfg.Opts(), kgo.ConsumerGroup(cfg.Kafka.TopicPrefix+"fbctl-dlq-replay"),
+		kgo.ConsumeTopics(cfg.Kafka.TopicPrefix+topics.DLQ), kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()), kgo.DisableAutoCommit())...)
 	if err != nil {
 		return err
 	}
@@ -256,7 +265,11 @@ func mediaAck(ctx context.Context, cfg *config.Config, args []string) error {
 	if err != nil {
 		return err
 	}
-	p, err := kafka.NewProducer(kafka.ClientConfig{Brokers: cfg.Kafka.Brokers, ClientID: "fbctl", TopicPrefix: cfg.Kafka.TopicPrefix})
+	kcfg, err := app.KafkaClient(cfg, "-fbctl")
+	if err != nil {
+		return err
+	}
+	p, err := kafka.NewProducer(kcfg)
 	if err != nil {
 		return err
 	}

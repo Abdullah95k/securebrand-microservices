@@ -14,6 +14,7 @@ type Node struct {
 	Typename string
 	V        gjson.Result
 	Parent   *Node
+	key      string // typename|id under the parent's key
 }
 
 // Ancestor returns the nearest ancestor with one of the typenames, or nil.
@@ -29,8 +30,13 @@ func (n *Node) Ancestor(typenames ...string) *Node {
 }
 
 // Collect walks every part once and returns the objects whose __typename is
-// in want, in document order. Objects repeated with the same typename and id
-// are returned once.
+// in want, in document order. An object repeated with the same typename and
+// id at the same place (under the same collected ancestors, as when parts
+// repeat it) is returned once. The same object quoted elsewhere, such as a
+// shared post inside the story that shares it, is returned again: the first
+// copy must not hide the one in its own place. Objects without an id are
+// never merged, but they are placed by typename alone, so two id-less
+// siblings of one typename share the place of their children.
 func Collect(parts []gjson.Result, want ...string) []*Node {
 	w := make(map[string]bool, len(want))
 	for _, t := range want {
@@ -65,13 +71,16 @@ func (c *collector) walk(v gjson.Result, parent *Node, depth int) {
 		cur := parent
 		if tn := v.Get("__typename"); tn.Type == gjson.String && c.want[tn.Str] {
 			key := tn.Str + "|" + v.Get("id").String()
+			if parent != nil {
+				key = parent.key + "/" + key
+			}
 			if v.Get("id").Exists() {
 				if c.seen[key] {
 					return
 				}
 				c.seen[key] = true
 			}
-			n := &Node{Typename: tn.Str, V: v, Parent: parent}
+			n := &Node{Typename: tn.Str, V: v, Parent: parent, key: key}
 			c.out = append(c.out, n)
 			cur = n
 		}

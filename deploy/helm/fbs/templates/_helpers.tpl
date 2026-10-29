@@ -47,6 +47,11 @@ envFrom:
   mountPath: /etc/fbs-secret
   readOnly: true
 {{- end }}
+{{- if .Values.tlsFiles.existingSecret }}
+- name: tls-files
+  mountPath: {{ .Values.tlsFiles.mountPath }}
+  readOnly: true
+{{- end }}
 - name: tmp
   mountPath: /tmp
 {{- end -}}
@@ -68,6 +73,11 @@ envFrom:
 - name: secret-files
   secret:
     secretName: {{ $root.Values.secretFiles.existingSecret }}
+{{- end }}
+{{- if $root.Values.tlsFiles.existingSecret }}
+- name: tls-files
+  secret:
+    secretName: {{ $root.Values.tlsFiles.existingSecret }}
 {{- end }}
 - name: tmp
   emptyDir: {}

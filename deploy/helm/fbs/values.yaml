@@ -1,6 +1,7 @@
 image:
   repository: ghcr.io/abdullah95k/fbs
-  tag: "0.1.0"
+  # Defaults to the chart's appVersion (the release workflow publishes both).
+  tag: ""
   # Image built with `--target browser` (Chromium included). When set, the
   # components marked `browser: true` (crawlers, registry-sync) use it; set
   # it together with config.fb.browser.enabled.
@@ -56,6 +57,12 @@ secretEnv:
 secretFiles:
   existingSecret: fbs-proxies
   key: proxies.yaml
+# Existing Secret with certificate files (CA, client certificate and key)
+# for config.kafka.tls / config.redis.tls, mounted at mountPath: point
+# ca_file, cert_file and key_file at e.g. /etc/fbs-tls/ca.pem.
+tlsFiles:
+  existingSecret: ""
+  mountPath: /etc/fbs-tls
 
 podSecurityContext:
   runAsNonRoot: true
@@ -91,6 +98,13 @@ keda:
   kafkaBootstrap: "kafka-bootstrap.kafka:9092"
   pollingInterval: 15
   cooldownPeriod: 120
+  # When the brokers need SASL and/or TLS: an existing Secret (in the
+  # release namespace) whose keys are KEDA's Kafka authentication parameters
+  # (sasl: plaintext|scram_sha256|scram_sha512, username, password,
+  # tls: enable, ca, cert, key). authParams must list exactly the keys it
+  # holds: KEDA rejects an empty tls. For TLS brokers add tls and ca.
+  authSecret: ""
+  authParams: [sasl, username, password]
 
 # Hooks run `fbctl migrate up`, `fbctl kafka apply` and, when enabled,
 # `fbctl schemas apply` before installs and upgrades.

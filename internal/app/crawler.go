@@ -159,8 +159,10 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 		c.Components = append(c.Components, func(ctx context.Context) error { return sink.Run(ctx, time.Minute) })
 	}
 	deps.Shadow = shadow.Configured(cfg.FB.ShadowRate, gql.Raw)
-	kcfg := kafka.ClientConfig{Brokers: cfg.Kafka.Brokers, ClientID: cfg.Kafka.ClientID + "-crawler",
-		TopicPrefix: cfg.Kafka.TopicPrefix, Linger: cfg.Kafka.ProduceLinger}
+	kcfg, err := KafkaClient(cfg, "-crawler")
+	if err != nil {
+		return nil, err
+	}
 	stages := o.Stages
 	if len(stages) == 0 {
 		stages = cfg.Crawler.Stages

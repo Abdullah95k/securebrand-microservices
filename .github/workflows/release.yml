@@ -1,0 +1,56 @@
+name: release
+
+# Pushing a tag vX.Y.Z publishes the images and the Helm chart to GHCR:
+#   ghcr.io/<owner>/fbs:X.Y.Z           static binaries (distroless)
+#   ghcr.io/<owner>/fbs:X.Y.Z-browser   the same with Chromium (fb.browser)
+#   oci://ghcr.io/<owner>/charts/fbs    chart X.Y.Z, appVersion X.Y.Z
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Names
+        id: names
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${owner}/fbs" >> "$GITHUB_OUTPUT"
+          echo "charts=oci://ghcr.io/${owner}/charts" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          build-args: VERSION=${{ steps.names.outputs.version }}
+          tags: ${{ steps.names.outputs.image }}:${{ steps.names.outputs.version }}
+          push: true
+      - name: Browser image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          target: browser
+          build-args: VERSION=${{ steps.names.outputs.version }}
+          tags: ${{ steps.names.outputs.image }}:${{ steps.names.outputs.version }}-browser
+          push: true
+      - uses: azure/setup-helm@v4
+      - name: Chart
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          helm package deploy/helm/fbs --version "${{ steps.names.outputs.version }}" \
+            --app-version "${{ steps.names.outputs.version }}" -d /tmp/chart
+          helm push /tmp/chart/fbs-*.tgz "${{ steps.names.outputs.charts }}"

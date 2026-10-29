@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"github.com/abdullah95k/securebrand-microservices/internal/api"
+	"github.com/abdullah95k/securebrand-microservices/internal/app"
 	"github.com/abdullah95k/securebrand-microservices/internal/config"
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/jobs"
 	"github.com/abdullah95k/securebrand-microservices/internal/dispatch"
@@ -15,7 +16,6 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/kafka"
 	plog "github.com/abdullah95k/securebrand-microservices/internal/platform/log"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/pg"
-	"github.com/abdullah95k/securebrand-microservices/internal/platform/redisx"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/run"
 )
 
@@ -42,13 +42,16 @@ func serve(ctx context.Context, cfg *config.Config) error {
 		}
 		defer read.Close()
 	}
-	rdb, err := redisx.Open(ctx, cfg.Redis.Addr, cfg.Redis.Password, cfg.Redis.DB)
+	rdb, err := app.OpenRedis(ctx, cfg)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = rdb.Close() }()
-	producer, err := kafka.NewProducer(kafka.ClientConfig{Brokers: cfg.Kafka.Brokers, ClientID: cfg.Kafka.ClientID + "-api",
-		TopicPrefix: cfg.Kafka.TopicPrefix, Linger: cfg.Kafka.ProduceLinger})
+	kcfg, err := app.KafkaClient(cfg, "-api")
+	if err != nil {
+		return err
+	}
+	producer, err := kafka.NewProducer(kcfg)
 	if err != nil {
 		return err
 	}

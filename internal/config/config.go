@@ -92,6 +92,7 @@ type Redis struct {
 	Addr     string `koanf:"addr"`
 	Password string `koanf:"password"`
 	DB       int    `koanf:"db"`
+	TLS      TLS    `koanf:"tls"`
 }
 
 type Kafka struct {
@@ -100,8 +101,18 @@ type Kafka struct {
 	TopicPrefix   string        `koanf:"topic_prefix"`
 	ProduceLinger time.Duration `koanf:"produce_linger"`
 	Compression   string        `koanf:"compression"`
+	TLS           TLS           `koanf:"tls"`
+	SASL          SASL          `koanf:"sasl"`
 	// SchemaRegistry receives the fb.v1 schemas (`fbctl schemas apply`).
 	SchemaRegistry SchemaRegistry `koanf:"schema_registry"`
+}
+
+// SASL authenticates to Kafka: Mechanism is plain, scram-sha-256 or
+// scram-sha-512 ("" = none).
+type SASL struct {
+	Mechanism string `koanf:"mechanism"`
+	Username  string `koanf:"username"`
+	Password  string `koanf:"password"`
 }
 
 // SchemaRegistry is a Confluent-compatible registry (Redpanda's on :8081).
@@ -417,6 +428,14 @@ func (c *Config) Validate() error {
 			errs = append(errs, errors.New("scheduler.post_refresh.windows need intervals and ascending max_age"))
 			break
 		}
+	}
+	switch c.Kafka.SASL.Mechanism {
+	case "", "plain", "scram-sha-256", "scram-sha-512":
+	default:
+		errs = append(errs, fmt.Errorf("kafka.sasl.mechanism %q: want plain, scram-sha-256 or scram-sha-512", c.Kafka.SASL.Mechanism))
+	}
+	if c.Kafka.SASL.Mechanism != "" && c.Kafka.SASL.Username == "" {
+		errs = append(errs, errors.New("kafka.sasl needs a username"))
 	}
 	if s := c.Scheduler.PostRefresh.DeletionCountSlack; s < 0 || s >= 1 {
 		errs = append(errs, errors.New("scheduler.post_refresh.deletion_count_slack must be in [0, 1)"))

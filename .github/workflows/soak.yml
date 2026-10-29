@@ -1,0 +1,54 @@
+name: soak
+
+# The soak test (make soak, internal/e2e/soak_test.go) on a GitHub runner:
+# scheduled crawls of a changing fakefb world with component restarts, then
+# a full check of the store against the world. Run it from the Actions tab.
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: How long the world changes (FBS_SOAK_DURATION)
+        default: 90m
+      pages:
+        description: Pages crawled (FBS_SOAK_PAGES)
+        default: "20"
+      restart_every:
+        description: A component restart this often; 0 = never (FBS_SOAK_RESTART_EVERY)
+        default: 2m
+
+permissions:
+  contents: read
+
+jobs:
+  soak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Infrastructure
+        run: |
+          make infra-up
+          for i in $(seq 1 60); do docker exec fbs-redpanda-1 rpk cluster health --exit-when-healthy && break; sleep 2; done
+      - name: Soak
+        env:
+          FBS_SOAK_DURATION: ${{ inputs.duration }}
+          FBS_SOAK_PAGES: ${{ inputs.pages }}
+          FBS_SOAK_RESTART_EVERY: ${{ inputs.restart_every }}
+          FBS_SOAK_OUT: ${{ github.workspace }}/soak.md
+        run: make soak > soak.log 2>&1
+      - name: Report
+        if: always()
+        run: |
+          if [ -f soak.md ]; then cat soak.md; cat soak.md >> "$GITHUB_STEP_SUMMARY"; fi
+          grep -v ' INFO ' soak.log | tail -60 || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: soak
+          path: |
+            soak.md
+            soak.log
+          if-no-files-found: ignore
