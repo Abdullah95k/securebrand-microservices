@@ -275,7 +275,7 @@ func (s *Stack) RestartFinalizer() {
 	s.stop("finalizer")
 	cfg := s.Cfg
 	fin := &scheduler.Finalizer{DB: s.DB, Jobs: s.tracker, Producer: s.Producer, Timeout: cfg.Scheduler.FinalizeTimeout, Adaptive: s.Adaptive,
-		Deletions: scheduler.Deletions{Enabled: cfg.Scheduler.PostRefresh.DetectDeletions, MaxShare: cfg.Scheduler.PostRefresh.DeletionMaxShare}}
+		Deletions: scheduler.DeletionsFrom(cfg)}
 	s.start("finalizer", func(ctx context.Context) error {
 		return scheduler.Every(ctx, "finalizer", 200*time.Millisecond, fin.Tick)
 	})

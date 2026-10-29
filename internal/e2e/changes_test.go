@@ -97,7 +97,7 @@ func TestCommentEditsAndDeletions(t *testing.T) {
 		v, _, _ := sample("fbs_deletion_checks_total", map[string]string{"outcome": outcome})
 		return v
 	}
-	shareBefore, emptyBefore := checks("skipped_share"), checks("skipped_empty")
+	partialBefore := checks("skipped_partial")
 
 	second := s.runJob(t, key, page.Vanity, "full")
 	t.Logf("second job %s: counters %v, completeness %+v", second.Status, second.Counters, second.Completeness)
@@ -133,8 +133,8 @@ func TestCommentEditsAndDeletions(t *testing.T) {
 	if n := count(t, s, `SELECT count(*) FROM comments WHERE post_id = ANY($1) AND status <> 'visible'`, []int64{c.ID, d.ID}); n != 0 {
 		t.Fatalf("posts C and D: %d comments marked although their checks should have been skipped", n)
 	}
-	if share, empty := checks("skipped_share"), checks("skipped_empty"); share != shareBefore+1 || empty != emptyBefore+1 {
-		t.Fatalf("skipped checks: share %v -> %v, empty %v -> %v; want one more each", shareBefore, share, emptyBefore, empty)
+	if partial := checks("skipped_partial"); partial != partialBefore+2 {
+		t.Fatalf("partial reads skipped %v -> %v, want two more (C and D)", partialBefore, partial)
 	}
 	var text string
 	var edits int
@@ -223,5 +223,60 @@ func TestCommentEditsAndDeletions(t *testing.T) {
 	third := s.runJob(t, key, page.Vanity, "full")
 	if third.Status != "completed" || third.Counters["comments_deleted"] != 0 {
 		t.Fatalf("third job: %+v", third)
+	}
+
+	// The page hides a comment with replies (gone from the lists and the
+	// counts: a deletion as far as anyone can tell), then shows it again.
+	var hidden *fakefb.Comment
+	for _, p := range posts[4:] {
+		for _, c := range p.Comments {
+			if len(c.Replies) > 0 && hidden == nil {
+				hidden = c
+			}
+		}
+	}
+	if hidden == nil {
+		t.Fatal("no other comment with replies")
+	}
+	thread := map[int64]bool{}
+	var mark func(c *fakefb.Comment)
+	mark = func(c *fakefb.Comment) {
+		thread[c.ID] = true
+		for _, r := range c.Replies {
+			mark(r)
+		}
+	}
+	mark(hidden)
+	statusOf := func() map[string]int {
+		out := map[string]int{}
+		for id := range thread {
+			var st string
+			if err := s.DB.QueryRow(ctx, `SELECT status FROM comments WHERE comment_id = $1`, id).Scan(&st); err != nil {
+				t.Fatal(err)
+			}
+			out[st]++
+		}
+		return out
+	}
+	if err := s.Fake.World.HideComment(hidden.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	fourth := s.runJob(t, key, page.Vanity, "full")
+	if got := statusOf(); fourth.Counters["comments_deleted"] != int64(len(thread)) || got["deleted"] != len(thread) {
+		t.Fatalf("hidden thread of %d: job counted %d deleted, store %v", len(thread), fourth.Counters["comments_deleted"], got)
+	}
+	restoredBefore, _, _ := sample("fbs_comment_changes_total", map[string]string{"kind": "restored"})
+	if err := s.Fake.World.HideComment(hidden.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	fifth := s.runJob(t, key, page.Vanity, "full")
+	if got := statusOf(); fifth.Status != "completed" || got["visible"] != len(thread) {
+		t.Fatalf("shown again: store %v, want all %d visible", got, len(thread))
+	}
+	if v, _, _ := sample("fbs_comment_changes_total", map[string]string{"kind": "restored"}); v < restoredBefore+float64(len(thread)) {
+		t.Fatalf("restored %v -> %v, want %d more", restoredBefore, v, len(thread))
+	}
+	if n := count(t, s, `SELECT count(*) FROM comments WHERE page_id = $1 AND status = 'deleted'`, page.ID); n != len(wantDeleted) {
+		t.Fatalf("%d comments deleted at the end, want the %d deleted on Facebook", n, len(wantDeleted))
 	}
 }

@@ -66,20 +66,25 @@ func TestPostStates(t *testing.T) {
 	mr := miniredis.RunT(t)
 	tr := New(redis.NewClient(&redis.Options{Addr: mr.Addr()}))
 	ctx := context.Background()
-	_ = tr.SetPost(ctx, "j", 7, 1700000000, 40, PostPending)
+	_, _ = tr.SetPost(ctx, "j", 7, 1700000000, 40, PostPending)
 	_ = tr.UpdatePostState(ctx, "j", 7, PostComplete)
 	ps, err := tr.Posts(ctx, "j")
 	if err != nil || len(ps) != 1 || ps[0].State != PostComplete || ps[0].Reported != 40 {
 		t.Fatalf("posts = %+v %v", ps, err)
 	}
-	// The timeline reaching a post the job already collected keeps its state.
-	_ = tr.SetPost(ctx, "j", 7, 1700000000, 41, PostPending)
-	if ps, _ := tr.Posts(ctx, "j"); ps[0].State != PostComplete {
-		t.Fatalf("a collected post went back to %s", ps[0].State)
+	// The timeline reaching a post the job already collected keeps its
+	// state, takes the newer count and says so.
+	if collected, err := tr.SetPost(ctx, "j", 7, 1700000000, 41, PostPending); err != nil || !collected {
+		t.Fatalf("SetPost on a collected post: %v, %v", collected, err)
+	}
+	if ps, _ := tr.Posts(ctx, "j"); ps[0].State != PostComplete || ps[0].Reported != 41 {
+		t.Fatalf("a collected post became %+v", ps[0])
 	}
 	// A pending post can be recorded again.
-	_ = tr.SetPost(ctx, "j", 8, 1700000000, 3, PostPending)
-	_ = tr.SetPost(ctx, "j", 8, 1700000000, 5, PostSkipped)
+	if collected, _ := tr.SetPost(ctx, "j", 8, 1700000000, 3, PostPending); collected {
+		t.Fatal("a new post reported as collected")
+	}
+	_, _ = tr.SetPost(ctx, "j", 8, 1700000000, 5, PostSkipped)
 	for _, p := range func() []PostState { ps, _ := tr.Posts(ctx, "j"); return ps }() {
 		if p.PostID == 8 && (p.State != PostSkipped || p.Reported != 5) {
 			t.Fatalf("post 8 = %+v", p)
@@ -115,9 +120,13 @@ func TestFullPasses(t *testing.T) {
 	if in, _ := tr.InPass(ctx, job, "lineage-z"); in {
 		t.Fatal("lineage-z was never begun")
 	}
-	// A retried page appends the same ids again.
+	// A retried page appends the same comments again.
 	for _, ids := range [][]int64{{1, 2, 3}, {3, 4}, {3, 4}, {1 << 62}} {
-		if err := tr.AddSeen(ctx, job, 42, ids); err != nil {
+		var cs []SeenComment
+		for _, id := range ids {
+			cs = append(cs, SeenComment{ID: id, Replies: id % 3})
+		}
+		if err := tr.AddSeen(ctx, job, 42, cs); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -146,8 +155,8 @@ func TestFullPasses(t *testing.T) {
 		t.Fatalf("seen %v", seen)
 	}
 	for _, id := range []int64{1, 2, 3, 4, 1 << 62} {
-		if _, ok := seen[id]; !ok {
-			t.Fatalf("id %d not seen: %v", id, seen)
+		if r, ok := seen[id]; !ok || r != id%3 {
+			t.Fatalf("id %d: seen %v with %d replies (%v)", id, ok, r, seen)
 		}
 	}
 

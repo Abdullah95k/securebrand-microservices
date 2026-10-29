@@ -214,30 +214,28 @@ The timeline scan re-reads posts younger than `scheduler.incremental_overlap` (2
 **Edits:** every scrape publishes each comment again. When a newer observation has other text, the persister counts an edit (`edit_count`, `edited_at`). An observation older than the stored one, such as a replayed batch, changes nothing.
 
 **Deletions** are found by full reads of known posts: recrawls, and `full` jobs on posts crawled before.
-1. The read records the ids of the top-level comments it sees.
+1. The read records the top-level comments it sees, with the reply count Facebook gives for each.
 2. When it reaches the last page, the job finalizer compares them with the post's stored visible comments from before the read began.
 3. Each unseen comment, with its replies, is marked `deleted` (`deleted_at`) in the store, published on `fb.comment.v1` with `status: COMMENT_STATUS_DELETED`, and counted in the job's `comments_deleted`.
 
-"Deleted" means no longer publicly visible: deleted by its author, removed or hidden by the page, or filtered by Facebook. The content is kept. A later sighting makes the comment `visible` again. Replies are only marked through their top-level comment.
+"Deleted" means no longer publicly visible: deleted by its author, removed or hidden by the page, or filtered by Facebook. The content is kept. Replies are only marked through their top-level comment.
 
-**Guards against partial answers:** Facebook sometimes serves a logged-out visitor fewer comments than it counts. A read that ends early (login wall, `max_comments_per_post`) never marks anything. A complete read marks comments when what stays visible still covers the count Facebook gave on its last page. Otherwise the post is skipped:
-- `skipped_empty`: the read returned no comments;
-- `skipped_share`: more than `scheduler.post_refresh.deletion_max_share` (50%) of the known comments are unseen, and more than 3. The finalizer logs the post.
+**Only complete reads count.** Facebook sometimes serves a logged-out visitor fewer comments than it counts. A read that ends early (login wall, `max_comments_per_post`) never marks anything. A read that reached the last page counts as complete when it accounts for the post's comment count from that same read: the top-level comments it returned, plus the reply count Facebook gave for each, must add up to the count, within `scheduler.post_refresh.deletion_count_slack` (a share; 0 = exactly). Any other read may be a partial answer, and its post is skipped (`skipped_partial`). A skipped post is checked again at its next full read. Busy posts that change while being read can miss the exact count; that also skips, and only delays detection.
 
-A skipped post is checked again at its next full read.
+**A comment seen again** after being marked deleted is `visible` again, with the replies that were deleted with it (same `deleted_at`). That happens, for example, when a page hides a comment and shows it again later.
 
 **Signals:**
 - `fbs_comment_changes_total{kind="edited"|"deleted"|"restored"}`;
-- `fbs_deletion_checks_total{outcome="checked"|"skipped_share"|"skipped_empty"}`;
+- `fbs_deletion_checks_total{outcome="checked"|"skipped_partial"}`;
 - the "Comment edits and deletions" and "Deletion checks" panels.
 
 **`FbsDeletionChecksSkipped`:** more than a quarter of the checks were skipped over 6h.
-1. Facebook is likely serving partial comment lists. Expect `FbsCommentCompletenessLow` too.
+1. Facebook is likely serving partial comment lists, or its counts include comments it does not show. Expect `FbsCommentCompletenessLow` too.
 2. Check `fbs_fb_requests_total` for login walls on `comments`.
 3. Compare the orderings with the Phase 0 harness (`fbs-spike run`).
-4. If the lists are complete and only the counts disagree, raise `deletion_max_share`. `detect_deletions: false` turns detection off.
+4. If the lists are complete and only the counts are a little off, raise `deletion_count_slack` (for example to 0.02). A partial answer within the slack can then mark live comments deleted until they are seen again. `detect_deletions: false` turns detection off.
 
-**Cost:** the seen ids live in Redis, 8 bytes per top-level comment, until the job finalizes.
+**Cost:** the seen lists live in Redis, 12 bytes per top-level comment, until the job finalizes. A post whose comments were all deleted (Facebook counts none) is not read, so it is not checked.
 
 ## Daily budget
 

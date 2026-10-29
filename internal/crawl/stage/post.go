@@ -149,7 +149,7 @@ func (s *PostStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 			reported = res.TotalCount
 		}
 		if pass {
-			if err := d.Jobs.AddSeen(ctx, t.JobId, sc.PostId, topLevelIDs(res)); err != nil {
+			if err := d.Jobs.AddSeen(ctx, t.JobId, sc.PostId, topLevelSeen(res)); err != nil {
 				return retry(t, st.Cursor, "30s", "seen: "+err.Error(), c)
 			}
 		}
@@ -237,14 +237,14 @@ func (d *Deps) fullPass(ctx context.Context, t *taskv1.Task, st *checkpoint.Stat
 	return d.Jobs.InPass(ctx, t.JobId, t.LineageId)
 }
 
-func topLevelIDs(res parse.CommentsResult) []int64 {
-	ids := make([]int64, 0, len(res.Comments))
+func topLevelSeen(res parse.CommentsResult) []jobs.SeenComment {
+	out := make([]jobs.SeenComment, 0, len(res.Comments))
 	for _, cb := range res.Comments {
 		if cb.Comment.Depth == 0 {
-			ids = append(ids, cb.Comment.CommentId)
+			out = append(out, jobs.SeenComment{ID: cb.Comment.CommentId, Replies: cb.Comment.GetReplyCount()})
 		}
 	}
-	return ids
+	return out
 }
 
 func cloneScope(sc *taskv1.PostScope) *taskv1.PostScope {

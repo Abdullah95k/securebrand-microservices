@@ -463,7 +463,7 @@ func (s *Server) comments(rd *renderer, vars map[string]any) []byte {
 	}
 	var list []*Comment
 	for _, c := range post.Comments {
-		if !c.Withheld {
+		if !c.Withheld && !c.Hidden {
 			list = append(list, c)
 		}
 	}

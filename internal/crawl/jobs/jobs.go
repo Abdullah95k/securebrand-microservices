@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -122,25 +123,28 @@ func (t *Tracker) AddCounters(ctx context.Context, job string, counters map[stri
 
 var setPostScript = redis.NewScript(`
 local cur = redis.call('HGET', KEYS[1], ARGV[1])
+local v = ARGV[2] .. '|' .. ARGV[3]
+local kept = 0
 if cur then
   local st = string.match(cur, '[^|]*$')
   if st == 'complete' or st == 'truncated' or st == 'failed' then
-    redis.call('PEXPIRE', KEYS[1], ARGV[3])
-    return 0
+    v = ARGV[2] .. '|' .. st
+    kept = 1
   end
 end
-redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
-redis.call('PEXPIRE', KEYS[1], ARGV[3])
-return 1
+redis.call('HSET', KEYS[1], ARGV[1], v)
+redis.call('PEXPIRE', KEYS[1], ARGV[4])
+return kept
 `)
 
 // SetPost records a post's comment-collection state for the job. A post
-// already collected in this job keeps its state: the job's refresh of an
-// older post may finish before the timeline reaches the same post, whose
-// task is then the finished one again.
-func (t *Tracker) SetPost(ctx context.Context, job string, postID int64, createdUnix int64, reported int64, state string) error {
-	v := strconv.FormatInt(createdUnix, 10) + "|" + strconv.FormatInt(reported, 10) + "|" + state
-	return setPostScript.Run(ctx, t.r, []string{key(job, "posts")}, strconv.FormatInt(postID, 10), v, ttl.Milliseconds()).Err()
+// the job already collected keeps its state (the job's refresh of an older
+// post may finish before the timeline reaches it) and SetPost reports it, so
+// the caller does not read it again.
+func (t *Tracker) SetPost(ctx context.Context, job string, postID int64, createdUnix int64, reported int64, state string) (collected bool, err error) {
+	n, err := setPostScript.Run(ctx, t.r, []string{key(job, "posts")}, strconv.FormatInt(postID, 10),
+		strconv.FormatInt(createdUnix, 10)+"|"+strconv.FormatInt(reported, 10), state, ttl.Milliseconds()).Int()
+	return n == 1, err
 }
 
 // UpdatePostState changes only the state part of a recorded post.
@@ -189,11 +193,12 @@ func (t *Tracker) Posts(ctx context.Context, job string) ([]PostState, error) {
 
 // Full passes. A post task that reads a known post's comments from the
 // start (a recrawl, or a full job on a post crawled before) begins a pass
-// for its lineage, appends the top-level comment ids of every page it reads
-// to the post's seen list, and marks the post when it reached the last
-// page. The finalizer then compares the post's stored comments with the
-// seen list. Ids are packed 8 bytes each, appended, so a retried page only
-// repeats ids, and several lineages of one post only add to the list.
+// for its lineage, appends the top-level comments of every page it reads
+// (id and reply count) to the post's seen list, and marks the post when it
+// reached the last page. The finalizer then compares the post's stored
+// comments with the seen list. Entries are packed 12 bytes each, appended,
+// so a retried page only repeats entries, and several lineages of one post
+// only add to the list.
 
 // BeginPass records the start of lineage's full pass over post. Calling it
 // again keeps the first start.
@@ -213,14 +218,24 @@ func (t *Tracker) InPass(ctx context.Context, job, lineage string) (bool, error)
 
 func seenKey(job string, postID int64) string { return key(job, "seen:"+strconv.FormatInt(postID, 10)) }
 
-// AddSeen appends comment ids to post's seen list.
-func (t *Tracker) AddSeen(ctx context.Context, job string, postID int64, ids []int64) error {
-	if len(ids) == 0 {
+// SeenComment is a top-level comment a pass read, with the reply count
+// Facebook gave for it.
+type SeenComment struct {
+	ID      int64
+	Replies int64
+}
+
+const seenSize = 12
+
+// AddSeen appends comments to post's seen list.
+func (t *Tracker) AddSeen(ctx context.Context, job string, postID int64, cs []SeenComment) error {
+	if len(cs) == 0 {
 		return nil
 	}
-	buf := make([]byte, 0, 8*len(ids))
-	for _, id := range ids {
-		buf = binary.BigEndian.AppendUint64(buf, uint64(id))
+	buf := make([]byte, 0, seenSize*len(cs))
+	for _, c := range cs {
+		buf = binary.BigEndian.AppendUint64(buf, uint64(c.ID))
+		buf = binary.BigEndian.AppendUint32(buf, uint32(min(max(c.Replies, 0), math.MaxUint32)))
 	}
 	k := seenKey(job, postID)
 	pipe := t.r.TxPipeline()
@@ -288,15 +303,15 @@ func (t *Tracker) Passes(ctx context.Context, job string) (done []Pass, posts []
 	return done, posts, nil
 }
 
-// Seen returns post's seen comment ids.
-func (t *Tracker) Seen(ctx context.Context, job string, postID int64) (map[int64]struct{}, error) {
+// Seen returns post's seen comments: id to reply count (the latest read).
+func (t *Tracker) Seen(ctx context.Context, job string, postID int64) (map[int64]int64, error) {
 	b, err := t.r.Get(ctx, seenKey(job, postID)).Bytes()
 	if err != nil && !errors.Is(err, redis.Nil) {
 		return nil, err
 	}
-	out := make(map[int64]struct{}, len(b)/8)
-	for i := 0; i+8 <= len(b); i += 8 {
-		out[int64(binary.BigEndian.Uint64(b[i:]))] = struct{}{}
+	out := make(map[int64]int64, len(b)/seenSize)
+	for i := 0; i+seenSize <= len(b); i += seenSize {
+		out[int64(binary.BigEndian.Uint64(b[i:]))] = int64(binary.BigEndian.Uint32(b[i+8:]))
 	}
 	return out, nil
 }

@@ -307,9 +307,9 @@ groups:
         annotations:
           summary: "{{ $value | humanizePercentage }} of full comment reads look partial; deletions are not being detected"
           description: >-
-            Full reads of known posts return far fewer comments than are
-            stored, and fewer than Facebook's count, so no comment is marked
-            deleted. Facebook is likely serving partial comment lists.
+            Full reads of known posts do not account for the comment count
+            Facebook gives, so their posts are not checked for deleted
+            comments. Facebook is likely serving partial comment lists.
           runbook_url: https://github.com/abdullah95k/securebrand-microservices/blob/main/docs/runbooks/operations.md#comment-edits-and-deletions
       - alert: FbsBudgetOverrun
         expr: |

@@ -278,14 +278,25 @@ func upsertComments(ctx context.Context, tx pgx.Tx, rows [][]any, written, edite
 		   OR t.last_seen_at < EXCLUDED.last_seen_at - interval '1 day'
 		   OR `+commentRestored+`)
 		RETURNING new.edit_count > coalesce(old.edit_count, 0),
-			coalesce(old.status = 'deleted' AND new.status = 'visible', false)`)
+			coalesce(old.status = 'deleted' AND new.status = 'visible', false),
+			new.post_created_at, new.post_id, new.comment_id, new.depth, old.deleted_at`)
 	if err != nil {
 		return err
 	}
-	defer r.Close()
+	var (
+		created []time.Time
+		posts   []int64
+		roots   []int64
+		at      []time.Time
+	)
 	for r.Next() {
 		var e, rs bool
-		if err := r.Scan(&e, &rs); err != nil {
+		var pc time.Time
+		var post, id int64
+		var depth int16
+		var deletedAt *time.Time
+		if err := r.Scan(&e, &rs, &pc, &post, &id, &depth, &deletedAt); err != nil {
+			r.Close()
 			return err
 		}
 		*written++
@@ -294,9 +305,26 @@ func upsertComments(ctx context.Context, tx pgx.Tx, rows [][]any, written, edite
 		}
 		if rs {
 			*restored++
+			if depth == 0 && deletedAt != nil {
+				created, posts, roots, at = append(created, pc), append(posts, post), append(roots, id), append(at, *deletedAt)
+			}
 		}
 	}
-	return r.Err()
+	r.Close()
+	if err := r.Err(); err != nil || len(roots) == 0 {
+		return err
+	}
+	// The replies deleted with a comment that is visible again were only
+	// deleted because of it.
+	tag, err := tx.Exec(ctx, `UPDATE comments c SET status = 'visible', deleted_at = NULL
+		FROM unnest($1::timestamptz[], $2::bigint[], $3::bigint[], $4::timestamptz[]) AS d(created, post_id, root, at)
+		WHERE c.post_created_at = d.created AND c.post_id = d.post_id AND c.root_comment_id = d.root AND c.depth > 0
+		  AND c.status = 'deleted' AND c.deleted_at = d.at`, created, posts, roots, at)
+	if err != nil {
+		return err
+	}
+	*restored += tag.RowsAffected()
+	return nil
 }
 
 type execer interface {

@@ -215,11 +215,11 @@ scheduler:
     recrawl_at: [168h, 720h]
     recrawl_min_comments: 20
     # Mark known top-level comments (and their replies) deleted when a full
-    # read of their post no longer returns them. Unless the comments left
-    # match Facebook's count, skip a post when the read returned nothing or
-    # more than deletion_max_share of its known comments would be marked.
+    # read of their post no longer returns them. Only a complete read counts:
+    # what it returned (comments plus their reply counts) must match the
+    # post's comment count, within deletion_count_slack (a share; 0 = exact).
     detect_deletions: true
-    deletion_max_share: 0.5
+    deletion_count_slack: 0
   # Daily Facebook traffic budget, fleet-wide (0 = unlimited). Every interval
   # the leader projects the day's use from the last projection_span; when it
   # would exceed the budget, backfill (p2) pauses; if p0 + p1 alone would,

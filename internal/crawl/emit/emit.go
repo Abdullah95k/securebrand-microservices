@@ -94,11 +94,12 @@ func (e *Emitter) Comment(ctx context.Context, b *kafka.Batch, src Source, c *fb
 }
 
 // CommentDeleted publishes that a known comment is no longer visible: a
-// Comment with status DELETED and only its keys set.
+// Comment with status DELETED and only its keys set. Its event id is the
+// job's, so a comment deleted again after a re-sighting is a new event.
 func (e *Emitter) CommentDeleted(ctx context.Context, b *kafka.Batch, src Source, c *fbv1.Comment) error {
 	d := &fbv1.Comment{CommentId: c.CommentId, PostId: c.PostId, PageId: c.PageId, PostCreatedAt: c.PostCreatedAt,
 		Depth: c.Depth, Status: fbv1.CommentStatus_COMMENT_STATUS_DELETED}
-	e.stamp(src, "comment:"+strconv.FormatInt(c.CommentId, 10), d, func(o *fbv1.Observation) { d.Obs = o })
+	e.stamp(src, "comment-deleted:"+strconv.FormatInt(c.CommentId, 10)+":"+src.JobID, d, func(o *fbv1.Observation) { d.Obs = o })
 	return b.AddProto(ctx, topics.Comment, strconv.FormatInt(c.PostId, 10), d)
 }
 

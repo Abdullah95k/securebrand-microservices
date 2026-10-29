@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"sync/atomic"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -58,6 +59,9 @@ type Consumer struct {
 	tr      *tracker
 	global  chan struct{}
 	drainCh chan struct{}
+	// abandoned is set once the drain timeout gave up on in-flight records:
+	// they will never be done, so a revoke does not wait for them.
+	abandoned atomic.Bool
 }
 
 type drainKey struct{}
@@ -218,6 +222,7 @@ func (c *Consumer) Run(ctx context.Context) error {
 		case c.global <- struct{}{}:
 		case <-deadline.C:
 			slog.Warn("kafka: drain timeout; abandoning in-flight records", "group", c.cfg.Group)
+			c.abandoned.Store(true)
 			cancelHandlers()
 			i = cap(c.global)
 		}
@@ -298,7 +303,7 @@ func (c *Consumer) onRevoked(ctx context.Context, _ *kgo.Client, revoked map[str
 	// Give in-flight records of the revoked partitions a short window to
 	// finish so the new owner does not redo them, then commit what is done.
 	deadline := time.Now().Add(15 * time.Second)
-	for c.tr.pending(revoked) > 0 && time.Now().Before(deadline) {
+	for !c.abandoned.Load() && c.tr.pending(revoked) > 0 && time.Now().Before(deadline) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	c.commit(ctx, revoked)

@@ -77,7 +77,7 @@ var (
 	// Persistence and jobs.
 	PersistRows          = counterVec("persist_rows_total", "Rows written by the persister.", "entity", "op")
 	CommentChanges       = counterVec("comment_changes_total", "Stored comments edited, marked deleted or seen again after a deletion, by kind (edited, deleted, restored).", "kind")
-	DeletionChecks       = counterVec("deletion_checks_total", "Full comment reads of a post checked for deleted comments, by outcome (checked, skipped_share, skipped_empty).", "outcome")
+	DeletionChecks       = counterVec("deletion_checks_total", "Full comment reads of a post checked for deleted comments, by outcome (checked, skipped_partial).", "outcome")
 	PersistBatch         = histVec("persist_batch_seconds", "Persister batch flush duration.", prometheus.ExponentialBuckets(0.005, 2, 12), "entity")
 	Jobs                 = counterVec("jobs_total", "Jobs reaching a terminal state.", "status", "lane")
 	ScheduleLag          = gaugeVec("schedule_lag_seconds", "Age of the oldest due page in the schedule.", "tier")

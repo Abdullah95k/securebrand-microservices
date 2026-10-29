@@ -64,7 +64,7 @@ func runScheduler(ctx context.Context, cfg *config.Config) error {
 	disp := &dispatch.Dispatcher{DB: db, Jobs: tracker, Producer: producer, BaseURL: cfg.FB.BaseURL}
 	adaptive := &scheduler.Adaptive{DB: db, Cfg: cfg}
 	fin := &scheduler.Finalizer{DB: db, Jobs: tracker, Producer: producer, Timeout: cfg.Scheduler.FinalizeTimeout, Adaptive: adaptive,
-		Deletions: scheduler.Deletions{Enabled: cfg.Scheduler.PostRefresh.DetectDeletions, MaxShare: cfg.Scheduler.PostRefresh.DeletionMaxShare}}
+		Deletions: scheduler.DeletionsFrom(cfg)}
 	planner := &scheduler.Planner{DB: db, Dispatch: disp, Cfg: cfg, Adaptive: adaptive}
 	reaper := &scheduler.Reaper{DB: db, Jobs: tracker, Producer: producer, After: cfg.Scheduler.ReaperAfter}
 	maint := &scheduler.Maintenance{DB: db, Cfg: cfg}

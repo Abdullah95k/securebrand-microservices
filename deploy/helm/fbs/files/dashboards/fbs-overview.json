@@ -2000,7 +2000,7 @@
         "x": 8,
         "y": 88
       },
-      "description": "Full reads of known posts compared with the store, per hour. skipped_*: Facebook's answer looked partial, nothing was marked.",
+      "description": "Full reads of known posts compared with the store, per hour. skipped_partial: the read did not account for Facebook's comment count, so nothing was marked.",
       "fieldConfig": {
         "defaults": {
           "unit": "short",

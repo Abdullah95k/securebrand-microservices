@@ -2,6 +2,7 @@ package persist
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -232,5 +233,59 @@ func TestCommentEditsDeletionsAndRestores(t *testing.T) {
 	}
 	if n, err := MarkDeleted(ctx, db, []*fbv1.Comment{deleted(now)}); err != nil || n != 0 {
 		t.Fatalf("redacted comment marked deleted: %d, %v", n, err)
+	}
+}
+
+// TestRestoreBringsBackRepliesDeletedWithTheComment: a comment seen again
+// after a deletion makes the replies deleted with it (same deleted_at)
+// visible again, but not a reply deleted on its own.
+func TestRestoreBringsBackRepliesDeletedWithTheComment(t *testing.T) {
+	db := testenv.Postgres(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	if _, err := store.EnsurePartitions(ctx, db, now, store.PartitionWindow{MonthsBack: 2, MonthsAhead: 1, DaysBack: 1, DaysAhead: 1}); err != nil {
+		t.Fatal(err)
+	}
+	w := &Writer{DB: db}
+	created := timestamppb.New(now.Add(-72 * time.Hour))
+	root := int64(700)
+	cm := func(id int64, depth int32, at time.Time, status fbv1.CommentStatus) *fbv1.Comment {
+		c := &fbv1.Comment{Obs: obs(at, fmt.Sprintf("h%d", id)), CommentId: id, PostId: 7, PageId: 9, PostCreatedAt: created,
+			Depth: depth, Text: fmt.Sprintf("comment %d", id), Status: status}
+		if depth > 0 {
+			c.ParentCommentId, c.RootCommentId = &root, &root
+		}
+		if status == fbv1.CommentStatus_COMMENT_STATUS_DELETED {
+			c.Obs.ContentHash, c.Text = []byte("del"), ""
+		}
+		return c
+	}
+	t0 := now.Add(-5 * time.Hour)
+	visible := fbv1.CommentStatus_COMMENT_STATUS_UNSPECIFIED
+	deleted := fbv1.CommentStatus_COMMENT_STATUS_DELETED
+	if err := w.Comments(ctx, []*fbv1.Comment{cm(700, 0, t0, visible), cm(701, 1, t0, visible), cm(702, 1, t0, visible), cm(703, 1, t0, visible)}); err != nil {
+		t.Fatal(err)
+	}
+	// 703 was deleted on its own; then 700 with its replies.
+	if _, err := MarkDeleted(ctx, db, []*fbv1.Comment{cm(703, 1, t0.Add(time.Hour), deleted)}); err != nil {
+		t.Fatal(err)
+	}
+	t2 := t0.Add(2 * time.Hour)
+	if _, err := MarkDeleted(ctx, db, []*fbv1.Comment{cm(700, 0, t2, deleted), cm(701, 1, t2, deleted), cm(702, 1, t2, deleted)}); err != nil {
+		t.Fatal(err)
+	}
+	// 700 is seen again.
+	if err := w.Comments(ctx, []*fbv1.Comment{cm(700, 0, t2.Add(time.Hour), visible)}); err != nil {
+		t.Fatal(err)
+	}
+	want := map[int64]string{700: "visible", 701: "visible", 702: "visible", 703: "deleted"}
+	for id, st := range want {
+		var got string
+		if err := db.QueryRow(ctx, `SELECT status FROM comments WHERE comment_id = $1`, id).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != st {
+			t.Fatalf("comment %d is %s, want %s", id, got, st)
+		}
 	}
 }

@@ -18,6 +18,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	fbv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fb/v1"
+	"github.com/abdullah95k/securebrand-microservices/internal/config"
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/emit"
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/jobs"
 	"github.com/abdullah95k/securebrand-microservices/internal/persist"
@@ -221,21 +222,23 @@ func (f *Finalizer) finalize(ctx context.Context, id string) error {
 // Deletions configures deletion detection.
 type Deletions struct {
 	Enabled bool
-	// MaxShare: unless the comments left account for Facebook's count, a
-	// post is skipped when more of its known comments than this share were
-	// not seen (a partial answer rather than deletions).
-	MaxShare float64
+	// CountSlack: how far, as a share of Facebook's comment count, what a
+	// full read returned may be from that count and the read still count as
+	// complete.
+	CountSlack float64
 }
 
-// deletionMinSkip: a post is only skipped for MaxShare when more than this
-// many comments would be marked deleted, so small threads are not exempt.
-const deletionMinSkip = 3
+// DeletionsFrom reads the deletion settings from the configuration.
+func DeletionsFrom(cfg *config.Config) Deletions {
+	pr := cfg.Scheduler.PostRefresh
+	return Deletions{Enabled: pr.DetectDeletions, CountSlack: pr.DeletionCountSlack}
+}
 
 // deletions compares the stored top-level comments of each post read in full
-// during the job with the ids that read saw. A comment stored before the
-// read began and not seen by it is published as deleted on fb.comment.v1,
-// with its replies, and marked deleted in the store. It returns how many
-// were marked; a cancelled job only drops its pass records.
+// during the job with what that read returned. A comment stored before the
+// read began and not returned by it is published as deleted on
+// fb.comment.v1, with its replies, and marked deleted in the store. It
+// returns how many were marked; a cancelled job only drops its pass records.
 func (f *Finalizer) deletions(ctx context.Context, job string, cancelled bool) (int64, error) {
 	passes, posts, err := f.Jobs.Passes(ctx, job)
 	if err != nil || len(posts) == 0 {
@@ -243,8 +246,6 @@ func (f *Finalizer) deletions(ctx context.Context, job string, cancelled bool) (
 	}
 	var marked int64
 	if f.Deletions.Enabled && !cancelled {
-		em := emit.Emitter{Producer: f.Producer}
-		src := emit.Source{JobID: job, Query: "comments", Mode: fbv1.CrawlMode_CRAWL_MODE_RECRAWL}
 		var dels []*fbv1.Comment
 		for _, p := range passes {
 			ds, err := f.missing(ctx, job, p)
@@ -254,6 +255,12 @@ func (f *Finalizer) deletions(ctx context.Context, job string, cancelled bool) (
 			dels = append(dels, ds...)
 		}
 		if len(dels) > 0 {
+			// One time for the whole check: a comment and the replies deleted
+			// with it share deleted_at, so a later sighting of the comment
+			// restores them together.
+			at := time.Now().UTC()
+			em := emit.Emitter{Producer: f.Producer, Now: func() time.Time { return at }}
+			src := emit.Source{JobID: job, Query: "comments", Mode: fbv1.CrawlMode_CRAWL_MODE_RECRAWL}
 			b := f.Producer.NewBatch()
 			for _, d := range dels {
 				if err := em.CommentDeleted(ctx, b, src, d); err != nil {
@@ -263,9 +270,12 @@ func (f *Finalizer) deletions(ctx context.Context, job string, cancelled bool) (
 			if err := b.Wait(ctx); err != nil {
 				return 0, err
 			}
-			if marked, err = persist.MarkDeleted(ctx, f.DB, dels); err != nil {
+			// The persister may apply the records first; either way they are
+			// marked once.
+			if _, err := persist.MarkDeleted(ctx, f.DB, dels); err != nil {
 				return 0, err
 			}
+			marked = int64(len(dels))
 			// Before the pass records go: a retry finds these already
 			// marked and does not count them again.
 			if err := f.Jobs.AddCounters(ctx, job, map[string]int64{"comments_deleted": marked}); err != nil {
@@ -277,23 +287,34 @@ func (f *Finalizer) deletions(ctx context.Context, job string, cancelled bool) (
 }
 
 // missing returns the top-level comments of p's post stored before the pass
-// began and not seen by it, with their replies. When what stays visible
-// still covers the comment count Facebook gave at the end of the read, the
-// read was complete and they are all gone. Otherwise the read may have been
-// a partial answer, and the post is skipped when it returned nothing or
-// when more than Deletions.MaxShare of the known comments are unseen.
+// began and not returned by it, with their replies. Only a complete read
+// counts: the comments it returned, with the reply counts Facebook gave for
+// them, must add up to the post's comment count from the same read (within
+// Deletions.CountSlack). Otherwise Facebook may have answered partially and
+// the post is skipped.
 func (f *Finalizer) missing(ctx context.Context, job string, p jobs.Pass) ([]*fbv1.Comment, error) {
 	seen, err := f.Jobs.Seen(ctx, job, p.PostID)
 	if err != nil {
 		return nil, err
 	}
+	var covered int64
+	for _, replies := range seen {
+		covered += 1 + replies
+	}
+	slack := int64(math.Round(f.Deletions.CountSlack * float64(p.Reported)))
+	if p.Reported <= 0 || covered < p.Reported-slack || covered > p.Reported+slack {
+		metrics.DeletionChecks.WithLabelValues("skipped_partial").Inc()
+		slog.Debug("finalizer: partial comment read; not checked for deletions", "job", job, "post", p.PostID,
+			"returned", covered, "reported", p.Reported)
+		return nil, nil
+	}
+	metrics.DeletionChecks.WithLabelValues("checked").Inc()
 	rows, err := f.DB.Query(ctx, `SELECT comment_id, page_id FROM comments
 		WHERE post_created_at = $1 AND post_id = $2 AND depth = 0 AND status = 'visible' AND NOT redacted
 		  AND first_seen_at < $3`, p.PostCreated, p.PostID, p.Start)
 	if err != nil {
 		return nil, err
 	}
-	var known int
 	var out []*fbv1.Comment
 	for rows.Next() {
 		var id, page int64
@@ -301,23 +322,17 @@ func (f *Finalizer) missing(ctx context.Context, job string, p jobs.Pass) ([]*fb
 			rows.Close()
 			return nil, err
 		}
-		known++
 		if _, ok := seen[id]; !ok {
 			out = append(out, &fbv1.Comment{CommentId: id, PostId: p.PostID, PageId: page,
 				PostCreatedAt: timestamppb.New(p.PostCreated)})
 		}
 	}
 	rows.Close()
-	if err := rows.Err(); err != nil {
+	if err := rows.Err(); err != nil || len(out) == 0 {
 		return nil, err
 	}
-	if len(out) == 0 {
-		metrics.DeletionChecks.WithLabelValues("checked").Inc()
-		return nil, nil
-	}
-	top := len(out)
 	// Deleting a comment deletes its replies.
-	roots := make([]int64, top)
+	roots := make([]int64, len(out))
 	for i, c := range out {
 		roots[i] = c.CommentId
 	}
@@ -327,40 +342,17 @@ func (f *Finalizer) missing(ctx context.Context, job string, p jobs.Pass) ([]*fb
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 	for rows.Next() {
 		var id, page int64
 		var depth int16
 		if err := rows.Scan(&id, &page, &depth); err != nil {
-			rows.Close()
 			return nil, err
 		}
 		out = append(out, &fbv1.Comment{CommentId: id, PostId: p.PostID, PageId: page,
 			PostCreatedAt: timestamppb.New(p.PostCreated), Depth: int32(depth)})
 	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	var visible int64
-	if err := f.DB.QueryRow(ctx, `SELECT count(*) FROM comments WHERE post_created_at = $1 AND post_id = $2 AND status = 'visible'`,
-		p.PostCreated, p.PostID).Scan(&visible); err != nil {
-		return nil, err
-	}
-	consistent := p.Reported > 0 && visible-int64(len(out)) >= p.Reported
-	switch {
-	case consistent:
-	case len(seen) == 0:
-		// The read returned no comments at all: not a deletion signal.
-		metrics.DeletionChecks.WithLabelValues("skipped_empty").Inc()
-		return nil, nil
-	case top > deletionMinSkip && float64(top) > f.Deletions.MaxShare*float64(known):
-		metrics.DeletionChecks.WithLabelValues("skipped_share").Inc()
-		slog.Warn("finalizer: too many comments unseen for the reported count; not marking them deleted", "job", job,
-			"post", p.PostID, "unseen", top, "known", known, "reported", p.Reported, "visible", visible)
-		return nil, nil
-	}
-	metrics.DeletionChecks.WithLabelValues("checked").Inc()
-	return out, nil
+	return out, rows.Err()
 }
 
 // coverage writes per-post collected counts and completeness, and returns
