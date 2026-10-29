@@ -33,6 +33,11 @@ config:
       routing:
         default: [isp, residential]
         bootstrap_html: [residential]
+    # The browser fallback needs image.browserTag. Pods drop every
+    # capability, which leaves Chromium's sandbox unusable, hence no_sandbox.
+    browser:
+      enabled: false
+      no_sandbox: true
   media:
     ttl: 72h
     required_consumers: ["analysis"]
@@ -210,7 +215,8 @@ components:
     browser: true
     command: ["/usr/local/bin/fbs-registry-sync"]
     replicas: 1
-    resources: {requests: {cpu: 100m, memory: 128Mi}, limits: {memory: 256Mi}}
+    # Room for a headless Chromium when fb.browser is enabled.
+    resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {memory: 1Gi}}
 
 networkPolicy:
   # Restricts ingress to the API port and the metrics port. Egress rules are

@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -53,10 +54,61 @@ type Options struct {
 	// Scrolls scrolls to the bottom this many times after load, waiting for
 	// the network to settle each time (timeline pagination).
 	Scrolls int
-	// Idle is how long the network must be quiet to count as settled.
-	Idle time.Duration
+	// Idle is how long no captured request may be in flight or start to
+	// count as settled; MaxSettle bounds each wait (pages that keep the
+	// network busy with beacons and media never go quiet).
+	Idle      time.Duration
+	MaxSettle time.Duration
 	// NoSandbox runs Chromium without its sandbox.
 	NoSandbox bool
+	// Hints are the client hints matching UserAgent (navigator.userAgentData,
+	// sec-ch-ua*), so the browser presents the identity's fingerprint.
+	Hints *ClientHints
+	// BlockMedia fails image, media and font requests: they cost proxy
+	// bandwidth and carry nothing a bootstrap or capture needs.
+	BlockMedia bool
+}
+
+// ClientHints is the user-agent metadata of a fingerprint.
+type ClientHints struct {
+	Brands   []Brand
+	Platform string // "Windows", "macOS", "Linux"
+	Mobile   bool
+}
+
+// Brand is one sec-ch-ua entry.
+type Brand struct {
+	Brand   string `json:"brand"`
+	Version string `json:"version"`
+}
+
+var brandRe = regexp.MustCompile(`"([^"]+)";v="([^"]+)"`)
+
+// HintsFrom parses sec-ch-ua, sec-ch-ua-platform and sec-ch-ua-mobile
+// header values.
+func HintsFrom(secChUa, platform, mobile string) *ClientHints {
+	h := &ClientHints{Platform: strings.Trim(platform, `"`), Mobile: mobile == "?1"}
+	for _, m := range brandRe.FindAllStringSubmatch(secChUa, -1) {
+		h.Brands = append(h.Brands, Brand{Brand: m[1], Version: m[2]})
+	}
+	if h.Platform == "" {
+		return nil
+	}
+	return h
+}
+
+// navigatorPlatform is navigator.platform for a client-hint platform.
+func navigatorPlatform(p string) string {
+	switch p {
+	case "Windows":
+		return "Win32"
+	case "macOS":
+		return "MacIntel"
+	case "Android":
+		return "Linux armv8l"
+	default:
+		return "Linux x86_64"
+	}
 }
 
 // Cookie is a browser cookie.
@@ -87,7 +139,10 @@ type Result struct {
 	HTML     []byte // the DOM after scripts ran
 	Cookies  []Cookie
 	Captured []Exchange
-	Elapsed  time.Duration
+	// Bytes is what the page's requests moved on the wire (compressed),
+	// which is what a proxy bills.
+	Bytes   int64
+	Elapsed time.Duration
 }
 
 // IsGraphQL selects Facebook's GraphQL endpoint.
@@ -105,6 +160,9 @@ func Render(ctx context.Context, binary string, opts Options) (*Result, error) {
 	if opts.Idle <= 0 {
 		opts.Idle = 500 * time.Millisecond
 	}
+	if opts.MaxSettle <= 0 {
+		opts.MaxSettle = 5 * time.Second
+	}
 	var args []string
 	if opts.UserAgent != "" {
 		args = append(args, "--user-agent="+opts.UserAgent)
@@ -115,6 +173,10 @@ func Render(ctx context.Context, binary string, opts Options) (*Result, error) {
 	var proxyUser, proxyPass string
 	if opts.Proxy != nil {
 		p := *opts.Proxy
+		if strings.HasPrefix(p.Scheme, "socks") && p.User != nil {
+			// Chromium cannot authenticate to SOCKS proxies.
+			return nil, errors.New("browser: Chromium does not support SOCKS proxies with credentials; use an HTTP exit for this tier")
+		}
 		if p.User != nil {
 			proxyUser = p.User.Username()
 			proxyPass, _ = p.User.Password()
@@ -123,6 +185,9 @@ func Render(ctx context.Context, binary string, opts Options) (*Result, error) {
 		// Chromium takes the proxy without credentials; they are answered
 		// on the authentication challenge.
 		args = append(args, "--proxy-server="+p.Scheme+"://"+p.Host, "--proxy-bypass-list=<-loopback>")
+	} else {
+		// Direct means direct: not a proxy from the environment.
+		args = append(args, "--no-proxy-server")
 	}
 	proc, err := launch(ctx, binary, opts.NoSandbox, args)
 	if err != nil {
@@ -149,10 +214,20 @@ func Render(ctx context.Context, binary string, opts Options) (*Result, error) {
 	}
 	s := attached.SessionID
 	r := &renderer{c: c, s: s, opts: opts, proxyUser: proxyUser, proxyPass: proxyPass,
-		reqs: map[string]*Exchange{}, inflight: map[string]bool{}, docs: map[string]document{}}
-	if proxyUser != "" {
-		if err := c.call(ctx, s, "Fetch.enable", map[string]any{"handleAuthRequests": true,
+		reqs: map[string]*Exchange{}, inflight: map[string]bool{}, docs: map[string]document{}, auth: map[string]int{}}
+	if proxyUser != "" || opts.BlockMedia {
+		// Requests pause here so media can be refused and proxy
+		// challenges answered.
+		if err := c.call(ctx, s, "Fetch.enable", map[string]any{"handleAuthRequests": proxyUser != "",
 			"patterns": []map[string]any{{"urlPattern": "*"}}}, nil); err != nil {
+			return nil, err
+		}
+	}
+	if opts.UserAgent != "" && opts.Hints != nil {
+		meta := map[string]any{"brands": opts.Hints.Brands, "platform": opts.Hints.Platform,
+			"platformVersion": "", "architecture": "x86", "model": "", "mobile": opts.Hints.Mobile}
+		if err := c.call(ctx, s, "Network.setUserAgentOverride", map[string]any{"userAgent": opts.UserAgent,
+			"acceptLanguage": opts.AcceptLanguage, "platform": navigatorPlatform(opts.Hints.Platform), "userAgentMetadata": meta}, nil); err != nil {
 			return nil, err
 		}
 	}
@@ -191,7 +266,7 @@ func Render(ctx context.Context, binary string, opts Options) (*Result, error) {
 	}
 
 	doc := r.docs[r.frameID]
-	res := &Result{URL: doc.url, Status: doc.status}
+	res := &Result{URL: doc.url, Status: doc.status, Bytes: r.wire}
 	if res.URL == "" {
 		res.URL = opts.URL
 	}
@@ -244,7 +319,8 @@ type renderer struct {
 	loaded     bool
 	frameID    string
 	docs       map[string]document // last document response per frame
-	authCount  int
+	auth       map[string]int      // proxy challenges per request
+	wire       int64
 	reqs       map[string]*Exchange
 	order      []string
 	inflight   map[string]bool
@@ -319,12 +395,13 @@ func (r *renderer) until(ctx context.Context, done func() bool, poll func() erro
 	return nil
 }
 
-// settle waits until no captured request is in flight and the network has
-// been quiet for opts.Idle.
+// settle waits until no captured request is in flight and none started
+// for opts.Idle, or opts.MaxSettle passed.
 func (r *renderer) settle(ctx context.Context) error {
 	r.lastNet = time.Now()
+	deadline := time.Now().Add(r.opts.MaxSettle)
 	return r.until(ctx, func() bool {
-		return len(r.inflight) == 0 && time.Since(r.lastNet) >= r.opts.Idle
+		return (len(r.inflight) == 0 && time.Since(r.lastNet) >= r.opts.Idle) || time.Now().After(deadline)
 	}, nil)
 }
 
@@ -334,9 +411,16 @@ func (r *renderer) handle(ctx context.Context, ev event) error {
 		r.loaded = true
 	case "Fetch.requestPaused":
 		var p struct {
-			RequestID string `json:"requestId"`
+			RequestID    string `json:"requestId"`
+			ResourceType string `json:"resourceType"`
 		}
 		_ = json.Unmarshal(ev.Params, &p)
+		if r.opts.BlockMedia && (p.ResourceType == "Image" || p.ResourceType == "Media" || p.ResourceType == "Font") {
+			go func() {
+				_ = r.c.call(ctx, r.s, "Fetch.failRequest", map[string]any{"requestId": p.RequestID, "errorReason": "BlockedByClient"}, nil)
+			}()
+			return nil
+		}
 		go func() { _ = r.c.call(ctx, r.s, "Fetch.continueRequest", map[string]any{"requestId": p.RequestID}, nil) }()
 	case "Fetch.authRequired":
 		var p struct {
@@ -348,8 +432,10 @@ func (r *renderer) handle(ctx context.Context, ev event) error {
 		_ = json.Unmarshal(ev.Params, &p)
 		resp := map[string]any{"response": "CancelAuth"}
 		if p.AuthChallenge.Source == "Proxy" {
-			// Chromium asks again when the credentials are refused.
-			if r.authCount++; r.authCount > 3 {
+			// Chromium challenges the same request again when the
+			// credentials are refused; parallel connections each get their
+			// first challenge.
+			if r.auth[p.RequestID]++; r.auth[p.RequestID] > 2 {
 				r.authFailed = true
 			} else {
 				resp = map[string]any{"response": "ProvideCredentials", "username": r.proxyUser, "password": r.proxyPass}
@@ -359,7 +445,6 @@ func (r *renderer) handle(ctx context.Context, ev event) error {
 			_ = r.c.call(ctx, r.s, "Fetch.continueWithAuth", map[string]any{"requestId": p.RequestID, "authChallengeResponse": resp}, nil)
 		}()
 	case "Network.requestWillBeSent":
-		r.lastNet = time.Now()
 		var p struct {
 			RequestID string `json:"requestId"`
 			Type      string `json:"type"`
@@ -374,6 +459,7 @@ func (r *renderer) handle(ctx context.Context, ev event) error {
 		if !r.opts.Capture(p.Request.URL) {
 			return nil
 		}
+		r.lastNet = time.Now()
 		x := &Exchange{URL: p.Request.URL, Method: p.Request.Method}
 		post := p.Request.PostData
 		if post == "" && p.Request.HasPostData {
@@ -398,7 +484,6 @@ func (r *renderer) handle(ctx context.Context, ev event) error {
 		r.reqs[p.RequestID] = x
 		r.inflight[p.RequestID] = true
 	case "Network.responseReceived":
-		r.lastNet = time.Now()
 		var p struct {
 			RequestID string `json:"requestId"`
 			Type      string `json:"type"`
@@ -417,12 +502,16 @@ func (r *renderer) handle(ctx context.Context, ev event) error {
 			x.Status, x.Headers = p.Response.Status, p.Response.Headers
 		}
 	case "Network.loadingFinished", "Network.loadingFailed":
-		r.lastNet = time.Now()
 		var p struct {
-			RequestID string `json:"requestId"`
+			RequestID         string  `json:"requestId"`
+			EncodedDataLength float64 `json:"encodedDataLength"`
 		}
 		_ = json.Unmarshal(ev.Params, &p)
-		delete(r.inflight, p.RequestID)
+		r.wire += int64(p.EncodedDataLength)
+		if r.inflight[p.RequestID] {
+			r.lastNet = time.Now()
+			delete(r.inflight, p.RequestID)
+		}
 	}
 	return nil
 }

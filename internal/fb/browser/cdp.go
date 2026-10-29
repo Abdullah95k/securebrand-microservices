@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"golang.org/x/net/websocket"
@@ -167,6 +168,12 @@ func launch(ctx context.Context, binary string, noSandbox bool, args []string) (
 		"--no-first-run", "--no-default-browser-check", "--disable-gpu", "--disable-extensions",
 		"--disable-background-networking", "--disable-sync", "--disable-dev-shm-usage",
 		"--mute-audio", "--hide-scrollbars", "--window-size=1366,900",
+		// No traffic of Chromium's own (updates, safe browsing, metrics,
+		// field trials): it would go through the identity's paid exit.
+		"--disable-component-update", "--disable-domain-reliability", "--disable-client-side-phishing-detection",
+		"--disable-default-apps", "--disable-breakpad", "--no-pings", "--metrics-recording-only",
+		"--disable-field-trial-config", "--disable-features=OptimizationHints,MediaRouter,Translate,AutofillServerCommunication",
+		"--safebrowsing-disable-auto-update",
 	}
 	if noSandbox || os.Geteuid() == 0 || os.Getenv("FBS_BROWSER_NO_SANDBOX") != "" {
 		flags = append(flags, "--no-sandbox") // Chromium refuses to run as root with its sandbox
@@ -175,6 +182,10 @@ func launch(ctx context.Context, binary string, noSandbox bool, args []string) (
 	flags = append(flags, "about:blank")
 	cmd := exec.CommandContext(ctx, binary, flags...) //nolint:gosec // the binary is configuration
 	cmd.Stdout, cmd.Stderr = nil, nil
+	// Its own process group, so stop kills the renderer and zygote
+	// children too instead of orphaning them.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	if err := cmd.Start(); err != nil {
 		_ = os.RemoveAll(profile)
 		return nil, fmt.Errorf("browser: start %s: %w", binary, err)
@@ -205,8 +216,8 @@ func launch(ctx context.Context, binary string, noSandbox bool, args []string) (
 
 func (p *process) stop() {
 	if p.cmd.Process != nil {
-		_ = p.cmd.Process.Kill()
-		_, _ = p.cmd.Process.Wait()
+		_ = syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL)
+		_ = p.cmd.Wait()
 	}
 	_ = os.RemoveAll(p.profile)
 }

@@ -102,10 +102,14 @@ The manual path is still there:
 
 `fb.browser.enabled` turns on the headless-Chromium fallback (internal/fb/browser). It needs the image built with `docker build --target browser`; set `image.browserTag` in the chart so the crawlers and registry-sync use it.
 
-- **Bootstraps:** when a page's HTML carries no tokens (it needs JavaScript first), the identity is bootstrapped in a fresh Chromium. The browser goes through the identity's own exit (proxy credentials are answered on the challenge) with its user agent, and its cookies and tokens are copied into the identity. The plain HTTP client then continues as usual.
+- **Bootstraps:** when a page's HTML carries no tokens (it needs JavaScript first), the identity is bootstrapped in a fresh Chromium.
+  - The browser presents the identity: its own exit (proxy credentials are answered on the challenge; SOCKS exits with credentials are not supported by Chromium), its user agent and matching client hints, and its cookies.
+  - Images, media and fonts are refused, and Chromium's own background traffic is off, to save proxy bandwidth. The render's wire bytes count in `fbs_proxy_bytes_total`.
+  - The rendered page is classified like an HTTP load: a login or checkpoint wall, or a block, is recorded on the identity, not taken for a bootstrap.
+  - On success, the cookies and tokens are copied into the identity and the plain HTTP client continues as usual.
 - **Limits:** at most `max_share` (2%) of HTML loads and `max_concurrent` (2) browsers per pod. A capped bootstrap fails at once (`fbs_bootstrap_total{method="browser",outcome="capped"|"busy"}`) and the task retries. It never holds a crawl slot waiting for a browser.
 - **Doc_id discovery:** when the bundles declare no doc_id for a registry query, fbs-registry-sync renders a canary page and reads the doc_id from the GraphQL requests the page makes itself. These show under `rendered` in the run report.
-- **Sandbox:** inside containers, Chromium's sandbox usually needs privileges pods do not have. Set `fb.browser.no_sandbox: true` there (it is always off as root).
+- **Sandbox and processes:** pods drop every capability, which leaves Chromium's sandbox unusable, so the chart sets `fb.browser.no_sandbox: true`. Each render runs in its own process group and is killed as a whole. Pods using the browser image share their process namespace, so the pause process reaps what is left. With `docker run`, the image's `tini` does that.
 
 Signals:
 

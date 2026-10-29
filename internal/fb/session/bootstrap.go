@@ -29,7 +29,10 @@ var ErrBootstrap = errors.New("session: bootstrap failed")
 // BrowserFallback renders a page in a real browser for an identity whose
 // HTML load carried no tokens (a page that needs JavaScript first), and
 // installs the cookies and tokens it found. Observe counts the HTTP loads
-// the fallback's share cap is measured against.
+// the fallback's share cap is measured against. A non-nil PageLoad means a
+// render happened and its outcome is already recorded on the identity; a
+// nil one (capped, busy, no browser) leaves the HTTP load's outcome to the
+// caller.
 type BrowserFallback interface {
 	Observe()
 	Bootstrap(ctx context.Context, id *Identity, rawURL string) (*PageLoad, error)
@@ -118,7 +121,7 @@ func (l *Loader) Load(ctx context.Context, id *Identity, rawURL string) (*PageLo
 			metrics.Bootstraps.WithLabelValues("http", "no_tokens").Inc()
 			if l.Browser != nil {
 				bpl, err := l.Browser.Bootstrap(ctx, id, target)
-				if err == nil && id.Bootstrapped() {
+				if bpl != nil {
 					bpl.Bytes += total
 					return bpl, nil
 				}
@@ -185,6 +188,9 @@ func (l *Loader) acceptConsent(ctx context.Context, id *Identity, tok htmlx.Toke
 func sameSite(base, u *url.URL) bool {
 	return u.Host == "" || u.Host == base.Host || strings.HasSuffix(u.Hostname(), "."+strings.TrimPrefix(base.Hostname(), "www."))
 }
+
+// IsWall reports a login or checkpoint path.
+func IsWall(path string) bool { return isWall(path) }
 
 func isWall(path string) bool {
 	return strings.HasPrefix(path, "/login") || strings.HasPrefix(path, "/checkpoint")

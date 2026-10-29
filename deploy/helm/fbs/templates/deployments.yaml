@@ -28,6 +28,10 @@ spec:
       imagePullSecrets: {{- toYaml . | nindent 8 }}
       {{- end }}
       securityContext: {{- toYaml $root.Values.podSecurityContext | nindent 8 }}
+      {{- if and $c.browser $root.Values.image.browserTag }}
+      # The pod's pause process becomes PID 1 and reaps Chromium's orphans.
+      shareProcessNamespace: true
+      {{- end }}
       terminationGracePeriodSeconds: {{ $c.terminationGracePeriodSeconds | default 30 }}
       containers:
         - name: {{ $name }}

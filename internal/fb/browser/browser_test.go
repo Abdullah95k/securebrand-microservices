@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -206,4 +208,90 @@ func mustURL(t *testing.T, s string) *url.URL {
 		t.Fatal(err)
 	}
 	return u
+}
+
+func TestHintsFrom(t *testing.T) {
+	h := HintsFrom(`"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"`, `"Windows"`, "?0")
+	if h == nil || h.Platform != "Windows" || h.Mobile || len(h.Brands) != 3 || h.Brands[2] != (Brand{"Google Chrome", "146"}) {
+		t.Fatalf("%+v", h)
+	}
+	if navigatorPlatform(h.Platform) != "Win32" || HintsFrom("", "", "") != nil {
+		t.Fatal("platform")
+	}
+}
+
+func TestSocksProxyWithCredentialsIsRefused(t *testing.T) {
+	_, err := Render(context.Background(), "/nonexistent-browser", Options{URL: "http://x/", Proxy: mustURL(t, "socks5://u:p@127.0.0.1:1080")})
+	if err == nil || !strings.Contains(err.Error(), "SOCKS") {
+		t.Fatalf("want a SOCKS error before launching, got %v", err)
+	}
+}
+
+// A render that lands on a login wall is not a bootstrap, though the wall
+// carries an LSD token.
+func TestBootstrapRefusesWalls(t *testing.T) {
+	env := fbtest.New(t, fbtest.Options{})
+	b := &Bootstrapper{MaxShare: 1, Timeout: time.Second, sem: make(chan struct{}, 1), credit: 1, burst: 1, Rules: detect.DefaultRules(),
+		render: func(context.Context, string, Options) (*Result, error) {
+			return &Result{URL: "https://www.facebook.com/login/?next=x", Status: 200,
+				HTML: []byte(`<html><script>["LSD",[],{"token":"AVq1"},323] "_js_datr","abc"</script></html>`)}, nil
+		}}
+	id, _ := env.Pool.Acquire(context.Background(), "direct")
+	defer env.Pool.Release(id)
+	pl, err := b.Bootstrap(context.Background(), id, "https://www.facebook.com/brand")
+	if err == nil || pl == nil || pl.Class != detect.LoginWall || id.Bootstrapped() {
+		t.Fatalf("wall taken for a bootstrap: %v %+v bootstrapped=%v", err, pl, id.Bootstrapped())
+	}
+}
+
+// Media is refused, a page that keeps polling still settles, the wire
+// bytes are counted, and no Chromium process outlives the render.
+func TestRenderBlocksMediaAndSettles(t *testing.T) {
+	bin := chromium(t)
+	var images atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/x.png":
+			images.Add(1)
+			w.Header().Set("Content-Type", "image/png")
+		case "/beacon":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, `<html><body><img src="/x.png"><script>setInterval(function(){fetch("/beacon")},50)</script>`+
+				strings.Repeat("<p>filler</p>", 500)+`</body></html>`)
+		}
+	}))
+	defer srv.Close()
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	res, err := Render(ctx, bin, Options{URL: srv.URL + "/", BlockMedia: true, MaxSettle: 2 * time.Second, Idle: 300 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if images.Load() != 0 || res.Bytes < 5000 || time.Since(start) > 30*time.Second {
+		t.Fatalf("images fetched %d, bytes %d, took %s", images.Load(), res.Bytes, time.Since(start))
+	}
+	if n := browserProcesses(t); n != 0 {
+		t.Fatalf("%d Chromium processes left after the render", n)
+	}
+}
+
+// browserProcesses counts processes started with an fbs-browser profile.
+func browserProcesses(t *testing.T) int {
+	t.Helper()
+	time.Sleep(200 * time.Millisecond)
+	entries, _ := os.ReadDir("/proc")
+	n := 0
+	for _, e := range entries {
+		b, err := os.ReadFile("/proc/" + e.Name() + "/cmdline")
+		if err == nil && strings.Contains(string(b), "--user-data-dir="+filepath.Join(os.TempDir(), "fbs-browser-")) {
+			stat, _ := os.ReadFile("/proc/" + e.Name() + "/stat")
+			if !strings.Contains(string(stat), ") Z ") { // zombies are reaped by the test's parent
+				n++
+			}
+		}
+	}
+	return n
 }

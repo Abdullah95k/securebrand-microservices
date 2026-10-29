@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,6 +34,7 @@ type Bootstrapper struct {
 	Timeout        time.Duration
 	MaxShare       float64
 	NoSandbox      bool
+	Rules          detect.Rules
 
 	sem    chan struct{}
 	mu     sync.Mutex
@@ -56,7 +58,8 @@ func NewBootstrapper(cfg config.Browser, acceptLanguage string) (*Bootstrapper, 
 	// The burst lets the first pages of a fresh pod through; the credit
 	// then grows by MaxShare per HTML load.
 	return &Bootstrapper{Binary: bin, AcceptLanguage: acceptLanguage, Timeout: timeout, MaxShare: cfg.MaxShare, NoSandbox: cfg.NoSandbox,
-		sem: make(chan struct{}, n), credit: float64(n), burst: float64(n), render: Render}, nil
+		Rules: detect.DefaultRules(),
+		sem:   make(chan struct{}, n), credit: float64(n), burst: float64(n), render: Render}, nil
 }
 
 // Observe counts one HTTP page load.
@@ -76,7 +79,9 @@ func (b *Bootstrapper) take() bool {
 	return true
 }
 
-// Bootstrap renders rawURL for id.
+// Bootstrap renders rawURL for id. It returns a PageLoad whenever a render
+// happened, with the outcome recorded on the identity (see
+// session.BrowserFallback), and nil when it was capped or failed to run.
 func (b *Bootstrapper) Bootstrap(ctx context.Context, id *session.Identity, rawURL string) (*session.PageLoad, error) {
 	if !b.take() {
 		metrics.Bootstraps.WithLabelValues("browser", "capped").Inc()
@@ -89,22 +94,40 @@ func (b *Bootstrapper) Bootstrap(ctx context.Context, id *session.Identity, rawU
 		return nil, ErrBusy
 	}
 	defer func() { <-b.sem }()
+	// One page load for the identity's pacing; the subrequests are the
+	// page's own.
+	if err := id.Wait(ctx); err != nil {
+		return nil, err
+	}
 	ctx, cancel := context.WithTimeout(ctx, b.Timeout)
 	defer cancel()
-	opts := Options{URL: rawURL, UserAgent: id.FP.UserAgent, AcceptLanguage: b.AcceptLanguage,
-		Cookies: id.Doer.Cookies(id.Base), Capture: func(string) bool { return false }, Idle: 300 * time.Millisecond,
-		NoSandbox: b.NoSandbox}
-	if id.Endpoint.URL != "" {
-		p, err := url.Parse(id.Endpoint.URL)
-		if err != nil {
-			return nil, fmt.Errorf("browser: proxy: %w", err)
-		}
-		opts.Proxy = p
+	opts, err := b.options(id, rawURL)
+	if err != nil {
+		return nil, err
 	}
+	opts.Capture = func(string) bool { return false }
+	opts.Idle = 300 * time.Millisecond
 	res, err := b.render(ctx, b.Binary, opts)
 	if err != nil {
 		metrics.Bootstraps.WithLabelValues("browser", "error").Inc()
 		return nil, err
+	}
+	metrics.ProxyBytes.WithLabelValues(id.Endpoint.Tier, "in").Add(float64(res.Bytes))
+	pl := &session.PageLoad{URL: res.URL, Status: res.Status, HTML: res.HTML, Bytes: res.Bytes}
+	// The same classification as an HTTP load: a wall or a block is not a
+	// bootstrap, even when the page carries an LSD token.
+	cls, reason := b.Rules.Classify(detect.Input{Status: res.Status, Body: res.HTML, ContentType: "text/html", Expect: "html"})
+	if u, err := url.Parse(res.URL); err == nil && session.IsWall(u.Path) {
+		cls, reason = detect.LoginWall, "browser landed on "+u.Path
+		if strings.HasPrefix(u.Path, "/checkpoint") {
+			cls = detect.Checkpoint
+		}
+	}
+	if cls != detect.OK {
+		metrics.Bootstraps.WithLabelValues("browser", cls.String()).Inc()
+		session.Outcome(id, cls)
+		pl.Class, pl.Reason = cls, reason
+		return pl, fmt.Errorf("browser: %s: %s", cls, reason)
 	}
 	for _, c := range res.Cookies {
 		id.Doer.SetCookie(id.Base, c.Name, c.Value)
@@ -113,7 +136,6 @@ func (b *Bootstrapper) Bootstrap(ctx context.Context, id *session.Identity, rawU
 	if tok.JSDatr != "" && id.Doer.Cookie(id.Base, "datr") == "" {
 		id.Doer.SetCookie(id.Base, "datr", tok.JSDatr)
 	}
-	pl := &session.PageLoad{URL: res.URL, Status: res.Status, HTML: res.HTML, Class: detect.OK, Bytes: int64(len(res.HTML))}
 	if !tok.Valid() {
 		metrics.Bootstraps.WithLabelValues("browser", "no_tokens").Inc()
 		session.Outcome(id, detect.SoftError)
@@ -123,7 +145,24 @@ func (b *Bootstrapper) Bootstrap(ctx context.Context, id *session.Identity, rawU
 	id.SetTokens(tok)
 	session.Outcome(id, detect.OK)
 	metrics.Bootstraps.WithLabelValues("browser", "ok").Inc()
+	pl.Class = detect.OK
 	return pl, nil
+}
+
+// options builds a render of rawURL as id: its exit, user agent and client
+// hints, its cookies, media blocked.
+func (b *Bootstrapper) options(id *session.Identity, rawURL string) (Options, error) {
+	opts := Options{URL: rawURL, UserAgent: id.FP.UserAgent, AcceptLanguage: b.AcceptLanguage,
+		Cookies: id.Doer.Cookies(id.Base), NoSandbox: b.NoSandbox, BlockMedia: true,
+		Hints: HintsFrom(id.FP.SecChUa, id.FP.SecChUaPlatform, id.FP.SecChUaMobile)}
+	if id.Endpoint.URL != "" {
+		p, err := url.Parse(id.Endpoint.URL)
+		if err != nil {
+			return opts, fmt.Errorf("browser: proxy: %w", err)
+		}
+		opts.Proxy = p
+	}
+	return opts, nil
 }
 
 // Capture renders rawURL through id's exit and fingerprint, scrolling
@@ -139,18 +178,15 @@ func (b *Bootstrapper) Capture(ctx context.Context, id *session.Identity, rawURL
 	defer func() { <-b.sem }()
 	ctx, cancel := context.WithTimeout(ctx, b.Timeout)
 	defer cancel()
-	opts := Options{URL: rawURL, UserAgent: id.FP.UserAgent, AcceptLanguage: b.AcceptLanguage,
-		Cookies: id.Doer.Cookies(id.Base), Scrolls: 2, NoSandbox: b.NoSandbox}
-	if id.Endpoint.URL != "" {
-		p, err := url.Parse(id.Endpoint.URL)
-		if err != nil {
-			return nil, fmt.Errorf("browser: proxy: %w", err)
-		}
-		opts.Proxy = p
+	opts, err := b.options(id, rawURL)
+	if err != nil {
+		return nil, err
 	}
+	opts.Scrolls = 2
 	res, err := b.render(ctx, b.Binary, opts)
 	if err != nil {
 		return nil, err
 	}
+	metrics.ProxyBytes.WithLabelValues(id.Endpoint.Tier, "in").Add(float64(res.Bytes))
 	return res.Captured, nil
 }
