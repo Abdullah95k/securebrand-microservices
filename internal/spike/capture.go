@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -133,7 +131,7 @@ func classOf(r *graphql.Response) string {
 // no page could be loaded.
 func (r *Runner) DocIDs(ctx context.Context, pages []string, maxBundles int) (map[string]string, int, error) {
 	out := map[string]string{}
-	sc := &docids.Scanner{Fetch: r.get}
+	sc := &docids.Scanner{Fetch: docids.HTTPFetcher(r.HTTP)}
 	n, loaded := 0, 0
 	var lastErr error
 	for _, page := range pages {
@@ -171,20 +169,4 @@ func (r *Runner) load(ctx context.Context, page string) ([]byte, *url.URL, error
 		return nil, nil, err
 	}
 	return pl.HTML, u, nil
-}
-
-func (r *Runner) get(ctx context.Context, src string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, src, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := r.HTTP.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("spike: %s: status %d", src, resp.StatusCode)
-	}
-	return io.ReadAll(io.LimitReader(resp.Body, 20<<20))
 }

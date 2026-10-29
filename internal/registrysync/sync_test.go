@@ -7,11 +7,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
+
 	"github.com/abdullah95k/securebrand-microservices/configs"
 	"github.com/abdullah95k/securebrand-microservices/internal/app"
 	"github.com/abdullah95k/securebrand-microservices/internal/config"
 	"github.com/abdullah95k/securebrand-microservices/internal/fakefb"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/registry"
+	"github.com/abdullah95k/securebrand-microservices/internal/platform/metrics"
 	"github.com/abdullah95k/securebrand-microservices/internal/registrysync"
 	"github.com/abdullah95k/securebrand-microservices/internal/store"
 	"github.com/abdullah95k/securebrand-microservices/internal/testenv"
@@ -183,6 +187,14 @@ func TestSyncFollowsRotation(t *testing.T) {
 		t.Fatalf("the old doc_id must stay as a fallback: %+v %v", fb, ok)
 	}
 
+	// The sync's own requests are counted apart from crawl traffic.
+	if n := value(metrics.FBRequests.WithLabelValues(registrysync.ProbeQueryPrefix+"timeline", "registry_stale", "direct")); n < 1 {
+		t.Fatalf("probe of the stale timeline id not counted under its own label: %v", n)
+	}
+	if len(rep.Discovered) != 3 || rep.Operations < 3 {
+		t.Fatalf("discovered %v of %d operations", rep.Discovered, rep.Operations)
+	}
+
 	// Steady again: nothing new to record or promote.
 	rep = f.run()
 	if rep.Status != registrysync.StatusOK || len(rep.Candidates) != 0 || len(rep.Promoted) != 0 {
@@ -290,6 +302,46 @@ func TestSyncRetiresFailingCandidates(t *testing.T) {
 	}
 }
 
+// A candidate that works but is not what the bundles declare is kept as a
+// fallback, ahead of an older one, although it was never promoted.
+func TestSyncKeepsWorkingSpare(t *testing.T) {
+	f := start(t, fakefb.Faults{}, func(c *config.Config) { c.RegistrySync.KeepFallbacks = 1 })
+	ctx := context.Background()
+	active := docOf(f.seed, "replies")
+	f.fake.AcceptDocs("Depth1CommentsListPaginationQuery", active, "2222222222222222")
+	if _, err := f.s.DB.Exec(ctx, `INSERT INTO fb_queries (name, doc_id, friendly_name, variables_template, parser,
+			parser_version, status, priority, source, promoted_at, last_ok_at)
+		SELECT name, d.id, friendly_name, variables_template, parser, parser_version, d.st, priority, 'bundle', d.at, d.at
+		FROM fb_queries, (VALUES ('2222222222222222', 'candidate', NULL::timestamptz),
+			('3333333333333333', 'fallback', now() - interval '10 days')) AS d(id, st, at)
+		WHERE name = 'replies'`); err != nil {
+		t.Fatal(err)
+	}
+	rep := f.run()
+	rows := f.rows()
+	if rows["replies/2222222222222222"] != registry.StatusFallback || rows["replies/3333333333333333"] != registry.StatusRetired ||
+		rows["replies/"+active] != registry.StatusActive || len(rep.Promoted) != 0 {
+		t.Fatalf("want the working spare kept and the old fallback retired: %v %+v", rows, rep)
+	}
+}
+
+// A run whose probes are all blocked validates nothing: it is not a
+// success for the staleness alert.
+func TestSyncAllBlockedIsNotASuccess(t *testing.T) {
+	f := start(t, fakefb.Faults{RateLimitEvery: 1}, nil)
+	metrics.RegistrySyncLastSuccess.Set(0)
+	rep := f.run()
+	if rep.Status != registrysync.StatusDegraded || rep.Checked() || len(rep.Unchecked) != len(f.seed.Queries) {
+		t.Fatalf("all blocked: %+v", rep)
+	}
+	if v := value(metrics.RegistrySyncLastSuccess); v != 0 {
+		t.Fatalf("last success advanced to %v", v)
+	}
+	if err := f.s.InitMetrics(context.Background()); err != nil || value(metrics.RegistrySyncLastSuccess) != 0 {
+		t.Fatalf("a stored all-blocked run counted as a success: %v", err)
+	}
+}
+
 func TestSyncSkipsWhileAnotherRunHoldsTheLock(t *testing.T) {
 	f := start(t, fakefb.Faults{}, nil)
 	ctx := context.Background()
@@ -313,4 +365,14 @@ func contains(xs []string, x string) bool {
 		}
 	}
 	return false
+}
+
+// value reads a counter or gauge.
+func value(m prometheus.Metric) float64 {
+	var pb dto.Metric
+	_ = m.Write(&pb)
+	if c := pb.GetCounter(); c != nil {
+		return c.GetValue()
+	}
+	return pb.GetGauge().GetValue()
 }

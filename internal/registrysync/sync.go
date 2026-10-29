@@ -88,12 +88,15 @@ type PageResult struct {
 
 // Report describes one run.
 type Report struct {
-	StartedAt  time.Time         `json:"started_at"`
-	FinishedAt time.Time         `json:"finished_at"`
-	Status     string            `json:"status"`
-	Error      string            `json:"error,omitempty"`
-	Pages      []PageResult      `json:"pages,omitempty"`
-	Discovered map[string]string `json:"discovered,omitempty"` // friendly name -> doc_id
+	StartedAt  time.Time    `json:"started_at"`
+	FinishedAt time.Time    `json:"finished_at"`
+	Status     string       `json:"status"`
+	Error      string       `json:"error,omitempty"`
+	Pages      []PageResult `json:"pages,omitempty"`
+	// Discovered maps the registry's friendly names found in the bundles to
+	// their doc_id; Operations counts every operation the bundles declared.
+	Discovered map[string]string `json:"discovered,omitempty"`
+	Operations int               `json:"operations"`
 	// NotFound are friendly names of registry queries no bundle declared:
 	// Facebook may have renamed the operation.
 	NotFound   []string    `json:"not_found,omitempty"`
@@ -108,6 +111,13 @@ type Report struct {
 	Failing []string `json:"failing,omitempty"`
 	// Unchecked are queries no canary page gave a verdict on.
 	Unchecked []string `json:"unchecked,omitempty"`
+}
+
+// Checked reports whether the run gave every query a verdict. Failing
+// queries count (fbs_registry_query_healthy reports them); unchecked ones
+// do not: a run whose probes are all blocked validates nothing.
+func (r Report) Checked() bool {
+	return (r.Status == StatusOK || r.Status == StatusDegraded) && len(r.Unchecked) == 0
 }
 
 // Sync runs registry syncs.
@@ -151,7 +161,8 @@ type canary struct {
 // restart does not look like a sync that stopped working.
 func (s *Sync) InitMetrics(ctx context.Context) error {
 	var last *time.Time
-	if err := s.DB.QueryRow(ctx, `SELECT max(finished_at) FROM registry_sync_runs WHERE status IN ('ok', 'degraded')`).Scan(&last); err != nil {
+	if err := s.DB.QueryRow(ctx, `SELECT max(finished_at) FROM registry_sync_runs
+		WHERE status IN ('ok', 'degraded') AND coalesce(jsonb_array_length(report->'unchecked'), 0) = 0`).Scan(&last); err != nil {
 		return err
 	}
 	if last != nil {
@@ -199,7 +210,7 @@ func (s *Sync) finish(ctx context.Context, rep Report, err error) (Report, error
 		rep.Status, rep.Error = StatusError, err.Error()
 	}
 	metrics.RegistrySyncRuns.WithLabelValues(rep.Status).Inc()
-	if rep.Status == StatusOK || rep.Status == StatusDegraded {
+	if rep.Checked() {
 		metrics.RegistrySyncLastSuccess.Set(float64(rep.FinishedAt.Unix()))
 	}
 	js, _ := json.Marshal(rep)
@@ -212,7 +223,7 @@ func (s *Sync) finish(ctx context.Context, rep Report, err error) (Report, error
 		lvl = slog.LevelWarn
 	}
 	slog.Log(ctx, lvl, "registry-sync: run finished", "status", rep.Status, "err", rep.Error,
-		"discovered", len(rep.Discovered), "candidates", rep.Candidates, "promoted", len(rep.Promoted),
+		"operations", rep.Operations, "discovered", len(rep.Discovered), "candidates", rep.Candidates, "promoted", len(rep.Promoted),
 		"failing", rep.Failing, "unchecked", rep.Unchecked, "not_found", rep.NotFound)
 	return rep, err
 }
@@ -241,12 +252,18 @@ func (s *Sync) run(ctx context.Context, rep *Report) error {
 		s.scanner.Fetch = s.fetcher(c.id)
 		s.scanner.Page(ctx, c.html, c.url, found)
 	}
-	rep.Discovered = found
+	rep.Operations = len(found)
 	metrics.RegistryDiscovered.Set(float64(len(found)))
 
 	entries, err := s.entries(ctx)
 	if err != nil {
 		return err
+	}
+	rep.Discovered = map[string]string{}
+	for _, e := range entries {
+		if d, ok := found[e.FriendlyName]; ok {
+			rep.Discovered[e.FriendlyName] = d
+		}
 	}
 	if err := s.recordCandidates(ctx, entries, found, rep); err != nil {
 		return err
@@ -517,14 +534,20 @@ func (s *Sync) check(ctx context.Context, pages []*canary, entries []*entry) map
 		}
 		return !v.conclusive() || (needed && v == OK)
 	}
-	done := func() bool {
-		for _, names := range byKind {
-			for _, n := range names {
-				for _, e := range groups[n] {
-					if want(n, e, false) {
-						return false
-					}
+	pending := func(kind string) bool {
+		for _, n := range byKind[kind] {
+			for _, e := range groups[n] {
+				if want(n, e, false) {
+					return true
 				}
+			}
+		}
+		return false
+	}
+	done := func() bool {
+		for _, kind := range kinds {
+			if pending(kind) {
+				return false
 			}
 		}
 		return true
@@ -535,10 +558,19 @@ func (s *Sync) check(ctx context.Context, pages []*canary, entries []*entry) map
 		}
 		var posts []post
 		var threads []parse.ThreadRef
+		storedTried := false
 		for _, kind := range kinds {
 			for _, name := range byKind[kind] {
 				for _, e := range groups[name] {
-					needed := (kind == "timeline" && posts == nil) || (kind == "comments" && threads == nil)
+					// A passing entry is checked again on this page only when
+					// its output is the input a later kind still needs.
+					var needed bool
+					switch kind {
+					case "timeline":
+						needed = posts == nil && (pending("comments") || pending("replies"))
+					case "comments":
+						needed = threads == nil && pending("replies")
+					}
 					if !want(name, e, needed) {
 						continue
 					}
@@ -551,8 +583,9 @@ func (s *Sync) check(ctx context.Context, pages []*canary, entries []*entry) map
 							posts = ps
 						}
 					case "comments":
-						if len(posts) == 0 {
+						if len(posts) == 0 && !storedTried {
 							// No timeline check passed here: read posts already stored.
+							storedTried = true
 							posts = s.storedPosts(ctx, c.pageID)
 						}
 						if len(posts) == 0 {
@@ -588,10 +621,16 @@ func (s *Sync) check(ctx context.Context, pages []*canary, entries []*entry) map
 	return out
 }
 
+// ProbeQueryPrefix prefixes the query name of the sync's own requests in
+// the request metrics, so its probes of stale candidates do not count as
+// crawl traffic.
+const ProbeQueryPrefix = "registry_sync:"
+
 // client returns a GraphQL client whose registry holds only e, so a
 // failure is e's own and not hidden by a fallback.
 func (s *Sync) client(e *entry) *graphql.Client {
 	q := e.Query
+	q.Name = ProbeQueryPrefix + e.Name
 	q.Status = registry.StatusActive
 	var params map[string]string
 	if s.Params != nil {
@@ -602,7 +641,7 @@ func (s *Sync) client(e *entry) *graphql.Client {
 }
 
 func (s *Sync) do(ctx context.Context, c *canary, e *entry, vars map[string]any) (*graphql.Response, Check) {
-	resp, err := s.client(e).Do(ctx, c.id, graphql.Request{Query: e.Name, Vars: vars, Referer: c.url.String()})
+	resp, err := s.client(e).Do(ctx, c.id, graphql.Request{Query: ProbeQueryPrefix + e.Name, Vars: vars, Referer: c.url.String()})
 	if err != nil {
 		return nil, Check{Verdict: Inconclusive, Reason: err.Error()}
 	}
@@ -666,13 +705,15 @@ func (s *Sync) storedPosts(ctx context.Context, pageID int64) []post {
 		WHERE page_id = $1 AND comment_count_total > 0 AND post_created_at > now() - interval '30 days'
 		ORDER BY comment_count_total DESC LIMIT 2`, pageID)
 	if err != nil {
+		slog.Warn("registry-sync: stored posts", "page_id", pageID, "err", err)
 		return nil
 	}
 	defer rows.Close()
 	var out []post
 	for rows.Next() {
 		p := post{pageID: pageID}
-		if rows.Scan(&p.id, &p.feedback) != nil {
+		if err := rows.Scan(&p.id, &p.feedback); err != nil {
+			slog.Warn("registry-sync: stored posts", "page_id", pageID, "err", err)
 			return nil
 		}
 		if p.feedback == "" {
@@ -872,13 +913,14 @@ func (s *Sync) promote(ctx context.Context, name, docID string) error {
 	})
 }
 
-// trimFallbacks retires all but the KeepFallbacks most recently promoted
-// fallbacks of name.
+// trimFallbacks retires all but the KeepFallbacks fallbacks of name most
+// recently known to work: the last passing check, else the promotion (a
+// spare candidate kept as a fallback was never promoted).
 func (s *Sync) trimFallbacks(ctx context.Context, name string) ([]string, error) {
 	rows, err := s.DB.Query(ctx, `UPDATE fb_queries SET status = 'retired', updated_at = now()
 		WHERE name = $1 AND status = 'fallback' AND doc_id NOT IN (
 			SELECT doc_id FROM fb_queries WHERE name = $1 AND status = 'fallback'
-			ORDER BY promoted_at DESC NULLS LAST, updated_at DESC LIMIT $2)
+			ORDER BY coalesce(last_ok_at, promoted_at) DESC NULLS LAST, updated_at DESC LIMIT $2)
 		RETURNING doc_id`, name, max(s.Cfg.KeepFallbacks, 0))
 	if err != nil {
 		return nil, err

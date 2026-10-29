@@ -84,7 +84,7 @@ When it does not heal:
 - `fbs_registry_query_healthy{query} == 0`: the active doc_id is stale or drifted and nothing passed.
   - If the run report lists the query's friendly name under `not_found`, Facebook renamed the operation. Capture a HAR (phase0 runbook), then set the new entry with `PUT /v1/admin/queries/{name}`.
   - If the checks say `drift`, it is a parser change: see Schema drift below.
-- `fbs_registry_sync_last_success_timestamp_seconds` is old: the runs fail, typically because no canary page loads (blocked tier, or a page gone). See `GET /v1/admin/registry-sync/runs` and the service logs. Replace dead canary pages.
+- `fbs_registry_sync_last_success_timestamp_seconds` is old: no recent run gave every query a verdict. Typically no canary page loads (blocked tier, or a page gone), every probe is blocked, or the canary pages have no posts with comments or reply threads. See `GET /v1/admin/registry-sync/runs` (`unchecked`) and the service logs. Replace dead or quiet canary pages.
 - To check without promoting, set `registry_sync.promote: false`. The runs then list what they would promote under `proposed`.
 - `fbs-registry-sync --once` runs once and prints the report. It exits 3 when the run is degraded.
 
@@ -96,7 +96,7 @@ The manual path is still there:
    retry topic. Tasks that exhausted retries are in the DLQ:
    `fbctl dlq replay --reason max_attempts`.
 
-`GET /v1/admin/queries` shows each entry's `last_check`, `last_checked_at` and `last_ok_at`.
+`GET /v1/admin/queries` shows each entry's `last_check`, `last_checked_at` and `last_ok_at`. The sync's own requests are counted under `query="registry_sync:<name>"` in `fbs_fb_requests_total`, apart from crawl traffic.
 
 ## Schema drift
 

@@ -3,6 +3,8 @@ package docids
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"reflect"
 	"testing"
@@ -24,7 +26,8 @@ func TestBundles(t *testing.T) {
 		<script src="https://static.xx.fbcdn.net/rsrc.php/v3/yA/r/abc.js?_nc_x=1"></script>
 		{"src":"https:\/\/static.xx.fbcdn.net\/rsrc.php\/v3\/yB\/r\/def.js"}
 		<script src="//www.facebook.com/rsrc.php/v3/own.js"></script>
-		<script src="https://evil.example/rsrc.php/v3/x.js"></script>`)
+		<script src="https://evil.example/rsrc.php/v3/x.js"></script>
+		<script src="https://evilfbcdn.net/rsrc.php/v3/y.js"></script>`)
 	got := Bundles(html, page)
 	want := []string{"https://static.xx.fbcdn.net/rsrc.php/v3/yA/r/abc.js?_nc_x=1", "https://static.xx.fbcdn.net/rsrc.php/v3/yB/r/def.js",
 		"https://www.facebook.com/rsrc.php/v3/own.js"}
@@ -61,5 +64,23 @@ func TestScannerFetchesEachBundleOnce(t *testing.T) {
 	}
 	if n := s.Page(context.Background(), html, page, map[string]string{}); n != 0 {
 		t.Fatalf("everything is cached: %d", n)
+	}
+}
+
+func TestHTTPFetcher(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/missing.js" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte("bundle"))
+	}))
+	defer srv.Close()
+	fetch := HTTPFetcher(srv.Client())
+	if b, err := fetch(context.Background(), srv.URL+"/a.js"); err != nil || string(b) != "bundle" {
+		t.Fatalf("%q %v", b, err)
+	}
+	if _, err := fetch(context.Background(), srv.URL+"/missing.js"); err == nil {
+		t.Fatal("a 404 must be an error")
 	}
 }

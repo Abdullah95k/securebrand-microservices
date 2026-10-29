@@ -6,6 +6,9 @@ package docids
 
 import (
 	"context"
+	"fmt"
+	"io"
+	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
@@ -42,7 +45,7 @@ func Bundles(html []byte, pageURL *url.URL) []string {
 		if err != nil || seen[src] {
 			continue
 		}
-		if !strings.HasSuffix(u.Hostname(), "fbcdn.net") && u.Host != pageURL.Host {
+		if h := u.Hostname(); h != "fbcdn.net" && !strings.HasSuffix(h, ".fbcdn.net") && u.Host != pageURL.Host {
 			continue
 		}
 		seen[src] = true
@@ -53,6 +56,36 @@ func Bundles(html []byte, pageURL *url.URL) []string {
 
 // Fetcher downloads one bundle.
 type Fetcher func(ctx context.Context, src string) ([]byte, error)
+
+// MaxBundleBytes caps a bundle download.
+const MaxBundleBytes = 20 << 20
+
+// HTTPFetcher downloads bundles with hc. A bundle larger than
+// MaxBundleBytes is an error rather than silently truncated.
+func HTTPFetcher(hc *http.Client) Fetcher {
+	return func(ctx context.Context, src string) ([]byte, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, src, nil)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := hc.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("docids: %s: status %d", src, resp.StatusCode)
+		}
+		b, err := io.ReadAll(io.LimitReader(resp.Body, MaxBundleBytes+1))
+		if err != nil {
+			return nil, err
+		}
+		if len(b) > MaxBundleBytes {
+			return nil, fmt.Errorf("docids: %s: larger than %d bytes", src, MaxBundleBytes)
+		}
+		return b, nil
+	}
+}
 
 // Scanner scans pages and their bundles. Bundle URLs are content-addressed
 // and immutable, so each bundle's ids are remembered and it is fetched

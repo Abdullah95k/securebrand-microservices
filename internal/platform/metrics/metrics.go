@@ -100,7 +100,7 @@ var (
 
 	// Registry sync (fbs-registry-sync).
 	RegistrySyncRuns        = counterVec("registry_sync_runs_total", "Registry sync runs by status (ok, degraded, error).", "status")
-	RegistrySyncLastSuccess = gauge("registry_sync_last_success_timestamp_seconds", "When the last registry sync run completed (ok or degraded).")
+	RegistrySyncLastSuccess = gauge("registry_sync_last_success_timestamp_seconds", "When the last registry sync run that gave every query a verdict completed.")
 	RegistryChecks          = counterVec("registry_checks_total", "Registry entry checks on canary pages by entry status and verdict.", "query", "status", "verdict")
 	RegistryPromotions      = counterVec("registry_promotions_total", "doc_ids promoted to active.", "query")
 	RegistryQueryHealthy    = gaugeVec("registry_query_healthy", "1 when the query's active doc_id parsed on a canary page (or a replacement was promoted), 0 when it failed with none to promote.", "query")

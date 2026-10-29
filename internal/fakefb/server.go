@@ -86,6 +86,17 @@ func (s *Server) SetFaults(f Faults) {
 	s.mu.Unlock()
 }
 
+// AcceptDocs sets the accepted doc_ids of friendly; the bundle declares
+// the first.
+func (s *Server) AcceptDocs(friendly string, docIDs ...string) {
+	s.mu.Lock()
+	if s.opts.Docs == nil {
+		s.opts.Docs = map[string][]string{}
+	}
+	s.opts.Docs[friendly] = append([]string(nil), docIDs...)
+	s.mu.Unlock()
+}
+
 // RotateDoc makes docID the only accepted doc_id for friendly.
 func (s *Server) RotateDoc(friendly, docID string) {
 	s.mu.Lock()

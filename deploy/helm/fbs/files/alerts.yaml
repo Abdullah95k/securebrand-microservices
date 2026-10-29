@@ -23,8 +23,8 @@ groups:
             / clamp_min(sum by (query) (rate(fbs_parse_total[15m])), 1e-9)
       - record: fbs:registry_stale_ratio:rate10m
         expr: |
-          sum by (query) (rate(fbs_fb_requests_total{class="registry_stale"}[10m]))
-            / clamp_min(sum by (query) (rate(fbs_fb_requests_total[10m])), 1e-9)
+          sum by (query) (rate(fbs_fb_requests_total{class="registry_stale", query!~"registry_sync:.*"}[10m]))
+            / clamp_min(sum by (query) (rate(fbs_fb_requests_total{query!~"registry_sync:.*"}[10m])), 1e-9)
       - record: fbs:leader:aimd_ceiling_rps
         expr: max(fbs_aimd_ceiling_rps * on (instance) (fbs_scheduler_leader == 1))
       - record: fbs:leader:fleet_rps
@@ -68,15 +68,17 @@ groups:
             Consider pinning the ceiling low and moving routing to another tier.
           runbook_url: https://github.com/abdullah95k/securebrand-microservices/blob/main/docs/runbooks/operations.md#block-storm-block-rate--10
       - alert: FbsCrawlersIdleWithBacklog
+        # Tasks, not requests: fbs-registry-sync's own requests every 30m
+        # would otherwise keep resetting the for timer.
         expr: |
-          sum(rate(fbs_fb_requests_total[10m])) == 0
+          sum(rate(fbs_tasks_total[10m])) == 0
             and sum(fbs:leader:kafka_consumer_lag{group=~"fbs-crawler-.*"}) > 0
         for: 15m
         labels: {severity: critical}
         annotations:
-          summary: Crawlers send no Facebook requests while tasks are waiting
+          summary: Crawlers finish no task while tasks are waiting
           description: >-
-            No GraphQL or page request in 10 minutes with crawl tasks queued.
+            No crawl task handled in 10 minutes with crawl tasks queued.
             Check the crawler pods, the AIMD ceiling (a pinned 0?), the proxy
             breakers and the budget.
           runbook_url: https://github.com/abdullah95k/securebrand-microservices/blob/main/docs/runbooks/operations.md#kafka-lag
@@ -134,10 +136,12 @@ groups:
         for: 10m
         labels: {severity: warning}
         annotations:
-          summary: fbs-registry-sync has not completed a run in 3 hours
+          summary: No fbs-registry-sync run in 3 hours checked every query
           description: >-
             Rotations will not be followed. Usually no canary page loads (dead
-            page, blocked tier) or registry_sync.canary_pages is empty.
+            page, blocked tier), the probes are blocked (every check
+            inconclusive), the canary pages lack posts with comments or reply
+            threads, or registry_sync.canary_pages is empty.
           runbook_url: https://github.com/abdullah95k/securebrand-microservices/blob/main/docs/runbooks/operations.md#registry-stale-doc_id-rotated
       - alert: FbsSchemaDrift
         expr: fbs:parse_drift_ratio:rate15m > 0.05

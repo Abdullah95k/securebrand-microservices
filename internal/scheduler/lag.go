@@ -39,11 +39,15 @@ func (l *LagGauges) Tick(ctx context.Context) error {
 		return err
 	}
 	now := map[[2]string]bool{}
+	failed := map[string]bool{}
 	for _, gl := range lags {
+		group := strings.TrimPrefix(gl.Group, l.Prefix)
 		if gl.Error() != nil {
+			// Keep the group's last values: a transient lookup error must
+			// not blank the series and restart alert timers.
+			failed[group] = true
 			continue
 		}
-		group := strings.TrimPrefix(gl.Group, l.Prefix)
 		for _, tl := range gl.Lag.TotalByTopic() {
 			k := [2]string{group, strings.TrimPrefix(tl.Topic, l.Prefix)}
 			now[k] = true
@@ -52,7 +56,11 @@ func (l *LagGauges) Tick(ctx context.Context) error {
 	}
 	// Groups and topics that went away stop being reported.
 	for k := range l.seen {
-		if !now[k] {
+		switch {
+		case now[k]:
+		case failed[k[0]]:
+			now[k] = true
+		default:
 			metrics.ConsumerLag.DeleteLabelValues(k[0], k[1])
 		}
 	}

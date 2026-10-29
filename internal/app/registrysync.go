@@ -3,14 +3,13 @@ package app
 import (
 	"context"
 	"fmt"
-	"io"
-	"net/http"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/abdullah95k/securebrand-microservices/configs"
 	"github.com/abdullah95k/securebrand-microservices/internal/config"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/detect"
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/docids"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/proxy"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/registry"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/session"
@@ -58,25 +57,10 @@ func NewRegistrySync(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, 
 		return nil, nil, err
 	}
 	rules := detect.DefaultRules()
-	hc := media.NewHTTPClient()
 	return &registrysync.Sync{
 		DB: db, Cfg: rc, Pool: pool, Rules: rules, Params: reg.ClientParams,
 		Loader:         &session.Loader{Rules: rules, AcceptLanguage: cfg.FB.AcceptLanguage},
 		AcceptLanguage: cfg.FB.AcceptLanguage, Locale: cfg.FB.Locale,
-		Fetch: func(ctx context.Context, src string) ([]byte, error) {
-			req, err := http.NewRequestWithContext(ctx, http.MethodGet, src, nil)
-			if err != nil {
-				return nil, err
-			}
-			resp, err := hc.Do(req)
-			if err != nil {
-				return nil, err
-			}
-			defer func() { _ = resp.Body.Close() }()
-			if resp.StatusCode != http.StatusOK {
-				return nil, fmt.Errorf("registry-sync: %s: status %d", src, resp.StatusCode)
-			}
-			return io.ReadAll(io.LimitReader(resp.Body, 20<<20))
-		},
+		Fetch: docids.HTTPFetcher(media.NewHTTPClient()),
 	}, reg, nil
 }
