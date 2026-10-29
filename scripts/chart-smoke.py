@@ -49,10 +49,12 @@ def psql(sql, db=DB):
 
 
 def render(args):
-    helm = args.helm
-    out = sh(helm, "template", "fbs", "deploy/helm/fbs", "-f", args.values,
-             "--set", f"image.repository={args.image.split(':')[0]}",
-             "--set", f"image.tag={args.image.split(':')[1]}",
+    repo, _, tag = args.image.rpartition(":")
+    if not repo or "/" in tag:
+        raise SystemExit(f"--image {args.image}: want repository:tag")
+    out = sh(args.helm, "template", "fbs", "deploy/helm/fbs", "-f", args.values,
+             "--set", f"image.repository={repo}",
+             "--set", f"image.tag={tag}",
              "--set", "image.pullPolicy=Never",
              "--set", f"config.kafka.topic_prefix={TOPIC_PREFIX}",
              "--set", "config.redis.db=15").stdout
@@ -133,9 +135,18 @@ def main():
     ap.add_argument("--keep", action="store_true", help="leave the containers running")
     args = ap.parse_args()
 
-    # make infra-up returns once Postgres answers; Redpanda may still be starting.
+    # make infra-up returns once Postgres answers; Redpanda may still be
+    # starting. A fresh broker also answers its first producer-ID requests
+    # with NOT_COORDINATOR for a while: produce once (idempotently, as the
+    # components do) before starting them.
     sh("docker", "exec", "fbs-redpanda-1", "rpk", "cluster", "health", "--exit-when-healthy", timeout=180)
     cleanup()
+    deadline = time.time() + 120
+    while sh("docker", "exec", "fbs-redpanda-1", "sh", "-c",
+             f"rpk topic create {TOPIC_PREFIX}warmup >/dev/null 2>&1; echo warmup | rpk topic produce {TOPIC_PREFIX}warmup", check=False).returncode != 0:
+        if time.time() > deadline:
+            raise SystemExit("Redpanda does not accept idempotent produce requests")
+        time.sleep(2)
     docs = render(args)
     configmaps = {d["metadata"]["name"]: d.get("data") or {} for d in docs if d["kind"] == "ConfigMap"}
     hooks = [d for d in docs if d["kind"] == "Job"]

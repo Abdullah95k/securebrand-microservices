@@ -30,8 +30,8 @@ func pagesImport(ctx context.Context, args []string) error {
 	rps := fs.Float64("rps", 5, "registrations per second")
 	backfill := fs.Bool("backfill", true, "backfill pages not registered before")
 	_ = fs.Parse(args)
-	if fs.NArg() != 1 || *apiURL == "" || *key == "" || *rps <= 0 {
-		return errors.New("usage: fbctl pages import --api URL --key KEY [--interval-hours N] [--rps 5] [--backfill=false] FILE")
+	if fs.NArg() != 1 || *apiURL == "" || *key == "" || *rps <= 0 || *rps > 1000 {
+		return errors.New("usage: fbctl pages import --api URL --key KEY [--interval-hours N] [--rps 5 (at most 1000)] [--backfill=false] FILE")
 	}
 	pages, err := spike.ReadPagesFile(fs.Arg(0))
 	if err != nil {
@@ -44,7 +44,8 @@ func pagesImport(ctx context.Context, args []string) error {
 	for i, p := range pages {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			printJSON(res) // what was done, and which pages failed, before the interruption
+			return fmt.Errorf("interrupted after %d of %d pages: %w", i, len(pages), ctx.Err())
 		case <-tick.C:
 		}
 		body := map[string]any{"page": p.Ref}

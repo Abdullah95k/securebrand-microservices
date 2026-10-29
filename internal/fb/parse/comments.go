@@ -75,15 +75,25 @@ func Comments(parts []gjson.Result, cc CommentContext) (CommentsResult, Report) 
 	nodes := Collect(parts, append([]string{"Comment", "Feedback"}, mediaTypenames...)...)
 	byNode := map[*Node]*fbv1.Comment{}
 	inline := map[*Node]int64{}
-	emitted := map[int64]bool{}
+	// The same comment can be quoted twice in a response (highlighted, and in
+	// the list). It is emitted from its first copy; replies nested under a
+	// later copy belong to that first one.
+	first := map[int64]*Node{}
+	canon := map[*Node]*Node{}
 	for _, n := range nodes {
 		if n.Typename != "Comment" {
 			continue
 		}
 		parent := n.Ancestor("Comment")
+		if f, ok := canon[parent]; ok {
+			parent = f
+		}
 		c, r := comment(n, parent, byNode[parent], cc)
-		if c != nil && emitted[c.CommentId] {
-			continue // the same comment quoted again elsewhere in the response
+		if c != nil {
+			if f, ok := first[c.CommentId]; ok {
+				canon[n] = f
+				continue
+			}
 		}
 		rep.Merge(r)
 		if parent != nil {
@@ -92,7 +102,7 @@ func Comments(parts []gjson.Result, cc CommentContext) (CommentsResult, Report) 
 		if c == nil {
 			continue
 		}
-		emitted[c.CommentId] = true
+		first[c.CommentId] = n
 		byNode[n] = c
 		b := CommentBundle{Comment: c}
 		owner := Owner{Type: "comment", ID: c.CommentId, PostID: cc.PostID, PageID: cc.PageID, CommentID: c.CommentId, Comment: true}

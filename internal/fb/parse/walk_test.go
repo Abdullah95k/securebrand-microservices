@@ -56,27 +56,53 @@ func wrapEdges(stories string) string {
 	return out
 }
 
-// The same comment quoted twice in one response (for example highlighted
-// and in the list) is returned once, and counted once as an inline reply.
+// The same comment quoted twice in one response, outside and inside the
+// post's Feedback (a highlighted copy, and the copy in the list), is
+// returned once, whichever comes first. A reply nested only under the
+// second copy keeps its parent and counts as inline.
 func TestCommentsQuotedTwice(t *testing.T) {
 	reply := `{"__typename":"Comment","id":"Y29tbWVudDoxXzM=","legacy_fbid":"3","body":{"text":"reply"},"created_time":1700000300,
 		"author":{"__typename":"User","id":"8","name":"B"}}`
-	parent := `{"__typename":"Comment","id":"Y29tbWVudDoxXzI=","legacy_fbid":"2","body":{"text":"top"},"created_time":1700000200,
+	bare := `{"__typename":"Comment","id":"Y29tbWVudDoxXzI=","legacy_fbid":"2","body":{"text":"top"},"created_time":1700000200,
+		"author":{"__typename":"User","id":"7","name":"A"}}`
+	full := `{"__typename":"Comment","id":"Y29tbWVudDoxXzI=","legacy_fbid":"2","body":{"text":"top"},"created_time":1700000200,
 		"author":{"__typename":"User","id":"7","name":"A"},
 		"feedback":{"__typename":"Feedback","id":"ZmVlZGJhY2s6MV8y","replies_fields":{"total_count":1},
 			"replies_connection":{"edges":[{"node":` + reply + `}]}}}`
-	body := `{"data":{"node":{"__typename":"Feedback","id":"ZmVlZGJhY2s6MQ==","highlighted":{"node":` + parent + `},
-		"comment_rendering_instance_for_feed_location":{"comments":{"edges":[{"node":` + parent + `}],
-			"page_info":{"has_next_page":false},"total_count":2}}}}}`
-	res, _ := Comments([]gjson.Result{gjson.Parse(body)}, CommentContext{PostID: 1, PageID: 5})
-	ids := map[int64]int{}
-	for _, b := range res.Comments {
-		ids[b.Comment.CommentId]++
-	}
-	if len(res.Comments) != 2 || ids[2] != 1 || ids[3] != 1 {
-		t.Fatalf("comments %v, want 2 and 3 once each", ids)
-	}
-	if len(res.Threads) != 0 {
-		t.Fatalf("threads %v: the one reply is inline", res.Threads)
+	list := `"node":{"__typename":"Feedback","id":"ZmVlZGJhY2s6MQ==",
+		"comment_rendering_instance_for_feed_location":{"comments":{"edges":[{"node":` + full + `}],
+			"page_info":{"has_next_page":false},"total_count":2}}}`
+	highlighted := `"highlighted_comment":{"node":` + bare + `}`
+	for name, body := range map[string]string{
+		"highlighted first": `{"data":{` + highlighted + `,` + list + `}}`,
+		"list first":        `{"data":{` + list + `,` + highlighted + `}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			n := 0
+			for _, x := range Collect([]gjson.Result{gjson.Parse(body)}, "Comment", "Feedback") {
+				if x.Typename == "Comment" {
+					n++
+				}
+			}
+			if n != 3 {
+				t.Fatalf("Collect returned %d comments, want both copies and the reply", n)
+			}
+			res, _ := Comments([]gjson.Result{gjson.Parse(body)}, CommentContext{PostID: 1, PageID: 5})
+			byID := map[int64]int{}
+			for _, b := range res.Comments {
+				byID[b.Comment.CommentId]++
+				if b.Comment.CommentId == 3 {
+					if p := b.Comment.ParentCommentId; p == nil || *p != 2 || b.Comment.Depth != 1 {
+						t.Fatalf("reply parent %v depth %d, want 2 and 1", p, b.Comment.Depth)
+					}
+				}
+			}
+			if len(res.Comments) != 2 || byID[2] != 1 || byID[3] != 1 {
+				t.Fatalf("comments %v, want 2 and 3 once each", byID)
+			}
+			if len(res.Threads) != 0 {
+				t.Fatalf("threads %v: the one reply is inline", res.Threads)
+			}
+		})
 	}
 }

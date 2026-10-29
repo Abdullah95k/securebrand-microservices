@@ -159,3 +159,32 @@ func TestOnDemandAdmission(t *testing.T) {
 		t.Fatalf("want 429 with Retry-After, got %d %q", r.StatusCode, r.Header.Get("Retry-After"))
 	}
 }
+
+// TestRegisterBackfillsPagesNeverRun: a page registered without its backfill
+// (here asked for; in production, a backfill that failed to start) gets it
+// when registered again, and only then.
+func TestRegisterBackfillsPagesNeverRun(t *testing.T) {
+	s := Start(t, Options{Spec: fakefb.Spec{Seed: 5, Pages: 1, PostsPerPage: 2, PostSpacing: 20 * time.Hour, MaxComments: 3}})
+	key := s.Key(t, api.ScopePagesWrite, api.ScopeJobsWrite, api.ScopeDataRead)
+	page := s.Fake.World.Pages()[0]
+	type registered struct {
+		Created  bool     `json:"created"`
+		Backfill *jobView `json:"backfill_job"`
+	}
+	register := func(body string) registered {
+		return decodeBody[registered](t, s.Do(t, key, "POST", "/v1/pages", []byte(body)), http.StatusCreated)
+	}
+	if r := register(fmt.Sprintf(`{"page":%q,"backfill":false}`, page.Vanity)); !r.Created || r.Backfill != nil {
+		t.Fatalf("first registration: %+v", r)
+	}
+	r := register(fmt.Sprintf(`{"page":%q}`, page.Vanity))
+	if r.Created || r.Backfill == nil {
+		t.Fatalf("second registration of a page that never ran: %+v", r)
+	}
+	if j := s.waitJob(t, key, r.Backfill.ID, 2*time.Minute); j.Status != "completed" {
+		t.Fatalf("backfill: %+v", j)
+	}
+	if r := register(fmt.Sprintf(`{"page":%q}`, page.Vanity)); r.Created || r.Backfill != nil {
+		t.Fatalf("third registration: %+v", r)
+	}
+}

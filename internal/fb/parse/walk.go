@@ -34,7 +34,9 @@ func (n *Node) Ancestor(typenames ...string) *Node {
 // id at the same place (under the same collected ancestors, as when parts
 // repeat it) is returned once. The same object quoted elsewhere, such as a
 // shared post inside the story that shares it, is returned again: the first
-// copy must not hide the one in its own place.
+// copy must not hide the one in its own place. Objects without an id are
+// never merged, but they are placed by typename alone, so two id-less
+// siblings of one typename share the place of their children.
 func Collect(parts []gjson.Result, want ...string) []*Node {
 	w := make(map[string]bool, len(want))
 	for _, t := range want {

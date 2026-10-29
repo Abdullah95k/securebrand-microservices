@@ -101,9 +101,10 @@ keda:
   # When the brokers need SASL and/or TLS: an existing Secret (in the
   # release namespace) whose keys are KEDA's Kafka authentication parameters
   # (sasl: plaintext|scram_sha256|scram_sha512, username, password,
-  # tls: enable, ca, cert, key). authParams lists the keys it holds.
+  # tls: enable, ca, cert, key). authParams must list exactly the keys it
+  # holds: KEDA rejects an empty tls. For TLS brokers add tls and ca.
   authSecret: ""
-  authParams: [sasl, username, password, tls, ca]
+  authParams: [sasl, username, password]
 
 # Hooks run `fbctl migrate up`, `fbctl kafka apply` and, when enabled,
 # `fbctl schemas apply` before installs and upgrades.

@@ -69,7 +69,7 @@ The query ids in `configs/queries.seed.yaml` are placeholders, and the parsers w
 | Setting | Notes |
 |---|---|
 | `image.tag` | The released version. Also `image.browserTag` with `config.fb.browser.enabled: true` if Phase 0 showed pages that need the browser fallback. |
-| `config.kafka.brokers`, `keda.kafkaBootstrap` | When the brokers need SASL or TLS: `config.kafka.sasl.mechanism` and `config.kafka.tls`, plus `keda.authSecret` (a Secret with KEDA's Kafka parameters, such as `sasl`, `username`, `password`, `tls`, `ca`; list its keys in `keda.authParams`) |
+| `config.kafka.brokers`, `keda.kafkaBootstrap` | When the brokers need SASL or TLS: `config.kafka.sasl.mechanism` and `config.kafka.tls`, plus `keda.authSecret`: a Secret with KEDA's Kafka parameters. `keda.authParams` must list exactly the keys the Secret holds: `sasl`, `username`, `password` by default; add `tls` (`enable`) and `ca` for TLS brokers. |
 | `config.redis.addr`, `config.redis.tls` | |
 | `tlsFiles.existingSecret` | A Secret with the CA, and any client certificate and key, mounted at `/etc/fbs-tls`. Point `config.kafka.tls.ca_file` and `config.redis.tls.ca_file` at it, for example `/etc/fbs-tls/ca.pem`. |
 | `config.s3` | Endpoint, region, buckets |
