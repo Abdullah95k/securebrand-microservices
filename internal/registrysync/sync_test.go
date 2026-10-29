@@ -14,6 +14,7 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/app"
 	"github.com/abdullah95k/securebrand-microservices/internal/config"
 	"github.com/abdullah95k/securebrand-microservices/internal/fakefb"
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/browser"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/registry"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/metrics"
 	"github.com/abdullah95k/securebrand-microservices/internal/registrysync"
@@ -375,4 +376,26 @@ func value(m prometheus.Metric) float64 {
 		return c.GetValue()
 	}
 	return pb.GetGauge().GetValue()
+}
+
+// A rotated doc_id the bundles do not declare is read from the request the
+// rendered canary page makes itself (fb.browser), then checked and
+// promoted like any candidate.
+func TestSyncRendersOperationsTheBundlesOmit(t *testing.T) {
+	if _, err := browser.FindBinary(""); err != nil {
+		t.Skip(err)
+	}
+	f := start(t, fakefb.Faults{}, func(c *config.Config) {
+		c.FB.Browser.Enabled = true
+		c.FB.Browser.Timeout = time.Minute
+	})
+	rotated := f.rotate()
+	f.fake.OmitFromBundle("ProfileCometTimelineFeedRefetchQuery")
+	rep := f.run()
+	t.Logf("rendered %v, candidates %v, promoted %d", rep.Rendered, rep.Candidates, len(rep.Promoted))
+	want := rotated["ProfileCometTimelineFeedRefetchQuery"]
+	if rep.Rendered["ProfileCometTimelineFeedRefetchQuery"] != want || f.rows()["timeline/"+want] != registry.StatusActive ||
+		len(rep.NotFound) != 0 || rep.Status != registrysync.StatusOK {
+		t.Fatalf("render discovery: %+v", rep)
+	}
 }

@@ -8,6 +8,7 @@ import (
 
 	"github.com/abdullah95k/securebrand-microservices/configs"
 	"github.com/abdullah95k/securebrand-microservices/internal/config"
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/browser"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/detect"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/docids"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/proxy"
@@ -57,10 +58,19 @@ func NewRegistrySync(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, 
 		return nil, nil, err
 	}
 	rules := detect.DefaultRules()
-	return &registrysync.Sync{
+	s := &registrysync.Sync{
 		DB: db, Cfg: rc, Pool: pool, Rules: rules, Params: reg.ClientParams,
 		Loader:         &session.Loader{Rules: rules, AcceptLanguage: cfg.FB.AcceptLanguage},
 		AcceptLanguage: cfg.FB.AcceptLanguage, Locale: cfg.FB.Locale,
 		Fetch: docids.HTTPFetcher(media.NewHTTPClient()),
-	}, reg, nil
+	}
+	if cfg.FB.Browser.Enabled {
+		b, err := browser.NewBootstrapper(cfg.FB.Browser, cfg.FB.AcceptLanguage)
+		if err != nil {
+			return nil, nil, fmt.Errorf("fb.browser is enabled: %w", err)
+		}
+		s.Loader.Browser = b
+		s.Render = b.Capture
+	}
+	return s, reg, nil
 }

@@ -31,7 +31,9 @@ spec:
       terminationGracePeriodSeconds: {{ $c.terminationGracePeriodSeconds | default 30 }}
       containers:
         - name: {{ $name }}
-          image: "{{ $root.Values.image.repository }}:{{ $root.Values.image.tag }}"
+          {{- $tag := $root.Values.image.tag }}
+          {{- if and $c.browser $root.Values.image.browserTag }}{{ $tag = $root.Values.image.browserTag }}{{ end }}
+          image: "{{ $root.Values.image.repository }}:{{ $tag }}"
           imagePullPolicy: {{ $root.Values.image.pullPolicy }}
           command: {{- toYaml $c.command | nindent 12 }}
           env: {{- include "fbs.env" $root | nindent 12 }}

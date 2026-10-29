@@ -6,6 +6,7 @@
 //	fbs-spike preflight      --tiers isp,residential --page <page>
 //	fbs-spike docids         --page <page>[,<page>...] [--write-registry my-seed.yaml]
 //	fbs-spike har            --in session.har --write-registry my-seed.yaml [--fixtures-dir DIR --name brand_x]
+//	fbs-spike render         --page <page> [--tier T] [--write-registry my-seed.yaml]   (needs Chromium)
 //	fbs-spike capture        --registry my-seed.yaml --page <page> --name brand_x [--dir testdata/fb]
 //	fbs-spike check-fixtures --dir testdata/fb
 //	fbs-spike run            --registry my-seed.yaml --pages pages.csv --tier residential --out results.jsonl
@@ -35,6 +36,8 @@ import (
 
 	"github.com/abdullah95k/securebrand-microservices/configs"
 	"github.com/abdullah95k/securebrand-microservices/internal/config"
+	"github.com/abdullah95k/securebrand-microservices/internal/crawl/task"
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/browser"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/detect"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/graphql"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/proxy"
@@ -219,6 +222,8 @@ func main() {
 			fmt.Fprintln(os.Stderr, "some doc_ids were not found: use the HAR fallback (docs/runbooks/phase0-spike.md)")
 			os.Exit(exitNeedsAction)
 		}
+	case "render":
+		os.Exit(render(ctx, cfg, f, st, seed))
 	case "capture":
 		if err := spike.CheckRegistry(seed, cfg.FB.BaseURL); err != nil {
 			fail(err)
@@ -484,8 +489,64 @@ func printJSON(v any) {
 	_ = enc.Encode(v)
 }
 
+// render loads a page in headless Chromium through the tier and lists the
+// GraphQL operations the page itself requested: the automated version of
+// recording a HAR by hand.
+func render(ctx context.Context, cfg *config.Config, f flags, st spike.Stack, seed registry.Seed) int {
+	page := firstPage(f)
+	ref, err := task.NormalizeRef(page)
+	if err != nil {
+		fail(err)
+	}
+	b, err := browser.NewBootstrapper(cfg.FB.Browser, cfg.FB.AcceptLanguage)
+	if err != nil {
+		fail(err)
+	}
+	id, err := st.Pool.Acquire(ctx, f.tier)
+	if err != nil {
+		fail(err)
+	}
+	defer st.Pool.Release(id)
+	u, _ := id.Base.Parse(task.RefPath(ref))
+	xs, err := b.Capture(ctx, id, u.String())
+	if err != nil {
+		fail(err)
+	}
+	found := map[string]string{}
+	for _, x := range xs {
+		var keys []string
+		var vars map[string]any
+		if json.Unmarshal(x.Variables, &vars) == nil {
+			for k := range vars {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+		}
+		fmt.Printf("%-48s doc_id %-20s status %d  variables %s\n", x.FriendlyName, x.DocID, x.Status, strings.Join(keys, ","))
+		if x.FriendlyName != "" && x.DocID != "" {
+			found[x.FriendlyName] = x.DocID
+		}
+	}
+	merged, dr := spike.MergeDocIDs(seed, found)
+	out, _ := yaml.Marshal(map[string]any{"registry_queries_found": dr.Found, "missing": dr.Missing, "requests_captured": len(xs)})
+	fmt.Print(string(out))
+	if f.writeRegistry != "" {
+		if err := spike.WriteRegistry(f.writeRegistry, merged, "fbs-spike render ("+page+")"); err != nil {
+			fail(err)
+		}
+		fmt.Fprintf(os.Stderr, "wrote %s\n", f.writeRegistry)
+	}
+	if len(dr.Missing) > 0 {
+		// A page load only requests the first timeline page; comment and
+		// reply queries need the HAR fallback (clicks) or the bundles.
+		fmt.Fprintln(os.Stderr, "the page did not request every registry query: use docids or the HAR fallback for the rest")
+		return exitNeedsAction
+	}
+	return 0
+}
+
 func usage() {
-	cmds := []string{"phase0", "preflight", "docids", "har", "capture", "check-fixtures", "run", "report", "version"}
+	cmds := []string{"phase0", "preflight", "docids", "har", "render", "capture", "check-fixtures", "run", "report", "version"}
 	sort.Strings(cmds)
 	fmt.Fprintf(os.Stderr, "usage: fbs-spike <%s> [flags]   (fbs-spike <cmd> -h for flags)\nsee docs/runbooks/phase0-spike.md\n", strings.Join(cmds, "|"))
 	os.Exit(exitUsage)

@@ -104,6 +104,28 @@ groups:
             provider; remove the endpoints or route around the tier.
           runbook_url: https://github.com/abdullah95k/securebrand-microservices/blob/main/docs/runbooks/operations.md#block-storm-block-rate--10
 
+      - alert: FbsBrowserFallbackSaturated
+        expr: sum(rate(fbs_bootstrap_total{method="browser", outcome=~"capped|busy"}[15m])) > 0.05
+        for: 30m
+        labels: {severity: warning}
+        annotations:
+          summary: Pages that need the browser fallback are turned away
+          description: >-
+            More HTML loads carry no tokens than fb.browser.max_share or
+            max_concurrent allow; those bootstraps fail and their tasks retry.
+            Facebook may now require JavaScript on more pages.
+          runbook_url: https://github.com/abdullah95k/securebrand-microservices/blob/main/docs/runbooks/operations.md#browser-fallback
+      - alert: FbsBrowserFallbackFailing
+        expr: |
+          sum(rate(fbs_bootstrap_total{method="browser", outcome=~"error|no_tokens"}[30m]))
+            / clamp_min(sum(rate(fbs_bootstrap_total{method="browser", outcome=~"ok|error|no_tokens"}[30m])), 1e-9) > 0.5
+        for: 30m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $value | humanizePercentage }} of browser bootstraps fail"
+          description: Chromium fails to start or render, or the rendered pages carry no tokens either.
+          runbook_url: https://github.com/abdullah95k/securebrand-microservices/blob/main/docs/runbooks/operations.md#browser-fallback
+
   - name: fbs.registry
     rules:
       - alert: FbsRegistryStale

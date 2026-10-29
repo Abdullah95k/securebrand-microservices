@@ -145,6 +145,24 @@ type FB struct {
 	// AIMD moves the fleet-wide ceiling (starting at GlobalRPS) with the
 	// block rate the whole fleet sees.
 	AIMD AIMD `koanf:"aimd"`
+	// Browser is the headless-Chromium fallback (internal/fb/browser).
+	Browser Browser `koanf:"browser"`
+}
+
+// Browser configures the headless-Chromium fallback: bootstraps of pages
+// whose HTML carries no tokens, and doc_id discovery from the requests a
+// rendered page makes.
+type Browser struct {
+	Enabled bool   `koanf:"enabled"`
+	Binary  string `koanf:"binary"` // "" = $FBS_BROWSER_BINARY, PATH, /opt/pw-browsers/chromium
+	// MaxConcurrent caps the browsers a process runs at once; MaxShare the
+	// share of HTML loads that may fall back to a browser.
+	MaxConcurrent int           `koanf:"max_concurrent"`
+	MaxShare      float64       `koanf:"max_share"`
+	Timeout       time.Duration `koanf:"timeout"`
+	// NoSandbox runs Chromium without its sandbox, for containers that do
+	// not allow it (it is always off as root).
+	NoSandbox bool `koanf:"no_sandbox"`
 }
 
 // AIMD tunes the fleet ceiling controller (internal/fb/ratelimit).

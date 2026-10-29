@@ -98,6 +98,21 @@ The manual path is still there:
 
 `GET /v1/admin/queries` shows each entry's `last_check`, `last_checked_at` and `last_ok_at`. The sync's own requests are counted under `query="registry_sync:<name>"` in `fbs_fb_requests_total`, apart from crawl traffic.
 
+## Browser fallback
+
+`fb.browser.enabled` turns on the headless-Chromium fallback (internal/fb/browser). It needs the image built with `docker build --target browser`; set `image.browserTag` in the chart so the crawlers and registry-sync use it.
+
+- **Bootstraps:** when a page's HTML carries no tokens (it needs JavaScript first), the identity is bootstrapped in a fresh Chromium. The browser goes through the identity's own exit (proxy credentials are answered on the challenge) with its user agent, and its cookies and tokens are copied into the identity. The plain HTTP client then continues as usual.
+- **Limits:** at most `max_share` (2%) of HTML loads and `max_concurrent` (2) browsers per pod. A capped bootstrap fails at once (`fbs_bootstrap_total{method="browser",outcome="capped"|"busy"}`) and the task retries. It never holds a crawl slot waiting for a browser.
+- **Doc_id discovery:** when the bundles declare no doc_id for a registry query, fbs-registry-sync renders a canary page and reads the doc_id from the GraphQL requests the page makes itself. These show under `rendered` in the run report.
+- **Sandbox:** inside containers, Chromium's sandbox usually needs privileges pods do not have. Set `fb.browser.no_sandbox: true` there (it is always off as root).
+
+Signals:
+
+- `fbs_bootstrap_total{method="browser"}` by outcome;
+- `FbsBrowserFallbackSaturated`: more pages need JavaScript than the cap allows. Raise `max_share` and `max_concurrent`, and give the crawler pods the CPU and memory for that many browsers. A render of a fakefb page took about a second in development; size real pages under load first;
+- `FbsBrowserFallbackFailing`: Chromium fails to render, or the rendered pages carry no tokens either.
+
 ## Schema drift
 
 Symptom: `fbs_parse_total{outcome="drift"}` or a new

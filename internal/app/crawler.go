@@ -22,6 +22,7 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/lanes"
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/rawsink"
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/stage"
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/browser"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/detect"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/graphql"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/proxy"
@@ -112,8 +113,16 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 		slog.Warn("graphql: query breaker", "query", key, "from", from.String(), "to", to.String())
 	}
 	supp := gdpr.NewSuppression(db)
+	loader := &session.Loader{Rules: rules, AcceptLanguage: cfg.FB.AcceptLanguage}
+	if cfg.FB.Browser.Enabled {
+		b, err := browser.NewBootstrapper(cfg.FB.Browser, cfg.FB.AcceptLanguage)
+		if err != nil {
+			return nil, fmt.Errorf("fb.browser is enabled: %w", err)
+		}
+		loader.Browser = b
+	}
 	deps := &stage.Deps{
-		Cfg: cfg, Pool: pool, Proxies: proxies, Loader: &session.Loader{Rules: rules, AcceptLanguage: cfg.FB.AcceptLanguage},
+		Cfg: cfg, Pool: pool, Proxies: proxies, Loader: loader,
 		GQL: gql, Producer: producer, Jobs: jobs.New(rdb), Ckpt: checkpoint.New(rdb), DB: db, Suppression: supp,
 		Emit: &emit.Emitter{Producer: producer, HMACKey: []byte(cfg.Privacy.AuthorHMACKey),
 			Pseudonymize: cfg.Privacy.PIIMode == "pseudonymized", Suppression: supp},

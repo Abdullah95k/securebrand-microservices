@@ -26,6 +26,7 @@ import (
 
 	"github.com/abdullah95k/securebrand-microservices/internal/config"
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/task"
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/browser"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/detect"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/docids"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/graphql"
@@ -99,10 +100,13 @@ type Report struct {
 	Operations int               `json:"operations"`
 	// NotFound are friendly names of registry queries no bundle declared:
 	// Facebook may have renamed the operation.
-	NotFound   []string    `json:"not_found,omitempty"`
-	Candidates []string    `json:"candidates,omitempty"` // name/doc_id recorded this run
-	Checks     []Check     `json:"checks,omitempty"`
-	Promoted   []Promotion `json:"promoted,omitempty"`
+	NotFound []string `json:"not_found,omitempty"`
+	// Rendered are doc_ids read from the requests a rendered canary page
+	// made, for friendly names the bundles did not declare.
+	Rendered   map[string]string `json:"rendered,omitempty"`
+	Candidates []string          `json:"candidates,omitempty"` // name/doc_id recorded this run
+	Checks     []Check           `json:"checks,omitempty"`
+	Promoted   []Promotion       `json:"promoted,omitempty"`
 	// Proposed are the promotions a dry run (promote: false) would make.
 	Proposed []Promotion `json:"proposed,omitempty"`
 	Retired  []string    `json:"retired,omitempty"` // name/doc_id
@@ -134,6 +138,10 @@ type Sync struct {
 	// Fetch downloads a bundle over direct egress; with
 	// Cfg.BundlesViaProxy the canary page's identity is used instead.
 	Fetch docids.Fetcher
+	// Render, when set (fb.browser), renders a canary page in a browser
+	// and returns the GraphQL requests the page made; it is used when the
+	// bundles do not declare some registry query's friendly name.
+	Render func(ctx context.Context, id *session.Identity, rawURL string) ([]browser.Exchange, error)
 
 	scanner *docids.Scanner
 	now     func() time.Time
@@ -259,6 +267,7 @@ func (s *Sync) run(ctx context.Context, rep *Report) error {
 	if err != nil {
 		return err
 	}
+	s.renderMissing(ctx, pages, entries, found, rep)
 	rep.Discovered = map[string]string{}
 	for _, e := range entries {
 		if d, ok := found[e.FriendlyName]; ok {
@@ -290,6 +299,42 @@ func (s *Sync) run(ctx context.Context, rep *Report) error {
 		rep.Status = StatusDegraded
 	}
 	return nil
+}
+
+// renderMissing renders canary pages in a browser, while some registry
+// friendly name is still missing, and takes the doc_ids from the GraphQL
+// requests the page made. A failed render only leaves names missing.
+func (s *Sync) renderMissing(ctx context.Context, pages []*canary, entries []*entry, found map[string]string, rep *Report) {
+	if s.Render == nil {
+		return
+	}
+	missing := map[string]bool{}
+	for _, e := range entries {
+		if _, ok := found[e.FriendlyName]; !ok && e.Status != registry.StatusRetired {
+			missing[e.FriendlyName] = true
+		}
+	}
+	for _, c := range pages {
+		if len(missing) == 0 {
+			return
+		}
+		xs, err := s.Render(ctx, c.id, c.url.String())
+		if err != nil {
+			slog.Warn("registry-sync: render", "page", c.ref, "err", err)
+			continue
+		}
+		for _, x := range xs {
+			if x.DocID == "" || !missing[x.FriendlyName] {
+				continue
+			}
+			if rep.Rendered == nil {
+				rep.Rendered = map[string]string{}
+			}
+			found[x.FriendlyName] = x.DocID
+			rep.Rendered[x.FriendlyName] = x.DocID
+			delete(missing, x.FriendlyName)
+		}
+	}
 }
 
 // loadCanaries loads every canary page through its own identity.
