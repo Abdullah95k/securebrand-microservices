@@ -10,6 +10,7 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kadm"
 
+	"github.com/abdullah95k/securebrand-microservices/internal/app"
 	"github.com/abdullah95k/securebrand-microservices/internal/config"
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/jobs"
 	"github.com/abdullah95k/securebrand-microservices/internal/dispatch"
@@ -21,7 +22,6 @@ import (
 	plog "github.com/abdullah95k/securebrand-microservices/internal/platform/log"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/metrics"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/pg"
-	"github.com/abdullah95k/securebrand-microservices/internal/platform/redisx"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/run"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/s3x"
 	"github.com/abdullah95k/securebrand-microservices/internal/scheduler"
@@ -45,13 +45,16 @@ func runScheduler(ctx context.Context, cfg *config.Config) error {
 		return err
 	}
 	defer db.Close()
-	rdb, err := redisx.Open(ctx, cfg.Redis.Addr, cfg.Redis.Password, cfg.Redis.DB)
+	rdb, err := app.OpenRedis(ctx, cfg)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = rdb.Close() }()
-	producer, err := kafka.NewProducer(kafka.ClientConfig{Brokers: cfg.Kafka.Brokers, ClientID: cfg.Kafka.ClientID + "-scheduler",
-		TopicPrefix: cfg.Kafka.TopicPrefix, Linger: cfg.Kafka.ProduceLinger})
+	kcfg, err := app.KafkaClient(cfg, "-scheduler")
+	if err != nil {
+		return err
+	}
+	producer, err := kafka.NewProducer(kcfg)
 	if err != nil {
 		return err
 	}

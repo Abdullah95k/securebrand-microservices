@@ -11,6 +11,7 @@
 //	fbctl replay [--query Q] [--since 24h] [--fixtures-dir DIR]   re-parse captured raw responses; exit 3 while some drift
 //	fbctl fixtures scrub --dir testdata/fb/<query>/<case>
 //	fbctl media ack --consumer analysis [--status processed]   (dev: simulate analysis-service acks)
+//	fbctl pages import --api URL --key KEY FILE   register many pages through the API (safe to re-run)
 package main
 
 import (
@@ -19,7 +20,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/abdullah95k/securebrand-microservices/internal/config"
@@ -38,7 +41,8 @@ commands:
   dlq replay [--reason R] [--max N]
   replay [--prefix raw-failures] [--query Q,..] [--since 168h] [--fixtures-dir DIR --name N --samples 3]
   fixtures scrub --dir DIR
-  media ack --consumer NAME [--status processed|failed_permanent|failed_retryable] [--max N]`)
+  media ack --consumer NAME [--status processed|failed_permanent|failed_retryable] [--max N]
+  pages import --api URL --key KEY [--interval-hours N] [--rps 5] [--backfill=false] FILE`)
 	os.Exit(2)
 }
 
@@ -85,6 +89,11 @@ func main() {
 		err = fixturesScrub(rest)
 	case "media ack":
 		err = mediaAck(ctx, cfg, rest)
+	case "pages import":
+		// Long imports outlive the 30-minute command timeout; Ctrl-C stops them.
+		ictx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		err = pagesImport(ictx, rest)
+		stop()
 	default:
 		usage()
 	}

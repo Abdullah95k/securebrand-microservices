@@ -24,6 +24,7 @@ redis:
   addr: "localhost:6379"
   password: ""
   db: 0
+  tls: {enabled: false}   # see kafka.tls
 
 kafka:
   brokers: ["localhost:19092"]
@@ -31,6 +32,20 @@ kafka:
   topic_prefix: ""        # prepended to every topic name (useful for shared clusters)
   produce_linger: 5ms
   compression: zstd
+  # TLS to the brokers: the system roots, plus ca_file when set; cert_file
+  # and key_file for mutual TLS; server_name to override the verified name.
+  tls:
+    enabled: false
+    ca_file: ""
+    cert_file: ""
+    key_file: ""
+    server_name: ""
+  # SASL: plain, scram-sha-256 or scram-sha-512 ("" = none). Put the
+  # password in FBS_KAFKA__SASL__PASSWORD, not here.
+  sasl:
+    mechanism: ""
+    username: ""
+    password: ""
   # Schema Registry for the public fb.v1 contract (`fbctl schemas apply`).
   # Records stay plain protobuf with the type in the fbs-type header; the
   # registry documents the schemas and rejects incompatible changes.

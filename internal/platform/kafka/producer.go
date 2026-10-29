@@ -6,12 +6,14 @@ package kafka
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/sasl"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/metrics"
@@ -35,6 +37,22 @@ type ClientConfig struct {
 	ClientID    string
 	TopicPrefix string
 	Linger      time.Duration
+	// TLS, when set, encrypts the broker connections; SASL authenticates.
+	TLS  *tls.Config
+	SASL sasl.Mechanism
+}
+
+// Opts are the client options every client of this config needs: brokers,
+// client id, TLS and SASL.
+func (c ClientConfig) Opts() []kgo.Opt {
+	opts := []kgo.Opt{kgo.SeedBrokers(c.Brokers...), kgo.ClientID(c.ClientID)}
+	if c.TLS != nil {
+		opts = append(opts, kgo.DialTLSConfig(c.TLS.Clone()))
+	}
+	if c.SASL != nil {
+		opts = append(opts, kgo.SASL(c.SASL))
+	}
+	return opts
 }
 
 // Producer produces protobuf records.
@@ -44,15 +62,13 @@ type Producer struct {
 }
 
 func NewProducer(cfg ClientConfig, extra ...kgo.Opt) (*Producer, error) {
-	opts := []kgo.Opt{
-		kgo.SeedBrokers(cfg.Brokers...),
-		kgo.ClientID(cfg.ClientID),
+	opts := append(cfg.Opts(),
 		kgo.RequiredAcks(kgo.AllISRAcks()),
 		kgo.ProducerBatchCompression(kgo.ZstdCompression(), kgo.Lz4Compression(), kgo.NoCompression()),
 		kgo.ProducerLinger(cfg.Linger),
-		kgo.ProducerBatchMaxBytes(1 << 20),
+		kgo.ProducerBatchMaxBytes(1<<20),
 		kgo.AllowAutoTopicCreation(),
-	}
+	)
 	opts = append(opts, extra...)
 	cl, err := kgo.NewClient(opts...)
 	if err != nil {

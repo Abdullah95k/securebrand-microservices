@@ -81,7 +81,9 @@ paths:
   /pages:
     post:
       summary: Register a page for scheduled re-scrapes and start its backfill (lane p2)
-      description: Requires `pages:write`.
+      description: >-
+        Requires `pages:write`. Registering a page again is safe: it keeps the schedule (an explicit
+        interval only shortens it) and starts no second backfill unless `backfill: true` asks for one.
       requestBody:
         required: true
         content:
@@ -96,6 +98,7 @@ paths:
                 type: object
                 properties:
                   page_ref: {type: string}
+                  created: {type: boolean, description: The page was not registered before}
                   schedule: {type: object}
                   backfill_job: {$ref: '#/components/schemas/Job'}
     get:
@@ -344,7 +347,7 @@ components:
                   description: >-
                     Fixed re-scrape interval. Without it the page is scheduled adaptively: its tier
                     (T0 3h ... T4 7d) follows its posting rate after every job.
-            backfill: {type: boolean, default: true}
+            backfill: {type: boolean, description: "Full crawl now. Default: only for a page not registered before."}
     JobStatus:
       type: string
       enum: [running, cancelling, completed, partial, failed, cancelled]

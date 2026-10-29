@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"runtime/pprof"
 	"sort"
 	"strconv"
 	"strings"
@@ -13,12 +14,14 @@ import (
 	"time"
 
 	dto "github.com/prometheus/client_model/go"
+	"github.com/twmb/franz-go/pkg/kadm"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	fbv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fb/v1"
 	"github.com/abdullah95k/securebrand-microservices/internal/api"
 	"github.com/abdullah95k/securebrand-microservices/internal/config"
 	"github.com/abdullah95k/securebrand-microservices/internal/fakefb"
+	"github.com/abdullah95k/securebrand-microservices/internal/persist"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/metrics"
 	"github.com/abdullah95k/securebrand-microservices/internal/topics"
 )
@@ -161,6 +164,20 @@ func TestLoadPipeline(t *testing.T) {
 
 	before := s.Fake.Stats()
 	_, bc0, bs0 := sample("fbs_persist_batch_seconds", map[string]string{"entity": "comment"})
+	if path := os.Getenv("FBS_LOADTEST_CPUPROFILE"); path != "" {
+		f, err := os.Create(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := pprof.StartCPUProfile(f); err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			pprof.StopCPUProfile()
+			_ = f.Close()
+		}()
+	}
+	stopBacklog := watchBacklog(s, 2*time.Second)
 	start := time.Now()
 	// Submitted one after the other (a few ms each): every job starts as
 	// soon as it is accepted, and a refused submission fails the test now.
@@ -178,6 +195,7 @@ func TestLoadPipeline(t *testing.T) {
 	}
 	elapsed := time.Since(start)
 	after := s.Fake.Stats()
+	backlog := stopBacklog()
 
 	ctx := context.Background()
 	statuses := map[string]int{}
@@ -216,10 +234,76 @@ func TestLoadPipeline(t *testing.T) {
 	if bc > 0 {
 		r.add("Persister comment batches", "%d, mean %.1f ms", bc, 1000*bs/float64(bc))
 	}
+	for _, st := range []string{"page", "post", "thread", "persister"} {
+		b := backlog[st]
+		r.add("Backlog: "+st, "peak %d, mean %.0f records", b.peak, b.mean)
+	}
 	r.add("fakefb latency", "%s", envDuration("FBS_LOADTEST_LATENCY", 0))
 	r.write(t)
 	if statuses["completed"] != len(ids) || gotComments != want || gotPosts != wantPosts {
 		t.Fatalf("incomplete: jobs %v, posts %d/%d, comments %d/%d", statuses, gotPosts, wantPosts, gotComments, want)
+	}
+}
+
+type backlogStat struct {
+	peak int64
+	mean float64
+}
+
+// watchBacklog samples, every interval, the records waiting for each crawl
+// stage (all lanes) and for the persister: the stage whose backlog grows
+// is the one that saturates first. The returned func stops it.
+func watchBacklog(s *Stack, every time.Duration) func() map[string]backlogStat {
+	adm := kadm.NewClient(s.Producer.Client())
+	label := map[string]string{s.Producer.Topic(persist.Group): "persister"}
+	for _, st := range []string{"page", "post", "thread"} {
+		for _, l := range []string{"p0", "p1", "p2"} {
+			label[s.Producer.Topic("fbs-crawler-"+st+"-"+l)] = st
+		}
+	}
+	groups := make([]string, 0, len(label))
+	for g := range label {
+		groups = append(groups, g)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	peak, sum := map[string]int64{}, map[string]int64{}
+	n := 0
+	go func() {
+		defer close(done)
+		t := time.NewTicker(every)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+			lags, err := adm.Lag(ctx, groups...)
+			if err != nil {
+				continue
+			}
+			tot := map[string]int64{}
+			for g, l := range lags {
+				if l.Error() == nil {
+					tot[label[g]] += l.Lag.Total()
+				}
+			}
+			for st, v := range tot {
+				peak[st] = max(peak[st], v)
+				sum[st] += v
+			}
+			n++
+		}
+	}()
+	return func() map[string]backlogStat {
+		cancel()
+		<-done
+		out := map[string]backlogStat{}
+		for st, p := range peak {
+			out[st] = backlogStat{peak: p, mean: float64(sum[st]) / float64(max(n, 1))}
+		}
+		return out
 	}
 }
 

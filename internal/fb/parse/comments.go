@@ -75,19 +75,24 @@ func Comments(parts []gjson.Result, cc CommentContext) (CommentsResult, Report) 
 	nodes := Collect(parts, append([]string{"Comment", "Feedback"}, mediaTypenames...)...)
 	byNode := map[*Node]*fbv1.Comment{}
 	inline := map[*Node]int64{}
+	emitted := map[int64]bool{}
 	for _, n := range nodes {
 		if n.Typename != "Comment" {
 			continue
 		}
 		parent := n.Ancestor("Comment")
+		c, r := comment(n, parent, byNode[parent], cc)
+		if c != nil && emitted[c.CommentId] {
+			continue // the same comment quoted again elsewhere in the response
+		}
+		rep.Merge(r)
 		if parent != nil {
 			inline[parent]++
 		}
-		c, r := comment(n, parent, byNode[parent], cc)
-		rep.Merge(r)
 		if c == nil {
 			continue
 		}
+		emitted[c.CommentId] = true
 		byNode[n] = c
 		b := CommentBundle{Comment: c}
 		owner := Owner{Type: "comment", ID: c.CommentId, PostID: cc.PostID, PageID: cc.PageID, CommentID: c.CommentId, Comment: true}

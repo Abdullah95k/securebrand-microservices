@@ -70,7 +70,8 @@ type registerReq struct {
 		Enabled       *bool `json:"enabled,omitempty"`
 		IntervalHours *int  `json:"interval_hours,omitempty"`
 	} `json:"schedule,omitempty"`
-	// Backfill runs a full crawl now (default true).
+	// Backfill runs a full crawl now. By default only for a page not
+	// registered before, so registering a list again starts nothing twice.
 	Backfill *bool `json:"backfill,omitempty"`
 	CrawlOptions
 }
@@ -114,14 +115,16 @@ func (s *Server) registerPage(w http.ResponseWriter, r *http.Request) {
 	if req.MaxAgeDays != nil {
 		maxAge = req.MaxAgeDays
 	}
+	var created bool
 	err = pgx.BeginFunc(r.Context(), s.DB, func(tx pgx.Tx) error {
-		_, err := tx.Exec(r.Context(), `INSERT INTO page_schedule (page_ref, enabled, interval_seconds, next_run_at, options, max_age_days, max_posts, adaptive)
+		err := tx.QueryRow(r.Context(), `INSERT INTO page_schedule (page_ref, enabled, interval_seconds, next_run_at, options, max_age_days, max_posts, adaptive)
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
 			ON CONFLICT (page_ref) DO UPDATE SET enabled = page_schedule.enabled OR EXCLUDED.enabled,
 				interval_seconds = CASE WHEN EXCLUDED.adaptive THEN page_schedule.interval_seconds
 					ELSE LEAST(page_schedule.interval_seconds, EXCLUDED.interval_seconds) END,
-				adaptive = page_schedule.adaptive AND EXCLUDED.adaptive`,
-			ref, enabled, int(interval.Seconds()), next, opts, maxAge, req.MaxPosts, adaptive)
+				adaptive = page_schedule.adaptive AND EXCLUDED.adaptive
+			RETURNING old.page_ref IS NULL`,
+			ref, enabled, int(interval.Seconds()), next, opts, maxAge, req.MaxPosts, adaptive).Scan(&created)
 		if err != nil {
 			return err
 		}
@@ -132,9 +135,9 @@ func (s *Server) registerPage(w http.ResponseWriter, r *http.Request) {
 		serverError(w, err)
 		return
 	}
-	resp := map[string]any{"page_ref": ref, "schedule": map[string]any{"enabled": enabled, "interval_seconds": int(interval.Seconds()),
-		"next_run_at": next, "adaptive": adaptive}}
-	if req.Backfill == nil || *req.Backfill {
+	resp := map[string]any{"page_ref": ref, "created": created, "schedule": map[string]any{"enabled": enabled,
+		"interval_seconds": int(interval.Seconds()), "next_run_at": next, "adaptive": adaptive}}
+	if (req.Backfill == nil && created) || (req.Backfill != nil && *req.Backfill) {
 		j, _, err := s.Dispatch.Create(r.Context(), dispatch.Request{ClientID: &c.ID, Kind: dispatch.KindBackfill,
 			Lane: taskv1.Lane_LANE_P2, Mode: "full", PageRef: ref, Limits: backfillLim,
 			Params: map[string]any{"page": req.Page}}, 0)

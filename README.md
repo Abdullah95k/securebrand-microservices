@@ -24,7 +24,7 @@ It runs self-hosted, on Kubernetes or Docker Compose, and is built for hundreds 
 |---|---|
 | Full pipeline (API → crawler → Kafka → persister → Postgres, finaliser, media download/ack/delete, TTL sweep, incremental re-scrape, erasure that survives re-scrapes, retries on blocked identities) end to end against **fakefb**, a synthetic Facebook, with real Postgres 18, Redpanda and Valkey (`make e2e`), and as a Docker Compose stack | Behaviour against **real Facebook**. `configs/queries.seed.yaml` contains **placeholder doc_ids**, and response shapes are modelled on publicly observed structures. Run [Phase 0](docs/runbooks/phase0-spike.md) (`make phase0`) with your proxies first. |
 | Parsers against golden fixtures, including handcrafted variant shapes | Real fixtures (capture them with `fbs-spike capture`) |
-| Helm chart lint/render | A real cluster deployment |
+| Helm chart: lint, renders validated against the Kubernetes and CRD schemas (`make chart-check`), and every hook and Deployment run in Docker exactly as rendered, through real backfills against fakefb (`make chart-smoke`) | A real cluster deployment (Services, probes, KEDA, PodDisruptionBudgets) |
 
 ### Architecture
 
@@ -154,6 +154,7 @@ Settings that matter most:
 | `privacy.author_hmac_key` | dev key | Must be set in prod (validated) |
 | `kafka.topic_prefix` | empty | Namespaces topics **and** consumer groups |
 | `kafka.schema_registry.url` | empty | Registry for the fb.v1 schemas (`fbctl schemas apply`, Helm `hooks.schemas`); see the [record schemas contract](docs/contracts/kafka-schemas.md) |
+| `kafka.tls`, `kafka.sasl`, `redis.tls` | off | TLS (CA, client certificate, server name) to the brokers and Valkey; SASL `plain`, `scram-sha-256` or `scram-sha-512`. Put the password in `FBS_KAFKA__SASL__PASSWORD`. |
 
 ### Phase 0, before scraping real Facebook at volume
 
@@ -195,7 +196,9 @@ The Helm chart is at `deploy/helm/fbs`.
 - environment variables come from `secretEnv.existingSecret` (DSNs, S3 keys, HMAC key);
 - proxy tiers come from `secretFiles.existingSecret`, a `proxies.yaml` layered over the ConfigMap.
 
-Operational guidance is in [docs/runbooks/operations.md](docs/runbooks/operations.md). Load tests and measured pipeline throughput are in [docs/runbooks/load-testing.md](docs/runbooks/load-testing.md). Proxy cost, how to measure it and the settings that move it are in [docs/runbooks/cost-tuning.md](docs/runbooks/cost-tuning.md).
+**Images and releases:** pushing a tag `vX.Y.Z` publishes `ghcr.io/abdullah95k/fbs:X.Y.Z`, `X.Y.Z-browser` and the chart (`oci://ghcr.io/abdullah95k/charts/fbs`); the chart's image tag defaults to its app version.
+
+Before the first production install, work through [docs/runbooks/go-live.md](docs/runbooks/go-live.md). Operational guidance is in [docs/runbooks/operations.md](docs/runbooks/operations.md). Load tests and measured pipeline throughput are in [docs/runbooks/load-testing.md](docs/runbooks/load-testing.md). Proxy cost, how to measure it and the settings that move it are in [docs/runbooks/cost-tuning.md](docs/runbooks/cost-tuning.md).
 
 **Rough sizing** for about 300k pages/day incremental plus 2k new pages/day backfilled to 365 days. These are estimates until Phase 0 measures real numbers.
 

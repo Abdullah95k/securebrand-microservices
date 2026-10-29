@@ -49,6 +49,14 @@ func TestAdaptiveScheduleAndPostRefresh(t *testing.T) {
 	if bf.Status != "completed" {
 		t.Fatalf("backfill: %+v", bf)
 	}
+	// Registering it again (a list imported twice) starts no second backfill.
+	type again struct {
+		Created  bool     `json:"created"`
+		Backfill *jobView `json:"backfill_job"`
+	}
+	if r := decodeBody[again](t, s.Do(t, key, "POST", "/v1/pages", []byte(fmt.Sprintf(`{"page":%q}`, page.Vanity))), http.StatusCreated); r.Created || r.Backfill != nil {
+		t.Fatalf("second registration: %+v", r)
+	}
 
 	// 8 posts 20h apart: 1.2 posts a day is tier T1 (12h).
 	var tier string

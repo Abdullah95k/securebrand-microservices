@@ -8,10 +8,10 @@ import (
 	"os"
 	"time"
 
+	"github.com/abdullah95k/securebrand-microservices/internal/app"
 	"github.com/abdullah95k/securebrand-microservices/internal/config"
 	"github.com/abdullah95k/securebrand-microservices/internal/persist"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/httpserver"
-	"github.com/abdullah95k/securebrand-microservices/internal/platform/kafka"
 	plog "github.com/abdullah95k/securebrand-microservices/internal/platform/log"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/pg"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/run"
@@ -28,8 +28,12 @@ func main() {
 		os.Exit(1)
 	}
 	defer db.Close()
-	c, err := persist.NewConsumer(kafka.ClientConfig{Brokers: cfg.Kafka.Brokers, ClientID: cfg.Kafka.ClientID + "-persister",
-		TopicPrefix: cfg.Kafka.TopicPrefix}, &persist.Writer{DB: db}, 2000, 250*time.Millisecond)
+	kcfg, err := app.KafkaClient(cfg, "-persister")
+	if err != nil {
+		slog.Error("kafka", "err", err)
+		os.Exit(1)
+	}
+	c, err := persist.NewConsumer(kcfg, &persist.Writer{DB: db}, 2000, 250*time.Millisecond)
 	if err != nil {
 		slog.Error("kafka", "err", err)
 		os.Exit(1)

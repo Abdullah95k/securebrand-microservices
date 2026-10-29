@@ -33,9 +33,7 @@ func NewConsumer(cfg kafka.ClientConfig, w *Writer, maxBatch int, linger time.Du
 	for i, t := range topics.Entity {
 		ts[i] = cfg.TopicPrefix + t
 	}
-	cl, err := kgo.NewClient(
-		kgo.SeedBrokers(cfg.Brokers...),
-		kgo.ClientID(cfg.ClientID),
+	cl, err := kgo.NewClient(append(cfg.Opts(),
 		kgo.ConsumerGroup(cfg.TopicPrefix+Group),
 		kgo.ConsumeTopics(ts...),
 		kgo.DisableAutoCommit(),
@@ -43,7 +41,7 @@ func NewConsumer(cfg kafka.ClientConfig, w *Writer, maxBatch int, linger time.Du
 		kgo.Balancers(kgo.CooperativeStickyBalancer()),
 		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
 		kgo.FetchMaxWait(250*time.Millisecond),
-	)
+	)...)
 	if err != nil {
 		return nil, err
 	}

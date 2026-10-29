@@ -35,7 +35,7 @@ spec:
       terminationGracePeriodSeconds: {{ $c.terminationGracePeriodSeconds | default 30 }}
       containers:
         - name: {{ $name }}
-          {{- $tag := $root.Values.image.tag }}
+          {{- $tag := $root.Values.image.tag | default $root.Chart.AppVersion }}
           {{- if and $c.browser $root.Values.image.browserTag }}{{ $tag = $root.Values.image.browserTag }}{{ end }}
           image: "{{ $root.Values.image.repository }}:{{ $tag }}"
           imagePullPolicy: {{ $root.Values.image.pullPolicy }}
@@ -94,6 +94,10 @@ spec:
         topic: {{ printf "%s%s" ($root.Values.config.kafka.topic_prefix | default "") .topic | quote }}
         lagThreshold: {{ .threshold | quote }}
         offsetResetPolicy: earliest
+      {{- if $root.Values.keda.authSecret }}
+      authenticationRef:
+        name: {{ include "fbs.fullname" $root }}-kafka
+      {{- end }}
     {{- end }}
 {{- end }}
 {{- end }}

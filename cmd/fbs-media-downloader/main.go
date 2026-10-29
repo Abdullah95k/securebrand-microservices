@@ -9,6 +9,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/abdullah95k/securebrand-microservices/internal/app"
 	"github.com/abdullah95k/securebrand-microservices/internal/config"
 	"github.com/abdullah95k/securebrand-microservices/internal/media"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/httpserver"
@@ -41,8 +42,10 @@ func runDownloader(ctx context.Context, cfg *config.Config) error {
 		return err
 	}
 	media.Lifecycle(ctx, s3, cfg.S3.MediaBucket, cfg.Media.TTL)
-	kcfg := kafka.ClientConfig{Brokers: cfg.Kafka.Brokers, ClientID: cfg.Kafka.ClientID + "-media",
-		TopicPrefix: cfg.Kafka.TopicPrefix, Linger: cfg.Kafka.ProduceLinger}
+	kcfg, err := app.KafkaClient(cfg, "-media")
+	if err != nil {
+		return err
+	}
 	producer, err := kafka.NewProducer(kcfg)
 	if err != nil {
 		return err
