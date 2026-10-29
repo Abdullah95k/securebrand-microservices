@@ -95,6 +95,10 @@ A 6-minute run on this container (4 pages, a restart every 40s), from `FBS_SOAK_
 - edits counted on 19 of the 22 edited comments that are still up. The other edits came before the comment was first stored;
 - goroutines between 190 and 324, heap at most 66 MB.
 
+A 90-minute run on this container (20 pages, a restart every 2 minutes): 2,844 jobs, every one completed, none partial or failed. The development container's Docker daemon stopped during the final checks, so they did not run there.
+
+**Longer runs on a GitHub runner:** Actions → **soak** → Run workflow, with the duration, pages and restart interval. The report is in the run's summary and in its `soak` artifact, with the log.
+
 **What these tests found, all fixed:**
 - **Lost posts (load test):** when a page's timeline held both a post and a share of it, the parser returned the post only once, quoted inside the share. The post itself and its 654 comments were never crawled, and the jobs still completed. The parser now drops only true repeats (the same object at the same place) and keeps a quoted post as well as the post itself.
 - **Lost tasks:** a crawler that hit its drain timeout committed the offsets of the tasks it abandoned, so those tasks were lost and their jobs never finished. Abandoned records are now left for the partition's next owner.
