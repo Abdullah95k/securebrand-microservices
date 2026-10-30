@@ -14,13 +14,14 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // ScrubDir pseudonymises a captured fixture in place: person names,
 // numeric ids of people and signed CDN parameters are replaced consistently
 // so structure (and cross references) survive. Ids in keep, and the page id
-// in meta.json, stay. A fixture already scrubbed is left alone: scrubbing
-// it again would pseudonymise the pseudonyms.
+// in meta.json, stay. A fixture this scrubber version already scrubbed is
+// left alone.
 func ScrubDir(dir string, keep []string) error {
 	if dir == "" {
 		return fmt.Errorf("fixtures: directory is required")
@@ -31,7 +32,9 @@ func ScrubDir(dir string, keep []string) error {
 		d.UseNumber()
 		_ = d.Decode(&meta)
 	}
-	if meta["__scrubbed"] == true {
+	// Scrubbing again would pseudonymise the pseudonyms; a fixture from an
+	// older scrubber is scrubbed again for what that one missed.
+	if meta["__scrubbed"] == true && scrubberVersion(meta) >= scrubVersion {
 		return nil
 	}
 	keepIDs := keepSet(keep)
@@ -54,9 +57,22 @@ func ScrubDir(dir string, keep []string) error {
 	return writeMeta(dir, meta)
 }
 
-// writeMeta writes dir/meta.json, marked as scrubbed.
+// scrubVersion is recorded in meta.json. Raise it when Scrub learns a new
+// pattern, so fixtures scrubbed before are scrubbed again when bundled.
+const scrubVersion = 2
+
+func scrubberVersion(meta map[string]any) int64 {
+	if n, ok := meta["__scrubber"].(json.Number); ok {
+		v, _ := n.Int64()
+		return v
+	}
+	return 1
+}
+
+// writeMeta writes dir/meta.json, marked as scrubbed by this version.
 func writeMeta(dir string, meta map[string]any) error {
 	meta["__scrubbed"] = true
+	meta["__scrubber"] = scrubVersion
 	mb, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
 		return err
@@ -85,19 +101,28 @@ func idString(v any) string {
 }
 
 var (
-	// A JSON string may hold escapes: \" or é, which is how Facebook
+	// A JSON string may hold escapes: \" or \u00e9, which is how Facebook
 	// writes non-ASCII names.
-	nameRe   = regexp.MustCompile(`"name":"((?:[^"\\]|\\.)*)"`)
-	authorID = regexp.MustCompile(`"author":\{"__typename":"User","id":"(\d+)"`)
-	userIDRe = regexp.MustCompile(`"__typename":"User","id":"(\d+)"`)
-	digits   = regexp.MustCompile(`\d+`)
+	nameRe = regexp.MustCompile(`"(name|short_name|alternate_name|first_name|last_name)":"((?:[^"\\]|\\.)*)"`)
+	textRe = regexp.MustCompile(`"text":"((?:[^"\\]|\\.)*)"`)
+	// People's ids: a User object's (Facebook puts "__isNode", "__isActor"
+	// and the like between its __typename and id, or the id first), a
+	// page owner's profile, and the id in a /people/<name>/<id>/ URL.
+	idPatterns = []*regexp.Regexp{
+		regexp.MustCompile(`"__typename":"User"[^{}]*?"id":"(\d+)"`),
+		regexp.MustCompile(`"id":"(\d+)"[^{}]*?"__typename":"User"`),
+		regexp.MustCompile(`"owning_profile":\{[^{}]*?"id":"(\d+)"`),
+		peopleURL,
+	}
+	peopleURL = regexp.MustCompile(`facebook\.com\\*/people\\*/[^/\\"?&\s]+\\*/(\d+)`)
+	digits    = regexp.MustCompile(`\d+`)
 	// A signed CDN URL, in JSON (\/), in JSON inside a JS string (\\\/) or
 	// in HTML. It ends where its string does: at a quote or an escaped one,
 	// whitespace, a tag bracket, or an HTML entity other than an ampersand.
 	signedURL = regexp.MustCompile(`https?:(?:\\*/){2}[a-z0-9.\-]*fbcdn\.net` +
 		`(?:[^"'\s<>\\&]|\\+/|\\+u[0-9a-fA-F]{4}|&(?:amp|#0*38|#x0*26);|&[\w.\-]*=)*`)
 	escSlash  = regexp.MustCompile(`\\+/`)
-	profileRe = regexp.MustCompile(`https://www\.facebook\.com/(profile\.php\?id=\d+|[A-Za-z0-9.]+)(["?])`)
+	profileRe = regexp.MustCompile(`https:(?:\\*/){2}www\.facebook\.com\\*/(profile\.php\?id=\d+|[A-Za-z0-9.]+)(\\*"|\?)`)
 )
 
 func pseudo(s, salt string) string {
@@ -105,17 +130,23 @@ func pseudo(s, salt string) string {
 	return strconv.FormatUint(binary.BigEndian.Uint64(h[:8])%9_000_000_000_000+100_000_000_000, 10)
 }
 
-// Scrub returns b with personal data pseudonymised.
+// Scrub returns b with personal data pseudonymised: people's ids and
+// names, profile and /people/ URLs, signed CDN parameters, and every
+// "text" value (comment and post bodies name people too). Text keeps its
+// length in UTF-16 units, so the offsets of mentions and links stay valid.
 func Scrub(b []byte, keep map[string]bool) []byte {
 	s := string(b)
 	ids := map[string]string{}
-	for _, re := range []*regexp.Regexp{authorID, userIDRe} {
+	for _, re := range idPatterns {
 		for _, m := range re.FindAllStringSubmatch(s, -1) {
 			if !keep[m[1]] {
 				ids[m[1]] = pseudo(m[1], "id")
 			}
 		}
 	}
+	s = peopleURL.ReplaceAllStringFunc(s, func(m string) string {
+		return "facebook.com/people/scrubbed/" + peopleURL.FindStringSubmatch(m)[1]
+	})
 	// Whole numbers only, in one pass: a short id inside a longer one (the
 	// page id, a post id) is a different id.
 	s = digits.ReplaceAllStringFunc(s, func(d string) string {
@@ -125,8 +156,16 @@ func Scrub(b []byte, keep map[string]bool) []byte {
 		return d
 	})
 	s = nameRe.ReplaceAllStringFunc(s, func(m string) string {
-		v := nameRe.FindStringSubmatch(m)[1]
-		return `"name":"Person ` + pseudo(v, "name")[:6] + `"`
+		sm := nameRe.FindStringSubmatch(m)
+		return `"` + sm[1] + `":"Person ` + pseudo(sm[2], "name")[:6] + `"`
+	})
+	s = textRe.ReplaceAllStringFunc(s, func(m string) string {
+		var t string
+		if err := json.Unmarshal([]byte(m[len(`"text":`):]), &t); err != nil {
+			return `"text":""`
+		}
+		out, _ := json.Marshal(blank(t))
+		return `"text":` + string(out)
 	})
 	s = signedURL.ReplaceAllStringFunc(s, func(m string) string {
 		u, err := url.Parse(escSlash.ReplaceAllString(m, "/"))
@@ -141,4 +180,22 @@ func Scrub(b []byte, keep map[string]bool) []byte {
 	})
 	s = profileRe.ReplaceAllString(s, `https://www.facebook.com/scrubbed.profile$2`)
 	return []byte(s)
+}
+
+// blank replaces every character but whitespace with x, keeping the
+// length in UTF-16 units (Facebook's offsets): a character outside the
+// basic plane, such as most emoji, becomes xx.
+func blank(t string) string {
+	var sb strings.Builder
+	for _, r := range t {
+		switch {
+		case unicode.IsSpace(r):
+			sb.WriteRune(r)
+		case r > 0xFFFF:
+			sb.WriteString("xx")
+		default:
+			sb.WriteByte('x')
+		}
+	}
+	return sb.String()
 }
