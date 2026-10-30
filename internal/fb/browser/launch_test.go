@@ -70,3 +70,41 @@ func TestLaunchDoesNotWaitForEscapedHelpers(t *testing.T) {
 		t.Fatalf("took %s: waited for the helper holding stderr", d)
 	}
 }
+
+// A start that hangs (no port, no exit) is killed and Chromium started
+// again; when every start hangs, the error says so.
+func TestLaunchStartsAgainWhenAStartHangs(t *testing.T) {
+	old := launchAttempt
+	launchAttempt = 300 * time.Millisecond
+	t.Cleanup(func() { launchAttempt = old })
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "started")
+	bin := filepath.Join(dir, "chromium")
+	script := "#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in --user-data-dir=*) d=\"${a#--user-data-dir=}\";; esac; done\n" +
+		"if [ ! -e '" + marker + "' ]; then : > '" + marker + "'; exec sleep 60; fi\n" +
+		"printf '9222\\n/devtools/browser/x\\n' > \"$d/DevToolsActivePort\"\nexec sleep 60\n"
+	if err := os.WriteFile(bin, []byte(script), 0o700); err != nil { //nolint:gosec // an executable test script
+		t.Fatal(err)
+	}
+	p, err := launch(context.Background(), bin, true, nil)
+	if err != nil {
+		t.Fatalf("second start: %v", err)
+	}
+	p.stop()
+	if p.wsURL != "ws://127.0.0.1:9222/devtools/browser/x" {
+		t.Fatalf("ws url %q", p.wsURL)
+	}
+
+	hang := filepath.Join(dir, "hang")
+	if err := os.WriteFile(hang, []byte("#!/bin/sh\necho 'stuck' >&2\nexec sleep 60\n"), 0o700); err != nil { //nolint:gosec // an executable test script
+		t.Fatal(err)
+	}
+	start := time.Now()
+	_, err = launch(context.Background(), hang, true, nil)
+	if !errors.Is(err, errHung) || !strings.Contains(err.Error(), "2 starts") || !strings.Contains(err.Error(), "stuck") {
+		t.Fatalf("every start hung: %v", err)
+	}
+	if d := time.Since(start); d < 2*launchAttempt || d > 10*time.Second {
+		t.Fatalf("took %s for two hung starts of %s", d, launchAttempt)
+	}
+}
