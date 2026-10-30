@@ -49,7 +49,7 @@ func TestTrimAgainstFakeFacebook(t *testing.T) {
 		}
 	}
 	want := "timeline/baseline timeline/flags_off timeline/off:Heavy timeline/off:Light timeline/count=3 timeline/count=25 " +
-		"comments/baseline comments/after_count=25"
+		"comments/baseline comments/after_count=25 comments_newest/baseline comments_newest/after_count=25"
 	if strings.Join(got, " ") != want {
 		t.Fatalf("requests:\n got %s\nwant %s", strings.Join(got, " "), want)
 	}

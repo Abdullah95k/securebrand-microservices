@@ -15,10 +15,13 @@ import (
 
 // registryImport makes every query of a registry file (a Phase 0
 // registry.yaml) the active entry; the entries it replaces stay as
-// fallbacks.
+// fallbacks. With --keep-promoted it only replaces seed entries, so running
+// it again (the pilot does at every start) never undoes a rotation
+// registry-sync or an operator promoted since.
 func registryImport(ctx context.Context, cfg *config.Config, args []string) error {
 	fs := flag.NewFlagSet("registry import", flag.ExitOnError)
 	file := fs.String("file", "", "registry YAML (fbs-spike docids/har --write-registry, or phase0/out/registry.yaml)")
+	keep := fs.Bool("keep-promoted", false, "leave queries whose active entry is not the embedded seed's")
 	_ = fs.Parse(args)
 	b, err := os.ReadFile(*file)
 	if err != nil {
@@ -37,6 +40,15 @@ func registryImport(ctx context.Context, cfg *config.Config, args []string) erro
 	}
 	defer db.Close()
 	for _, q := range seed.Queries {
+		if *keep {
+			var source, doc string
+			err := db.QueryRow(ctx, `SELECT source, doc_id FROM fb_queries WHERE name = $1 AND status = 'active'
+				ORDER BY promoted_at DESC NULLS LAST LIMIT 1`, q.Name).Scan(&source, &doc)
+			if err == nil && source != "seed" {
+				fmt.Printf("%-20s %s kept (active from %s)\n", q.Name, doc, source)
+				continue
+			}
+		}
 		q.Status, q.Source = registry.StatusActive, "import"
 		if err := registry.Upsert(ctx, db, q); err != nil {
 			return fmt.Errorf("%s: %w", q.Name, err)

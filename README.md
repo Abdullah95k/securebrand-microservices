@@ -142,7 +142,7 @@ Settings that matter most:
 | `fb.browser` | off | Headless-Chromium fallback for pages whose HTML carries no tokens (≤ 2% of loads, 2 browsers per pod), and doc_id discovery from a rendered page's own requests. Needs the `--target browser` image. |
 | `fb.proxy.breaker`, `fb.query_breaker` | 15% / 50% | Circuit breakers per exit bucket (static /24, gateway+country) and per (query, doc_id) |
 | `limits.max_age_days` | 365 | Backfill window per job/page, capped by `limits.max_age_cap_days` |
-| `scheduler.tiers` | T0 3h … T3 72h, T4 7d | Adaptive re-scrape interval by posting rate (pages registered without `interval_hours`) |
+| `scheduler.tiers` | every tier 3h | Re-scrape interval by posting rate (pages registered without `interval_hours`): every page every 3 hours; the tier picks comment refreshes and what a budget slows first |
 | `scheduler.post_refresh` | 24h / 72h / 7d by post age | Comment refresh of posts older than the timeline overlap, riding on the page's scheduled job; recrawls at 7 and 30 days |
 | `scheduler.budget` | unlimited | Daily request/byte budget: pauses backfill, then stretches slow tiers; never holds on-demand work |
 | `registry_sync.canary_pages`, `registry_sync.interval` | none / 30m | Public pages fbs-registry-sync checks doc_ids on; set at least three in production. `promote: false` makes it a dry run. |

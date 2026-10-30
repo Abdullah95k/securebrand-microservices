@@ -47,7 +47,8 @@ services:
       - ./pilot.yaml:/etc/fbs/pilot.yaml:ro
       - ../../phase0/out/pilot-canary.yaml:/etc/fbs/pilot-canary.yaml:ro
       - ../../phase0/out/registry.yaml:/etc/fbs/registry.yaml:ro
-    entrypoint: ["/usr/local/bin/fbctl", "registry", "import", "--file", "/etc/fbs/registry.yaml"]
+    # Only over the seed's placeholders: a restart keeps what registry-sync promoted.
+    entrypoint: ["/usr/local/bin/fbctl", "registry", "import", "--keep-promoted", "--file", "/etc/fbs/registry.yaml"]
     depends_on:
       init: {condition: service_completed_successfully}
 

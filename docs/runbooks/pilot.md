@@ -37,7 +37,10 @@ make pilot-up
 It builds the image (a few minutes), starts the stack with every port bound
 to 127.0.0.1, imports the Phase 0 registry as the active doc_ids, and points
 registry-sync at the first three pages of `pages.csv` so it follows doc_id
-rotations.
+rotations. The import replaces only the built-in placeholders, so running
+`make pilot-up` again never undoes a rotation registry-sync promoted. To load
+a newer `phase0/out/registry.yaml` on purpose (after a new HAR, say), run
+`make pilot-registry`: it makes every query in the file active.
 
 ## 3. Register the pages
 

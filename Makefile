@@ -5,7 +5,7 @@ PG_DSN ?= postgres://fbs:fbs@localhost:5432/fbs?sslmode=disable
 TEST_ENV = FBS_TEST_PG_DSN="$(PG_DSN)" FBS_TEST_REDIS_ADDR=localhost:6379 FBS_TEST_KAFKA_BROKERS=localhost:19092 FBS_TEST_SCHEMA_REGISTRY=http://localhost:18081
 COMPOSE = docker compose -f deploy/compose/docker-compose.yml
 
-.PHONY: all build test lint vet generate golden fixtures infra-up infra-down test-integration e2e loadtest soak docker docker-prebuilt compose-up compose-down spike-report phase0 phase0-dryrun phase0-trim phase0-rate pilot-up pilot-register pilot-report pilot-down pilot-clean spike-bin chart-check chart-smoke clean
+.PHONY: all build test lint vet generate golden fixtures infra-up infra-down test-integration e2e loadtest soak docker docker-prebuilt compose-up compose-down spike-report phase0 phase0-dryrun phase0-trim phase0-rate pilot-up pilot-register pilot-registry pilot-report pilot-down pilot-clean spike-bin chart-check chart-smoke clean
 
 all: generate build test
 
@@ -130,7 +130,8 @@ RATE_ARGS ?= --orderings comments --timeline-pages 10
 ## RATES (requests per second per IP), one result file and report each.
 phase0-rate:
 	@mkdir -p $(PHASE0_OUT)
-	@grep -v '^#' $(PHASE0_PAGES) | head -n $$(( $(RATE_PAGES) + 1 )) > $(PHASE0_OUT)/rate-pages.csv
+	@grep -v '^#' $(PHASE0_PAGES) | grep -v '^[[:space:]]*$$' \
+	  | awk -F, -v n=$(RATE_PAGES) 'NR == 1 && tolower($$1) == "page" { print; next } c < n { print; c++ }' > $(PHASE0_OUT)/rate-pages.csv
 	@for r in $(RATES); do \
 	  echo "== $(RATE_TIER) at $$r requests/s per IP"; \
 	  $(GO) run ./cmd/fbs-spike run --config $(PHASE0_CONFIG) --pages $(PHASE0_OUT)/rate-pages.csv \
@@ -140,6 +141,9 @@ phase0-rate:
 	done
 
 PILOT_COMPOSE = $(COMPOSE) -f deploy/compose/pilot.yml
+# deploy/compose/pilot.yml mounts these paths, whatever PHASE0_* say.
+PILOT_PROXIES = phase0/proxies.yaml
+PILOT_OUT = phase0/out
 PILOT_SINCE ?= 24h
 PILOT_PROJECT ?= 5000
 PILOT_COST_PER_GB ?= 4
@@ -148,12 +152,13 @@ PILOT_FBCTL = $(PILOT_COMPOSE) run --rm --no-deps -T --entrypoint /usr/local/bin
 ## the steady state (docs/runbooks/pilot.md). Needs Docker, phase0/proxies.yaml
 ## and the Phase 0 registry. Start with the Phase 0 run finished.
 pilot-up:
-	@test -f $(PHASE0_CONFIG) || { echo "missing $(PHASE0_CONFIG)"; exit 2; }
-	@test -s $(PHASE0_OUT)/registry.yaml || { echo "missing $(PHASE0_OUT)/registry.yaml: finish Phase 0 first"; exit 2; }
+	@test -f $(PILOT_PROXIES) || { echo "missing $(PILOT_PROXIES)"; exit 2; }
+	@test -s $(PILOT_OUT)/registry.yaml || { echo "missing $(PILOT_OUT)/registry.yaml: finish Phase 0 first"; exit 2; }
 	@command -v docker >/dev/null || { echo "Docker is not installed: docs/runbooks/pilot.md, step 1"; exit 2; }
 	@printf 'registry_sync:\n  canary_pages: [%s]\n' \
-	  "$$(grep -v '^#' $(PHASE0_PAGES) | grep -v '^[[:space:]]*$$' | sed -n '2,4p' | cut -d, -f1 | sed 's/.*/"&"/' | paste -sd, -)" \
-	  > $(PHASE0_OUT)/pilot-canary.yaml
+	  "$$(grep -v '^#' $(PHASE0_PAGES) | grep -v '^[[:space:]]*$$' \
+	    | awk -F, 'NR == 1 && tolower($$1) == "page" { next } c < 3 { print $$1; c++ }' | sed 's/.*/"&"/' | paste -sd, -)" \
+	  > $(PILOT_OUT)/pilot-canary.yaml
 	$(MAKE) docker
 	$(PILOT_COMPOSE) up -d
 	@echo "up; register the pages with: make pilot-register"
@@ -165,6 +170,11 @@ pilot-register:
 	test -n "$$key" || { echo "could not create an API key"; exit 1; }; \
 	$(PILOT_COMPOSE) run --rm --no-deps -T -v $(CURDIR)/$(PHASE0_PAGES):/pages.csv:ro --entrypoint /usr/local/bin/fbctl api \
 	  pages import --api http://api:8080 --key "$$key" /pages.csv
+
+## Makes every query of phase0/out/registry.yaml active, over what registry-sync promoted.
+pilot-registry:
+	$(PILOT_COMPOSE) run --rm --no-deps -T -v $(CURDIR)/$(PILOT_OUT)/registry.yaml:/etc/fbs/registry.yaml:ro \
+	  --entrypoint /usr/local/bin/fbctl api registry import --file /etc/fbs/registry.yaml
 
 ## Requests, bytes and blocks per page per day over the last PILOT_SINCE, projected to PILOT_PROJECT pages.
 pilot-report:

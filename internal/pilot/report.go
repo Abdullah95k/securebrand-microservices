@@ -15,7 +15,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Row is one page tier's jobs of one kind over the measured span.
+// Row is the jobs of one kind over the measured span, for the pages now in
+// one tier (a page's past jobs count in the tier it has at report time).
 type Row struct {
 	Tier            string `json:"tier"`
 	Kind            string `json:"kind"` // backfill | scheduled | on_demand
@@ -37,9 +38,11 @@ type Report struct {
 	Since time.Time `json:"since"`
 	Until time.Time `json:"until"`
 	Rows  []Row     `json:"rows"`
-	// SteadyPages are the distinct pages with scheduled jobs (a page that
-	// changed tier is in two rows).
+	// SteadyPages are the distinct pages with scheduled jobs.
 	SteadyPages int64 `json:"steady_pages"`
+	// SteadySince is when the first scheduled job in the span was created:
+	// the steady state is measured from then, not from Since.
+	SteadySince time.Time `json:"steady_since"`
 	// Completeness of the comments of posts first seen in the span, among
 	// those with comments: all of them, and those seen at least a day ago
 	// (whose refreshes have had time to run).
@@ -51,6 +54,16 @@ type Report struct {
 
 // Days is the span measured, in days.
 func (r Report) Days() float64 { return r.Until.Sub(r.Since).Hours() / 24 }
+
+// SteadyDays is the span the scheduled jobs cover, from the first one: a
+// pilot shorter than --since is not averaged over hours without jobs.
+func (r Report) SteadyDays() float64 {
+	from := r.Since
+	if r.SteadySince.After(from) {
+		from = r.SteadySince
+	}
+	return r.Until.Sub(from).Hours() / 24
+}
 
 // Steady sums the scheduled jobs (the every-3-hours crawls and the
 // comment refreshes riding on them): the traffic production pays daily.
@@ -111,9 +124,13 @@ func Load(ctx context.Context, db *pgxpool.Pool, since time.Time) (Report, error
 	if err := rows.Err(); err != nil {
 		return rep, err
 	}
-	if err := db.QueryRow(ctx, `SELECT count(DISTINCT page_ref) FROM jobs
-		WHERE created_at >= $1 AND kind = 'scheduled' AND status IN ('completed', 'partial', 'failed')`, since).Scan(&rep.SteadyPages); err != nil {
+	var first *time.Time
+	if err := db.QueryRow(ctx, `SELECT count(DISTINCT page_ref), min(created_at) FROM jobs
+		WHERE created_at >= $1 AND kind = 'scheduled' AND status IN ('completed', 'partial', 'failed')`, since).Scan(&rep.SteadyPages, &first); err != nil {
 		return rep, err
+	}
+	if first != nil {
+		rep.SteadySince = first.UTC()
 	}
 	err = db.QueryRow(ctx, `
 		SELECT count(*), coalesce(avg(least(completeness, 1)), 0),
@@ -151,14 +168,15 @@ func Format(r Report, p Projection) string {
 			human(float64(x.WireBytes)), ratio(x.Requests, x.Pages), x.Blocked, x.Posts, x.Comments+x.Replies, x.SoftErrors, x.TransportErrors, x.Drift)
 	}
 	st := r.Steady()
+	days = r.SteadyDays()
 	if st.Pages == 0 || days <= 0 {
 		b.WriteString("\nno scheduled jobs yet: the steady state starts after the backfills, with the first 3-hourly runs.\n")
 		return b.String()
 	}
 	reqDay := float64(st.Requests) / float64(st.Pages) / days
 	bytesDay := float64(st.WireBytes) / float64(st.Pages) / days
-	fmt.Fprintf(&b, "\nsteady state (scheduled jobs): %.0f requests and %s per page per day; block rate %.2f%%\n",
-		reqDay, human(bytesDay), 100*ratio(st.Blocked, st.Requests))
+	fmt.Fprintf(&b, "\nsteady state (scheduled jobs over %.1f days): %.0f requests and %s per page per day; block rate %.2f%%\n",
+		days, reqDay, human(bytesDay), 100*ratio(st.Blocked, st.Requests))
 	if r.Posts > 0 {
 		fmt.Fprintf(&b, "comment completeness: %.1f%% over %d posts with comments", 100*r.MeanCompleteness, r.Posts)
 		if r.SettledPosts > 0 {

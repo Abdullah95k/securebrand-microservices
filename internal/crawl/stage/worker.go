@@ -103,10 +103,9 @@ func (w *Worker) Run(ctx context.Context, t *taskv1.Task) error {
 	case Retry:
 		next := out.Next
 		next.Stalls = t.Stalls + 1
-		if beforeErr == nil {
-			if after, _, err := d.Ckpt.Load(ctx, t.LineageId, t.Seq); err == nil && advanced(before, after) {
-				next.Stalls = 0
-			}
+		after, _, afterErr := d.Ckpt.Load(ctx, t.LineageId, t.Seq)
+		if beforeErr == nil && afterErr == nil && advanced(before, after) {
+			next.Stalls = 0
 		}
 		if reason := w.exhausted(next); reason != "" {
 			metrics.Tasks.WithLabelValues(name, lane, "failed").Inc()
@@ -114,11 +113,14 @@ func (w *Worker) Run(ctx context.Context, t *taskv1.Task) error {
 				"attempts", next.Attempt, "stalls", next.Stalls, "reason", out.Reason)
 			return w.deadLetter(ctx, t, reason, out.Reason, out.Counters)
 		}
-		// The attempt's cost is real even though it collects nothing that
-		// counts: its data is collected again by the retry.
-		if cost := costCounters(out.Counters); len(cost) > 0 && t.JobId != "" {
-			if err := d.Jobs.AddCounters(ctx, t.JobId, cost); err != nil {
-				slog.Debug("jobs: retry counters", "job", t.JobId, "err", err)
+		// What the attempt spent after its last saved checkpoint: the saved
+		// part resumes into the retry's counters and is reported when the
+		// task finishes; the rest would be lost.
+		if afterErr == nil && t.JobId != "" {
+			if cost := unsaved(costCounters(out.Counters), after.Counters); len(cost) > 0 {
+				if err := d.Jobs.AddCounters(ctx, t.JobId, cost); err != nil {
+					slog.Debug("jobs: retry counters", "job", t.JobId, "err", err)
+				}
 			}
 		}
 		metrics.Tasks.WithLabelValues(name, lane, "retry").Inc()
@@ -132,9 +134,21 @@ func (w *Worker) Run(ctx context.Context, t *taskv1.Task) error {
 	}
 }
 
-// costKeys are the counters a retried attempt still adds to its job: what
-// it cost and why it failed, not what it collected.
+// costKeys are the counters a retried attempt adds to its job for the work
+// its checkpoint did not save: what it cost and why it failed, not what it
+// collected (the retry collects that again).
 var costKeys = []string{"requests", "wire_bytes", "blocked", "soft_errors", "transport_errors", "drift"}
+
+// unsaved returns c less what the checkpoint saved, keeping what grew.
+func unsaved(c, saved map[string]int64) map[string]int64 {
+	out := map[string]int64{}
+	for k, v := range c {
+		if d := v - saved[k]; d > 0 {
+			out[k] = d
+		}
+	}
+	return out
+}
 
 func costCounters(c map[string]int64) map[string]int64 {
 	out := map[string]int64{}

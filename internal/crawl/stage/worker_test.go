@@ -63,3 +63,15 @@ func TestCostCounters(t *testing.T) {
 		t.Fatal("nil counters")
 	}
 }
+
+// Only the work after the last saved checkpoint is added on a retry: the
+// saved counters resume into the retry and are reported when it finishes.
+func TestUnsaved(t *testing.T) {
+	got := unsaved(map[string]int64{"requests": 8, "wire_bytes": 9000, "blocked": 1}, map[string]int64{"requests": 6, "wire_bytes": 7000, "posts": 30})
+	if len(got) != 3 || got["requests"] != 2 || got["wire_bytes"] != 2000 || got["blocked"] != 1 {
+		t.Fatalf("unsaved: %v", got)
+	}
+	if len(unsaved(map[string]int64{"requests": 6}, map[string]int64{"requests": 6})) != 0 {
+		t.Fatal("nothing new")
+	}
+}

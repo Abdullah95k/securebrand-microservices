@@ -73,10 +73,11 @@ func (s *PageStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 		}
 		pl, err := d.Loader.Load(ctx, id, url)
 		d.observeLoad(pl, err, t.Lane)
+		c["requests"]++
 		if err != nil {
+			c["transport_errors"]++
 			return retry(t, st.Cursor, "30s", "page load: "+err.Error(), c)
 		}
-		c["requests"]++
 		c["wire_bytes"] += pl.Bytes
 		switch pl.Class {
 		case detect.OK:
@@ -168,6 +169,7 @@ func (s *PageStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 			Fast: t.Lane == taskv1.Lane_LANE_P0, Lane: topics.LaneName(t.Lane), Referer: id.Base.String()})
 		c["requests"]++
 		if err != nil {
+			c["transport_errors"]++
 			return retry(t, st.Cursor, "30s", err.Error(), c)
 		}
 		c["wire_bytes"] += resp.BytesIn + resp.BytesOut

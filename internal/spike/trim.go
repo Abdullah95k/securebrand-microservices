@@ -50,7 +50,7 @@ type TrimRecord struct {
 	Class    string    `json:"class"`
 	Status   int       `json:"status,omitempty"`
 	Bytes    int       `json:"bytes"`      // response body
-	Wire     int64     `json:"wire_bytes"` // on the wire, as proxies bill it
+	Wire     int64     `json:"wire_bytes"` // both ways on the wire, as proxies bill it
 	Items    int       `json:"items"`      // posts or comments parsed
 	Missing  []string  `json:"missing,omitempty"`
 	Optional []string  `json:"optional,omitempty"`
@@ -65,9 +65,10 @@ const BaselineVariant = "baseline"
 const providerPrefix = "__relay_internal__pv__"
 
 type trimVariant struct {
-	name string
-	set  map[string]any // template variables replaced
-	vars map[string]any // placeholder values
+	name    string
+	set     map[string]any // template variables replaced
+	vars    map[string]any // placeholder values
+	referer string         // as the crawler sends it
 }
 
 // providerFlags returns the template's provider flags that are on.
@@ -86,8 +87,8 @@ func providerFlags(tmpl json.RawMessage) []string {
 	return out
 }
 
-func trimVariants(tmpl json.RawMessage, base map[string]any, each bool) []trimVariant {
-	vs := []trimVariant{{name: BaselineVariant, vars: base}}
+func trimVariants(tmpl json.RawMessage, base map[string]any, referer string, each bool) []trimVariant {
+	vs := []trimVariant{{name: BaselineVariant, vars: base, referer: referer}}
 	flags := providerFlags(tmpl)
 	if len(flags) == 0 {
 		return vs
@@ -96,10 +97,10 @@ func trimVariants(tmpl json.RawMessage, base map[string]any, each bool) []trimVa
 	for _, f := range flags {
 		off[f] = false
 	}
-	vs = append(vs, trimVariant{name: "flags_off", set: off, vars: base})
+	vs = append(vs, trimVariant{name: "flags_off", set: off, vars: base, referer: referer})
 	if each {
 		for _, f := range flags {
-			vs = append(vs, trimVariant{name: "off:" + strings.TrimPrefix(f, providerPrefix), set: map[string]any{f: false}, vars: base})
+			vs = append(vs, trimVariant{name: "off:" + strings.TrimPrefix(f, providerPrefix), set: map[string]any{f: false}, vars: base, referer: referer})
 		}
 	}
 	return vs
@@ -113,6 +114,10 @@ func withVar(m map[string]any, k string, v any) map[string]any {
 	out[k] = v
 	return out
 }
+
+// trimCommentQueries are the comment queries the crawler sends: full reads,
+// and the newest-first reads of the refreshes.
+var trimCommentQueries = []string{"comments", "comments_newest"}
 
 // Trim runs the payload experiment on pages: for each, the timeline and
 // then the comments of its busiest post, once per variant. It returns the
@@ -158,10 +163,10 @@ func (r *Runner) trimPage(ctx context.Context, page string, opt TrimOptions) []T
 	}
 	count := max(opt.TimelineCount, 1)
 	base := map[string]any{"page_id": strconv.FormatInt(pg.PageId, 10), "count": count}
-	vs := trimVariants(tq.Variables, base, opt.Each)
+	vs := trimVariants(tq.Variables, base, id.Base.String(), opt.Each)
 	for _, n := range opt.TimelineCounts {
 		if n != count {
-			vs = append(vs, trimVariant{name: "count=" + strconv.Itoa(n), vars: withVar(base, "count", n)})
+			vs = append(vs, trimVariant{name: "count=" + strconv.Itoa(n), vars: withVar(base, "count", n), referer: id.Base.String()})
 		}
 	}
 	var posts []parse.PostBundle
@@ -190,27 +195,30 @@ func (r *Runner) trimPage(ctx context.Context, page string, opt TrimOptions) []T
 	if post == nil {
 		return out
 	}
-	cq, err := r.GQL.Registry.Get("comments")
-	if err != nil {
-		return fail("comments", err)
-	}
 	fid := post.Post.FeedbackId
 	if fid == "" {
 		fid = parse.FeedbackID(post.Post.PostId)
 	}
 	cbase := map[string]any{"feedback_id": fid}
-	cvs := trimVariants(cq.Variables, cbase, opt.Each)
-	for _, n := range opt.CommentCounts {
-		cvs = append(cvs, trimVariant{name: "after_count=" + strconv.Itoa(n), set: map[string]any{"commentsAfterCount": n}, vars: cbase})
-	}
 	cc := parse.CommentContext{PostID: post.Post.PostId, PageID: pg.PageId}
-	for _, v := range cvs {
-		rec, resp := r.trimDo(ctx, id, ref, cq, v)
-		if resp != nil && resp.Class == detect.OK {
-			res, rep := parse.Comments(resp.Parts, cc)
-			rec.Items, rec.Missing, rec.Optional = len(res.Comments), rep.Missing, rep.Optional
+	for _, name := range trimCommentQueries {
+		cq, err := r.GQL.Registry.Get(name)
+		if err != nil {
+			continue // a registry without this ordering
 		}
-		out = append(out, r.emitTrim(rec))
+		cvs := trimVariants(cq.Variables, cbase, post.Post.Permalink, opt.Each)
+		for _, n := range opt.CommentCounts {
+			cvs = append(cvs, trimVariant{name: "after_count=" + strconv.Itoa(n), set: map[string]any{"commentsAfterCount": n}, vars: cbase,
+				referer: post.Post.Permalink})
+		}
+		for _, v := range cvs {
+			rec, resp := r.trimDo(ctx, id, ref, cq, v)
+			if resp != nil && resp.Class == detect.OK {
+				res, rep := parse.Comments(resp.Parts, cc)
+				rec.Items, rec.Missing, rec.Optional = len(res.Comments), rep.Missing, rep.Optional
+			}
+			out = append(out, r.emitTrim(rec))
+		}
 	}
 	return out
 }
@@ -230,12 +238,12 @@ func (r *Runner) trimDo(ctx context.Context, id *session.Identity, ref string, q
 	c := *r.GQL
 	c.Registry = registry.NewStatic(registry.Seed{ClientParams: r.GQL.Registry.ClientParams(), Queries: []registry.Query{q}})
 	c.Breakers, c.Raw = nil, nil
-	resp, err := c.Do(ctx, id, graphql.Request{Query: q.Name, Vars: v.vars})
+	resp, err := c.Do(ctx, id, graphql.Request{Query: q.Name, Vars: v.vars, Referer: v.referer})
 	if err != nil {
 		rec.Class, rec.Error = detect.Transport.String(), Redact(err.Error())
 		return rec, nil
 	}
-	rec.Class, rec.Status, rec.Bytes, rec.Wire = resp.Class.String(), resp.Status, len(resp.Body), resp.BytesIn
+	rec.Class, rec.Status, rec.Bytes, rec.Wire = resp.Class.String(), resp.Status, len(resp.Body), resp.BytesIn+resp.BytesOut
 	return rec, resp
 }
 
@@ -368,7 +376,7 @@ func TrimSummary(recs []TrimRecord) []TrimRow {
 	}
 	sort.SliceStable(rows, func(i, j int) bool {
 		if rows[i].Query != rows[j].Query {
-			return rows[i].Query > rows[j].Query // timeline, then comments
+			return queryOrder(rows[i].Query) < queryOrder(rows[j].Query)
 		}
 		if (rows[i].Variant == BaselineVariant) != (rows[j].Variant == BaselineVariant) {
 			return rows[i].Variant == BaselineVariant
@@ -376,6 +384,14 @@ func TrimSummary(recs []TrimRecord) []TrimRow {
 		return rows[i].Delta < rows[j].Delta
 	})
 	return rows
+}
+
+// queryOrder lists the timeline first, then the comment queries.
+func queryOrder(q string) string {
+	if q == "timeline" {
+		return ""
+	}
+	return q
 }
 
 func findRow(rows []TrimRow, query, variant string) (TrimRow, bool) {

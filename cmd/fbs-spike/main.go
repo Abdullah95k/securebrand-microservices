@@ -117,7 +117,7 @@ func main() {
 	fs.IntVar(&f.maxBundles, "max-bundles", 150, "JS bundles to scan (docids)")
 	fs.IntVar(&f.trimPages, "trim-pages", 3, "pages measured, the first ones of --pages (trim)")
 	fs.BoolVar(&f.each, "each", false, "also switch each provider flag off on its own (trim)")
-	fs.IntVar(&f.timelineCount, "timeline-count", 10, "the crawler's timeline page size, the baseline (trim)")
+	fs.IntVar(&f.timelineCount, "timeline-count", 0, "the baseline's timeline page size (trim; default crawler.timeline_page_size)")
 	fs.StringVar(&f.timelineCounts, "timeline-counts", "3,25", "timeline page sizes measured besides the baseline (trim)")
 	fs.StringVar(&f.commentCounts, "comment-counts", "10,25,50", "commentsAfterCount values measured besides the template's (trim)")
 	_ = fs.Parse(args)
@@ -536,7 +536,11 @@ func trim(ctx context.Context, cfg *config.Config, f flags, runner func(io.Write
 		fail(err)
 	}
 	defer func() { _ = out.Close() }()
-	recs := runner(out).Trim(ctx, refs, spike.TrimOptions{Each: f.each, TimelineCount: f.timelineCount, TimelineCounts: tc, CommentCounts: cc})
+	count := f.timelineCount
+	if count <= 0 {
+		count = cfg.Crawler.TimelinePageSize
+	}
+	recs := runner(out).Trim(ctx, refs, spike.TrimOptions{Each: f.each, TimelineCount: count, TimelineCounts: tc, CommentCounts: cc})
 	fmt.Print(spike.FormatTrim(spike.TrimSummary(recs)))
 	fmt.Printf("records appended to %s; again: fbs-spike trim-report --in %s\n", f.out, f.out)
 	if ctx.Err() != nil {

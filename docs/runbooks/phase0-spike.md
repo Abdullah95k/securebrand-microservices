@@ -280,12 +280,12 @@ For each page it sends the timeline request the crawler makes, then variants:
 - `off:<flag>` (with `--each`): one flag at a time, to see what each costs.
 - `count=N`: other timeline page sizes (`--timeline-counts`, default 3,25; the baseline is the crawler's 10).
 
-Then the same for the comments of the page's busiest post, with `after_count=N` for comment page sizes (`--comment-counts`, default 10,25,50; the template's is -1, Facebook's default).
+Then the same for the comments of the page's busiest post, for both comment queries the crawler sends (`comments` for full reads, `comments_newest` for the refreshes), with `after_count=N` for comment page sizes (`--comment-counts`, default 10,25,50; the template's is -1, Facebook's default). The baseline is the crawler's own request: `crawler.timeline_page_size`, and the Referer it sends.
 
 It keeps no response content: each request leaves one line in `phase0/out/trim.jsonl` with its size, class and the field names the parser missed. The summary (again with `fbs-spike trim-report --in phase0/out/trim.jsonl`) shows each variant's **wire bytes per post or comment** against the production request, and whether it is usable: every request ok, no required field missing and, for flag changes, as many items as the baseline. "loses optional ..." names fields the variant drops that the baseline had: decide whether you need them.
 
 **Adopting a result:**
-- A provider flag that is usable off: set it to `false` in the query's `variables` in the registry (`phase0/out/registry.yaml`, or the `fb_queries` table in a deployment, section 6).
+- A provider flag that is usable off: set it to `false` in the `variables` of each query it was measured on, in the registry (`phase0/out/registry.yaml`, or the `fb_queries` table in a deployment, section 6). `comments` and `comments_newest` are separate entries.
 - A bigger timeline page that is usable: `crawler.timeline_page_size`.
 - A comment page size Facebook honours (more items per request): tell the maintainers; `crawler.comments_page_size` is not wired into the comments template yet.
 
