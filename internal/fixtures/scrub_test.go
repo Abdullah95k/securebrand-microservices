@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf16"
 )
 
 func TestScrub(t *testing.T) {
@@ -150,5 +151,135 @@ func TestScrubDirOnce(t *testing.T) {
 	}
 	if twice, _ := os.ReadFile(filepath.Join(dir, "response.ndjson")); string(twice) != string(once) {
 		t.Fatalf("scrubbed again:\n%s\n%s", once, twice)
+	}
+}
+
+// The shapes a real logged-out recording carried past the first scrubber:
+// a mentioned person (an EntityAtRange whose User entity has __is* keys
+// before its id, a short_name, a /people/ URL and the name in the comment
+// text), a page owner's profile id inside escaped serialized JSON, an id
+// before its __typename, and an escaped profile URL.
+func TestScrubRealShapes(t *testing.T) {
+	const page, person, owner, other = "100064000000001", "100055512345678", "100044412345678", "100033312345678"
+	in := `{"page":{"__typename":"User","id":"` + page + `","name":"Brand"},` +
+		`"body":{"text":"Ali Hassan 😀 علي","ranges":[{"offset":0,"length":10,"entity":` +
+		`{"__typename":"User","__isEntity":"User","__isNode":"User","id":"` + person + `","short_name":"Ali","name":"Ali Hassan",` +
+		`"url":"https:\/\/www.facebook.com\/people\/Ali-Hassan\/` + person + `\/"}}]},` +
+		`"political_figure_data":{"owning_profile":{"id":"` + owner + `"}},"badge":{"serialized":"{\"target_id\":` + owner + `}"},` +
+		`"x":{"id":"` + other + `","__typename":"User","url":"https:\/\/www.facebook.com\/ali.hassan"},` +
+		`"link":"https:\/\/www.facebook.com\/people\/Ali-Hassan\/` + person + `\/",` +
+		`"permalink":"https:\/\/www.facebook.com\/permalink.php?story_fbid=123&id=` + page + `","page_url":"https:\/\/www.facebook.com\/BrandPage"}`
+	out := string(Scrub([]byte(in), map[string]bool{page: true}))
+	for _, leak := range []string{person, owner, other, "Ali", "Hassan", `ع`, "ali.hassan"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("scrubbed output still contains %q", leak)
+		}
+	}
+	var v struct {
+		Page struct{ ID string }
+		Body struct {
+			Text   string
+			Ranges []struct{ Offset, Length int }
+		}
+	}
+	if err := json.Unmarshal([]byte(out), &v); err != nil {
+		t.Fatalf("not JSON any more: %v: %s", err, out)
+	}
+	if v.Page.ID != page {
+		t.Errorf("page id changed: %s", v.Page.ID)
+	}
+	// "Ali Hassan 😀 علي" is 17 UTF-16 units (the emoji is 2); the mention range stays valid.
+	if got := utf16Len(v.Body.Text); got != 17 || v.Body.Text[:10] != "xxx xxxxxx" {
+		t.Errorf("text %q (%d units)", v.Body.Text, got)
+	}
+	// The page keeps its name and links; people's links and names go.
+	for _, want := range []string{"facebook.com/people/scrubbed/", `"short_name":"Person `, `"name":"Brand"`,
+		"permalink.php?story_fbid=123", "https://www.facebook.com/BrandPage", "scrubbed.profile"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("scrubbed output lacks %q: %s", want, out)
+		}
+	}
+}
+
+func utf16Len(s string) int { return len(utf16.Encode([]rune(s))) }
+
+// A fixture scrubbed by an older scrubber is scrubbed again for what that
+// one missed, then left alone.
+func TestScrubDirRescrubsOlderVersions(t *testing.T) {
+	dir := t.TempDir()
+	raw := `{"entity":{"__typename":"User","__isNode":"User","id":"100055512345678","short_name":"Ali"}}`
+	if err := os.WriteFile(filepath.Join(dir, "response.ndjson"), []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "meta.json"), []byte(`{"page_id": 1, "__scrubbed": true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ScrubDir(dir, nil); err != nil {
+		t.Fatal(err)
+	}
+	once, _ := os.ReadFile(filepath.Join(dir, "response.ndjson"))
+	if strings.Contains(string(once), "100055512345678") || strings.Contains(string(once), "Ali") {
+		t.Fatalf("not scrubbed again: %s", once)
+	}
+	meta, _ := os.ReadFile(filepath.Join(dir, "meta.json"))
+	if !strings.Contains(string(meta), `"__scrubber": 2`) {
+		t.Fatalf("meta: %s", meta)
+	}
+	if err := ScrubDir(dir, nil); err != nil {
+		t.Fatal(err)
+	}
+	if twice, _ := os.ReadFile(filepath.Join(dir, "response.ndjson")); string(twice) != string(once) {
+		t.Fatal("scrubbed again by the same version")
+	}
+}
+
+// Serialized JSON inside a string is walked too; captions and display
+// names go; the page's own text, such as its follower line, stays.
+func TestScrubNestedAndPageText(t *testing.T) {
+	const page = "100064000000001"
+	in := `{"page":{"__typename":"User","id":"` + page + `","name":"Brand","social":[{"text":"1.2M followers"}]},` +
+		`"badge":{"serialized":"{\"actor\":{\"__typename\":\"User\",\"id\":\"100055512345678\",\"name\":\"Ali Hassan\"},` +
+		`\"body\":{\"text\":\"hello Ali\"}}"},` +
+		`"photo":{"accessibility_caption":"May be an image of Ali Hassan"},"who":{"display_name":"Ali Hassan","username":"ali.hassan"}}`
+	out := string(Scrub([]byte(in), map[string]bool{page: true}))
+	for _, leak := range []string{"Ali", "Hassan", "100055512345678", "ali.hassan"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("scrubbed output still contains %q: %s", leak, out)
+		}
+	}
+	if !strings.Contains(out, "1.2M followers") || !strings.Contains(out, `"name":"Brand"`) {
+		t.Errorf("page text lost: %s", out)
+	}
+	var v struct{ Badge struct{ Serialized string } }
+	if err := json.Unmarshal([]byte(out), &v); err != nil || !json.Valid([]byte(v.Badge.Serialized)) {
+		t.Errorf("serialized JSON broken: %v: %s", err, out)
+	}
+}
+
+// Synthetic fixtures (fakefb, handcrafted) are never scrubbed again: the
+// golden files are computed from them as they are.
+func TestScrubDirLeavesSyntheticFixtures(t *testing.T) {
+	dir := t.TempDir()
+	raw := `{"author":{"__typename":"User","id":"100012345","name":"Jane Fake"},"body":{"text":"hi"}}`
+	_ = os.WriteFile(filepath.Join(dir, "response.ndjson"), []byte(raw), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "meta.json"), []byte(`{"__scrubbed": true, "source": "fakefb"}`), 0o644)
+	if err := ScrubDir(dir, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, "response.ndjson")); string(got) != raw {
+		t.Fatalf("synthetic fixture changed: %s", got)
+	}
+}
+
+// A response cut off inside a value (a truncated HAR body) is not taken
+// as complete: it is scrubbed by pattern, and nothing of it is dropped.
+func TestScrubTruncatedJSON(t *testing.T) {
+	if _, err := decodeAll(strings.NewReader(`{"a":1}` + "\n" + `{"b":{"c":`)); err == nil {
+		t.Fatal("a truncated stream decoded without error")
+	}
+	in := `{"a":1}` + "\n" + `{"author":{"__typename":"User","id":"100012345","name":"Jane Real"},"rest":`
+	out := string(Scrub([]byte(in), nil))
+	if strings.Contains(out, "Jane Real") || strings.Contains(out, "100012345") || !strings.HasSuffix(out, `"rest":`) {
+		t.Fatalf("scrubbed: %s", out)
 	}
 }

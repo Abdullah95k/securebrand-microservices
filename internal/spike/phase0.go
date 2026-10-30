@@ -586,9 +586,10 @@ func bundleFile(rel string) bool {
 	return (strings.HasPrefix(rel, "smoke-") || strings.HasPrefix(rel, "run-")) && strings.HasSuffix(rel, ".jsonl")
 }
 
-// scrubFixtures scrubs every fixture case under root that is not marked as
-// scrubbed. Fixtures are written scrubbed; one left raw by an older kit or
-// an interrupted write is scrubbed here, before it can be packed.
+// scrubFixtures scrubs every fixture case under root that this scrubber
+// version has not scrubbed. Fixtures are written scrubbed; one left raw by
+// an older kit or an interrupted write, or scrubbed by an older version, is
+// scrubbed here before it can be packed.
 func scrubFixtures(root string) error {
 	queries, err := os.ReadDir(root)
 	if os.IsNotExist(err) {
