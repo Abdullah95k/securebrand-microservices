@@ -156,6 +156,8 @@ You are the **planning session** for igs. Your job is to **think, analyse and pl
 
 If the owner's HARs are available, analyse them first and answer whatever they settle, citing the request in the HAR. **Never commit raw HARs.**
 
+**Read [`har-findings-2026-10-30.md`](har-findings-2026-10-30.md) first.** It analyses the owner's 9 logged-out recordings and settles U2–U5, U9 and parts of U1 and U7: the operations and doc_ids, tokens, data availability, comment coverage, and the 24-post grid limit in the UI. Treat it as evidence that outranks the hypotheses below.
+
 **Owner constraints (October 2026):** logged out only; **no official Instagram API and no third-party scrapers** (Apify, ScrapeCreators and the like). Only our own tool. If logged-out access is too limited, the scope narrows (D4). The owner's answers and recording notes are kept in a Claude doc linked from the planning prompt; read it with the docs tools.
 
 **Web research notes (October 2026, unverified; mostly scraper vendors' reports, so treat them as leads):**
