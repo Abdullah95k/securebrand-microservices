@@ -342,10 +342,9 @@ func har(f flags) int {
 	if err != nil {
 		fail(err)
 	}
-	res, err := spike.ImportHAR(c, seed, f.fixturesDir, f.name)
-	if err != nil {
-		fail(err)
-	}
+	// A fixture failure still leaves the doc_ids, the point of the import,
+	// to print and write; it fails the command at the end.
+	res, fixturesErr := spike.ImportHAR(c, seed, f.fixturesDir, f.name)
 	if f.asJSON {
 		printJSON(res)
 	} else {
@@ -384,6 +383,12 @@ func har(f flags) int {
 	}
 	if len(res.DocIDs.Missing) > 0 {
 		fmt.Fprintln(os.Stderr, "the HAR misses some queries: record again and open a post, choose \"All comments\" and expand replies")
+	}
+	if fixturesErr != nil {
+		fmt.Fprintln(os.Stderr, "fbs-spike: fixtures:", spike.Redact(fixturesErr.Error()))
+		return exitError
+	}
+	if len(res.DocIDs.Missing) > 0 {
 		return exitNeedsAction
 	}
 	return 0
