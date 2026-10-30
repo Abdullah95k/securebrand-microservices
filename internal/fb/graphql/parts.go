@@ -45,6 +45,23 @@ func SplitParts(body []byte) []gjson.Result {
 	return out
 }
 
+// HasData reports whether any part carries data: a data object with a
+// field that is not null. {"data":{"node":null}} beside an error is a
+// failed request, not a partial one.
+func HasData(parts []gjson.Result) bool {
+	found := false
+	for _, p := range parts {
+		p.Get("data").ForEach(func(_, v gjson.Result) bool {
+			found = v.Type != gjson.Null
+			return !found
+		})
+		if found {
+			return true
+		}
+	}
+	return false
+}
+
 // Errors extracts GraphQL and legacy errors from every part.
 func Errors(parts []gjson.Result) []detect.GQLError {
 	var out []detect.GQLError
