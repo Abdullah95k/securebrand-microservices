@@ -197,6 +197,13 @@ func (s *PageStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 			_ = d.emitUnavailable(ctx, t, sc)
 			return done(map[string]int64{"pages_unavailable": 1})
 		}
+		if tl.NoFeed {
+			// The page id names something without a timeline (a new-style
+			// page's older Page object): this page's problem, so not drift,
+			// which would count against the query's breaker.
+			metrics.ParseTotal.WithLabelValues("timeline", "1", "no_feed").Inc()
+			return done(map[string]int64{"pages_no_feed": 1})
+		}
 
 		b := d.Producer.NewBatch()
 		var children []*taskv1.Task

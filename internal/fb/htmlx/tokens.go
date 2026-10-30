@@ -91,19 +91,40 @@ func ExtractTokens(html []byte) Tokens {
 	return t
 }
 
-var pageIDPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`"pageID"\s*:\s*"(\d+)"`),
-	regexp.MustCompile(`"page_id"\s*:\s*"(\d+)"`),
-	regexp.MustCompile(`"delegate_page"\s*:\s*\{\s*"id"\s*:\s*"(\d+)"`),
-	regexp.MustCompile(`fb://page/\?id=(\d+)`),
-	regexp.MustCompile(`fb://page/(\d+)`),
-	regexp.MustCompile(`fb://profile/(\d+)`),
-	regexp.MustCompile(`"userID"\s*:\s*"(\d{5,})"`),
-}
+// The page's id, the profile's first. A page made in the new Pages
+// experience is a profile (typed User) beside an older Page object with an
+// id of its own (delegate_page, pageID). Only the profile has a timeline:
+// given the Page's id, the timeline query returns a bare Page node with no
+// posts.
+var (
+	// profileUserID is the profile route's userID; a logged-out viewer's
+	// own is "0".
+	profileUserID  = regexp.MustCompile(`"userID"\s*:\s*"(\d{5,})"`)
+	pageIDPatterns = []*regexp.Regexp{
+		regexp.MustCompile(`fb://profile/(\d+)`),
+		regexp.MustCompile(`"pageID"\s*:\s*"(\d+)"`),
+		regexp.MustCompile(`"page_id"\s*:\s*"(\d+)"`),
+		regexp.MustCompile(`"delegate_page"\s*:\s*\{\s*"id"\s*:\s*"(\d+)"`),
+		regexp.MustCompile(`fb://page/\?id=(\d+)`),
+		regexp.MustCompile(`fb://page/(\d+)`),
+	}
+)
 
 // PageID returns the numeric id of the page/profile an HTML document is
-// about, or 0.
+// about, or 0. The userID counts only when it is the document's one: with
+// several, some belong to other people.
 func PageID(html []byte) int64 {
+	var only []byte
+	for _, m := range profileUserID.FindAllSubmatch(html, -1) {
+		if only != nil && !bytes.Equal(only, m[1]) {
+			only = nil
+			break
+		}
+		only = m[1]
+	}
+	if id, err := strconv.ParseInt(string(only), 10, 64); err == nil && id > 0 {
+		return id
+	}
 	for _, re := range pageIDPatterns {
 		if m := re.FindSubmatch(html); m != nil {
 			id, err := strconv.ParseInt(string(m[1]), 10, 64)

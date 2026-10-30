@@ -24,6 +24,11 @@ type TimelineResult struct {
 	Posts    []PostBundle
 	PageInfo PageInfo
 	NodeNull bool
+	// NoFeed: the node has no feed at all, which is not an empty timeline.
+	// The id named something without a timeline (a new-style page's older
+	// Page object), or Facebook shows no feed of it. It concerns this page
+	// only: the query and the parser are fine.
+	NoFeed bool
 }
 
 var timelineConnections = []string{"timeline_list_feed_units", "timeline_feed_units", "posts"}
@@ -46,10 +51,24 @@ func Timeline(parts []gjson.Result, pageID int64, baseURL string) (TimelineResul
 	if len(res.Posts) == 0 && allNodesNull(parts) {
 		res.NodeNull = true
 	}
+	if len(parts) > 0 && len(res.Posts) == 0 && !res.NodeNull && !hasFeed(parts) {
+		res.NoFeed = true
+	}
 	if !res.PageInfo.Found && len(res.Posts) > 0 {
 		rep.optional("page_info")
 	}
 	return res, rep
+}
+
+func hasFeed(parts []gjson.Result) bool {
+	for _, p := range parts {
+		for _, c := range timelineConnections {
+			if Find(p, c, "Story").Exists() {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func allNodesNull(parts []gjson.Result) bool {

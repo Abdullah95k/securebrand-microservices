@@ -35,9 +35,25 @@ func Page(html []byte, pageID int64) (*fbv1.Page, Report) {
 	p := &fbv1.Page{PageId: pageID, Status: fbv1.PageStatus_PAGE_STATUS_ACTIVE, Contact: map[string]string{}}
 
 	blobs := htmlx.JSONBlobs(html)
-	var mine []gjson.Result
-	for _, n := range Collect(blobs, "User", "Page") {
+	nodes := Collect(blobs, "User", "Page")
+	// The profile's nodes, then those of its older Page object (a
+	// new-style page's delegate_page), which may hold more of its fields.
+	ids := map[string]bool{idStr: true}
+	for _, n := range nodes {
 		if n.V.Get("id").String() == idStr {
+			if d := n.V.Get("delegate_page.id").String(); d != "" {
+				ids[d] = true
+			}
+		}
+	}
+	var mine []gjson.Result
+	for _, n := range nodes {
+		if n.V.Get("id").String() == idStr {
+			mine = append(mine, n.V)
+		}
+	}
+	for _, n := range nodes {
+		if id := n.V.Get("id").String(); id != idStr && ids[id] {
 			mine = append(mine, n.V)
 		}
 	}

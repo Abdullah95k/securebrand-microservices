@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -181,16 +182,34 @@ func (t *tail) String() string {
 	return strings.TrimSpace(string(t.buf))
 }
 
-// launchTimeout bounds Chromium's start, up to its DevTools port. A cold
-// start on a loaded machine (a fresh CI runner building its font caches,
-// say) can take far longer than the usual second: 20s was not always enough.
-// The caller's context (the bootstrapper's fb.browser.timeout) still bounds
-// the whole render, launch included.
-const launchTimeout = 45 * time.Second
+// launchAttempt bounds one start of Chromium, up to its DevTools port. A
+// start takes about a second; on a loaded CI runner some hang outright (no
+// port and no exit, 45s on), and a fresh one then works. The caller's
+// context (the bootstrapper's fb.browser.timeout) still bounds the whole
+// render, launch included.
+var launchAttempt = 20 * time.Second
+
+// launchAttempts is how many times launch starts Chromium when starts hang.
+const launchAttempts = 2
+
+// errHung reports a start that neither opened its DevTools port nor exited
+// within launchAttempt.
+var errHung = errors.New("browser: chromium did not open its DevTools port")
 
 // launch starts Chromium with a fresh profile and the DevTools endpoint on
-// a free port.
+// a free port, once more when a start hangs.
 func launch(ctx context.Context, binary string, noSandbox bool, args []string) (*process, error) {
+	var err error
+	for range launchAttempts {
+		var p *process
+		if p, err = launchOnce(ctx, binary, noSandbox, args); !errors.Is(err, errHung) {
+			return p, err
+		}
+	}
+	return nil, fmt.Errorf("%w (%d starts)", err, launchAttempts)
+}
+
+func launchOnce(ctx context.Context, binary string, noSandbox bool, args []string) (*process, error) {
 	profile, err := os.MkdirTemp("", "fbs-browser-")
 	if err != nil {
 		return nil, err
@@ -208,6 +227,12 @@ func launch(ctx context.Context, binary string, noSandbox bool, args []string) (
 		"--disable-default-apps", "--disable-breakpad", "--no-pings", "--metrics-recording-only",
 		"--disable-field-trial-config", "--disable-features=OptimizationHints,MediaRouter,Translate,AutofillServerCommunication",
 		"--safebrowsing-disable-auto-update",
+		// No keyring: on Linux Chromium otherwise asks the desktop's secret
+		// service over D-Bus as it starts, which can block where there is
+		// none (servers, CI runners). The rest, as Playwright starts it:
+		// nothing that waits on a session or a user.
+		"--password-store=basic", "--use-mock-keychain", "--no-service-autorun", "--disable-hang-monitor",
+		"--disable-component-extensions-with-background-pages", "--disable-search-engine-choice-screen",
 	}
 	if noSandbox || os.Geteuid() == 0 || os.Getenv("FBS_BROWSER_NO_SANDBOX") != "" {
 		flags = append(flags, "--no-sandbox") // Chromium refuses to run as root with its sandbox
@@ -234,7 +259,7 @@ func launch(ctx context.Context, binary string, noSandbox bool, args []string) (
 		close(p.done)
 	}()
 	// Chromium writes the port and the browser target path once listening.
-	deadline := time.Now().Add(launchTimeout)
+	deadline := time.Now().Add(launchAttempt)
 	for {
 		if f, err := os.Open(filepath.Join(profile, "DevToolsActivePort")); err == nil { //nolint:gosec // our own temp profile
 			sc := bufio.NewScanner(f)
@@ -266,7 +291,7 @@ func launch(ctx context.Context, binary string, noSandbox bool, args []string) (
 		}
 		if time.Now().After(deadline) {
 			p.stop()
-			return nil, fmt.Errorf("browser: chromium did not open its DevTools port within %s: %s", launchTimeout, p.stderr)
+			return nil, fmt.Errorf("%w within %s: %s", errHung, launchAttempt, p.stderr)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}

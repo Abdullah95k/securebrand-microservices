@@ -378,6 +378,11 @@ func (s *Server) timeline(rd *renderer, vars map[string]any) []byte {
 	defer w.mu.RUnlock()
 	pid, _ := strconv.ParseInt(str(vars["id"]), 10, 64)
 	p := w.pages[pid]
+	if p == nil && w.byDelegate[pid] != nil {
+		// A new-style page's Page object: Facebook resolves the id and
+		// returns no timeline at all.
+		return ndjson(obj{"data": obj{"node": obj{"__typename": "Page", "id": str(vars["id"])}}, "extensions": obj{"is_final": true}})
+	}
 	if p == nil {
 		return ndjson(obj{"data": obj{"node": nil}, "extensions": obj{"is_final": true}})
 	}
