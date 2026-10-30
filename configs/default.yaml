@@ -173,7 +173,12 @@ crawler:
   timeline_page_size: 10
   comments_page_size: 50
   consecutive_old_stop: 3
+  # Retries a task gets without its stream moving forward (a stream that
+  # saves new pages between rate limits starts counting again), and in all.
+  # Exhausted tasks go to the DLQ with reason max_attempts or
+  # max_total_attempts.
   max_attempts: 5
+  max_total_attempts: 50
   lease_ttl: 120s
   freshness_p0: 15m
   freshness_p1: 6h

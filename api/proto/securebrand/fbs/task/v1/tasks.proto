@@ -117,4 +117,7 @@ message Task {
   google.protobuf.Timestamp not_before = 16;
   google.protobuf.Timestamp enqueued_at = 17;
   map<string, string> trace = 18;
+  // Retries since the task last advanced its checkpoint. crawler.max_attempts
+  // applies to these; attempt (which picks the proxy tier) counts every retry.
+  uint32 stalls = 19;
 }

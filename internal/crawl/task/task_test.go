@@ -48,3 +48,18 @@ func TestDeterministicIDs(t *testing.T) {
 		t.Fatal("retry keeps the task id")
 	}
 }
+
+// Retries keep counting attempts (they pick the proxy tier) and carry the
+// stall count the worker maintains; a continuation starts both again.
+func TestRetryAndContinuationCounters(t *testing.T) {
+	tk := &taskv1.Task{TaskId: "t", Cursor: "c1", Attempt: 2, Stalls: 1}
+	if r := Retry(tk, "c2"); r.Attempt != 3 || r.Stalls != 1 || r.Cursor != "c2" {
+		t.Fatalf("retry: %+v", r)
+	}
+	if r := Retry(tk, ""); r.Cursor != "c1" {
+		t.Fatalf("retry without cursor moved it: %q", r.Cursor)
+	}
+	if c := Continuation(tk, "c9"); c.Attempt != 0 || c.Stalls != 0 || c.Seq != tk.Seq+1 {
+		t.Fatalf("continuation: %+v", c)
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	taskv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fbs/task/v1"
+	"github.com/abdullah95k/securebrand-microservices/internal/crawl/checkpoint"
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/jobs"
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/task"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/kafka"
@@ -22,10 +23,16 @@ import (
 // lifecycle: duplicate suppression, cancellation, stream leases, retries
 // with escalating delay, the dead letter queue and job accounting.
 type Worker struct {
-	D           *Deps
-	Stages      map[taskv1.Kind]Stage
+	D      *Deps
+	Stages map[taskv1.Kind]Stage
+	// MaxAttempts bounds the retries since a task last advanced its
+	// checkpoint (Task.stalls): a stream that moves forward between rate
+	// limits is not dead-lettered for them.
 	MaxAttempts uint32
-	LeaseTTL    time.Duration
+	// MaxTotalAttempts bounds every retry of a task, progress or not
+	// (Task.attempt); 0 means 10 × MaxAttempts.
+	MaxTotalAttempts uint32
+	LeaseTTL         time.Duration
 }
 
 var stageNames = map[taskv1.Kind]string{
@@ -70,6 +77,9 @@ func (w *Worker) Run(ctx context.Context, t *taskv1.Task) error {
 		return w.toRetry(ctx, t, "30s")
 	}
 
+	// The checkpoint before the run tells whether a run that failed still
+	// moved its stream forward.
+	before, _, beforeErr := d.Ckpt.Load(ctx, t.LineageId, t.Seq)
 	start := time.Now()
 	out := st.Run(ctx, t)
 	metrics.TaskSeconds.WithLabelValues(name).Observe(time.Since(start).Seconds())
@@ -92,19 +102,50 @@ func (w *Worker) Run(ctx context.Context, t *taskv1.Task) error {
 		return w.finish(ctx, t, out.Counters)
 	case Retry:
 		next := out.Next
-		if next.Attempt >= w.MaxAttempts {
+		next.Stalls = t.Stalls + 1
+		if beforeErr == nil {
+			if after, _, err := d.Ckpt.Load(ctx, t.LineageId, t.Seq); err == nil && advanced(before, after) {
+				next.Stalls = 0
+			}
+		}
+		if reason := w.exhausted(next); reason != "" {
 			metrics.Tasks.WithLabelValues(name, lane, "failed").Inc()
-			slog.Warn("task failed after retries", "stage", name, "job", t.JobId, "task", t.TaskId, "reason", out.Reason)
-			return w.deadLetter(ctx, t, "max_attempts", out.Reason, out.Counters)
+			slog.Warn("task failed after retries", "stage", name, "job", t.JobId, "task", t.TaskId,
+				"attempts", next.Attempt, "stalls", next.Stalls, "reason", out.Reason)
+			return w.deadLetter(ctx, t, reason, out.Reason, out.Counters)
 		}
 		metrics.Tasks.WithLabelValues(name, lane, "retry").Inc()
 		metrics.Retries.WithLabelValues(name, out.Delay).Inc()
-		slog.Debug("task retry", "stage", name, "task", t.TaskId, "attempt", next.Attempt, "delay", out.Delay, "reason", out.Reason)
+		slog.Debug("task retry", "stage", name, "task", t.TaskId, "attempt", next.Attempt, "stalls", next.Stalls,
+			"delay", out.Delay, "reason", out.Reason)
 		return w.toRetry(ctx, next, out.Delay)
 	default:
 		metrics.Tasks.WithLabelValues(name, lane, "failed").Inc()
 		return w.deadLetter(ctx, t, "permanent", out.Reason, out.Counters)
 	}
+}
+
+// advanced reports whether a stream's checkpoint moved between two loads:
+// the run saved at least one page. Only saved progress counts, so a run
+// whose checkpoint write failed is a stall.
+func advanced(before, after checkpoint.State) bool {
+	return after.Cursor != before.Cursor || after.Pages > before.Pages
+}
+
+// exhausted returns the dead-letter reason for a task about to be retried,
+// or "" while it may retry.
+func (w *Worker) exhausted(next *taskv1.Task) string {
+	total := w.MaxTotalAttempts
+	if total == 0 {
+		total = 10 * w.MaxAttempts
+	}
+	switch {
+	case next.Stalls >= w.MaxAttempts:
+		return "max_attempts"
+	case next.Attempt >= total:
+		return "max_total_attempts"
+	}
+	return ""
 }
 
 func (w *Worker) finish(ctx context.Context, t *taskv1.Task, c map[string]int64) error {
