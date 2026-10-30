@@ -53,6 +53,8 @@ fbs-crawler --stages page ─PostTask─▶ post ─ThreadTask─▶ thread     
 
 Design decisions: [ADR 0001](docs/adr/0001-logged-out-graphql-scraping.md) (scraping approach), [0002](docs/adr/0002-kafka-postgres-valkey.md) (Kafka, Postgres, Valkey), [0003](docs/adr/0003-temporary-media.md) (temporary media).
 
+Technical reference: [docs/fbs-reference](docs/fbs-reference/README.md) documents every component in depth, with a plan for an Instagram scraper on the same design.
+
 ### Quick start (Docker Compose, against fakefb)
 
 ```bash
