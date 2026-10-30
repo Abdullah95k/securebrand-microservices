@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -326,8 +327,13 @@ func (k *Kit) capture(ctx context.Context) error {
 	opt := k.Cfg.Options
 	opt.Tier = k.Cfg.Tiers[0]
 	r := k.runner(seed, opt, io.Discard)
+	// failures/ describes this capture only.
 	r.FailDir = k.path(DirFailures)
+	if err := os.RemoveAll(r.FailDir); err != nil {
+		return err
+	}
 	root := k.path(DirFixtures)
+	kept := 0
 	for _, p := range refs(k.Cfg.Pages, k.Cfg.CapturePages) {
 		ref, err := task.NormalizeRef(p)
 		if err != nil {
@@ -337,6 +343,9 @@ func (k *Kit) capture(ctx context.Context) error {
 		dirs, err := r.Capture(ctx, p, root, caseName(ref))
 		for _, d := range dirs {
 			k.logf("wrote %s", d)
+			if strings.HasPrefix(d, r.FailDir+string(filepath.Separator)) {
+				kept++
+			}
 		}
 		if err != nil {
 			k.logf("capture %s: %s", p, Redact(err.Error()))
@@ -364,8 +373,11 @@ func (k *Kit) capture(ctx context.Context) error {
 		return &StepError{Step: StepCapture, NeedsAction: true, Err: fmt.Errorf("the parsers do not understand %d captured fixtures: "+
 			"Facebook's response shapes differ from the modelled ones; send %s so the parsers can be updated", len(bad), k.path(FileBundle))}
 	case !kinds["timeline"]:
-		return &StepError{Step: StepCapture, NeedsAction: true, Err: fmt.Errorf("no timeline fixture could be captured (see the lines above; "+
-			"the responses are under %s); send %s", k.path(DirFailures), k.path(FileBundle))}
+		where := "see the lines above"
+		if kept > 0 {
+			where += "; the responses are under " + r.FailDir
+		}
+		return &StepError{Step: StepCapture, NeedsAction: true, Err: fmt.Errorf("no timeline fixture could be captured (%s); send %s", where, k.path(FileBundle))}
 	}
 	return nil
 }
@@ -676,8 +688,10 @@ func (k *Kit) bundle() error {
 			}
 		}
 		// The spike's own outputs are redacted; a URL with credentials in
-		// them means redaction missed a path. Fixtures are Facebook content.
-		if loc := userinfo.FindIndex(b); loc != nil && !strings.HasPrefix(rel, DirFixtures+"/") {
+		// them means redaction missed a path. Fixtures, and the responses
+		// kept under failures/, are Facebook content.
+		facebook := strings.HasPrefix(rel, DirFixtures+"/") || (strings.HasPrefix(rel, DirFailures+"/") && path.Base(rel) != "meta.json")
+		if loc := userinfo.FindIndex(b); loc != nil && !facebook {
 			return fmt.Errorf("%w: %s contains a URL with credentials (%s)", ErrSecretInBundle, rel, Redact(string(b[loc[0]:loc[1]])))
 		}
 		if err := tw.WriteHeader(&tar.Header{Name: "phase0/" + rel, Mode: 0o644, Size: int64(len(b)), ModTime: time.Now()}); err != nil {

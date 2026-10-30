@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"time"
@@ -57,7 +59,7 @@ func (r *Runner) Capture(ctx context.Context, page, dir, name string) ([]string,
 	}
 	failed := func(query string, resp *graphql.Response, err error) ([]string, error) {
 		err = fmt.Errorf("spike: %s: %w (%s)", query, errOr(err), classOf(resp))
-		d, kerr := r.keepFailure(id, query, date+"_"+name, resp, keep)
+		d, kerr := r.keepFailure(id, query, date+"_"+name, pg.PageId, resp, keep)
 		if d != "" {
 			written = append(written, d)
 		}
@@ -110,6 +112,9 @@ func classOf(r *graphql.Response) string {
 	if r == nil {
 		return ""
 	}
+	if r.Status == 0 { // nothing was sent (an open breaker)
+		return r.Class.String() + " " + r.Reason
+	}
 	ct := r.ContentType
 	if ct == "" {
 		ct = "no content type"
@@ -120,23 +125,18 @@ func classOf(r *graphql.Response) string {
 // keepFailure writes a response that was not OK, scrubbed like a fixture,
 // to FailDir/<query>/<case>/ with what came back and which tokens and
 // cookies the identity held (names only), so the bundle shows what Facebook
-// said.
-func (r *Runner) keepFailure(id *session.Identity, query, caseName string, resp *graphql.Response, keep []string) (string, error) {
-	if r.FailDir == "" || resp == nil {
+// said. Nothing is kept when no response came back.
+func (r *Runner) keepFailure(id *session.Identity, query, caseName string, pageID int64, resp *graphql.Response, keep []string) (string, error) {
+	if r.FailDir == "" || resp == nil || resp.Status == 0 {
 		return "", nil
 	}
 	file := "response.ndjson"
 	if bytes.HasPrefix(bytes.TrimSpace(resp.Body), []byte("<")) {
 		file = "response.html"
 	}
-	cookies := make([]string, 0)
-	for k := range id.Doer.Cookies(id.Base) {
-		cookies = append(cookies, k)
-	}
-	sort.Strings(cookies)
-	meta := map[string]any{"source": "capture", "status": resp.Status, "content_type": resp.ContentType,
+	meta := map[string]any{"source": "capture", "page_id": pageID, "status": resp.Status, "content_type": resp.ContentType,
 		"class": resp.Class.String(), "reason": resp.Reason, "bytes": len(resp.Body),
-		"tokens_found": tokensFound(id.Tokens()), "cookies": cookies}
+		"tokens_found": tokensFound(id.Tokens()), "cookies": slices.Sorted(maps.Keys(id.Doer.Cookies(id.Base)))}
 	return fixtures.Write(r.FailDir, query, caseName, file, resp.Body, meta, keep)
 }
 

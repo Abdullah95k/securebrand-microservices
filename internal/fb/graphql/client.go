@@ -190,8 +190,9 @@ func (c *Client) do(ctx context.Context, id *session.Identity, q registry.Query,
 
 	parts := SplitParts(tr.Body)
 	errs := Errors(parts)
+	ct := tr.Header.Get("Content-Type")
 	cls, reason := c.Rules.Classify(detect.Input{Status: tr.Status, Location: tr.Location,
-		ContentType: tr.Header.Get("Content-Type"), Body: tr.Body, Errors: errs, HasData: HasData(parts), Expect: "graphql"})
+		ContentType: ct, Body: tr.Body, Errors: errs, HasData: HasData(parts), Expect: "graphql"})
 	if cls == detect.OK && len(parts) == 0 {
 		cls, reason = detect.SoftError, "empty body"
 	}
@@ -203,7 +204,7 @@ func (c *Client) do(ctx context.Context, id *session.Identity, q registry.Query,
 	if c.Raw != nil && (c.CaptureAll || cls != detect.OK) {
 		c.Raw.Capture(ctx, q.Name, cls, tr.Body, req.Vars)
 	}
-	return &Response{Query: q, Parts: parts, Body: tr.Body, Status: tr.Status, ContentType: tr.Header.Get("Content-Type"), Class: cls,
+	return &Response{Query: q, Parts: parts, Body: tr.Body, Status: tr.Status, ContentType: ct, Class: cls,
 		Reason: reason, Errors: errs, Elapsed: elapsed, Vars: req.Vars, BytesIn: tr.BytesIn, BytesOut: tr.BytesOut}, nil
 }
 
