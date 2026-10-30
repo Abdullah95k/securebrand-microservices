@@ -140,8 +140,7 @@ func (r Rules) Classify(in Input) (Class, string) {
 			return SoftError, "fb error " + i64toa(e.Code)
 		}
 	}
-	isHTML := strings.Contains(in.ContentType, "text/html") || bytes.HasPrefix(bytes.TrimSpace(in.Body), []byte("<"))
-	if in.Expect == "graphql" && isHTML {
+	if in.Expect == "graphql" && isHTML(in) {
 		head := in.Body
 		if len(head) > 256<<10 {
 			head = head[:256<<10]
@@ -176,6 +175,18 @@ func (r Rules) Classify(in Input) (Class, string) {
 		return SoftError, "fb error " + i64toa(in.Errors[0].Code) + " " + truncate(in.Errors[0].Message, 60)
 	}
 	return OK, ""
+}
+
+// isHTML reports whether a GraphQL response is an HTML page. Facebook labels
+// its GraphQL JSON text/html too, so the content type alone says nothing
+// when the body is JSON (or JSON behind the for (;;); guard).
+func isHTML(in Input) bool {
+	body := bytes.TrimSpace(in.Body)
+	if bytes.HasPrefix(body, []byte("<")) {
+		return true
+	}
+	jsonBody := bytes.HasPrefix(body, []byte("{")) || bytes.HasPrefix(body, []byte("[")) || bytes.HasPrefix(body, []byte("for (;;);"))
+	return !jsonBody && strings.Contains(in.ContentType, "text/html")
 }
 
 func critical(errs []GQLError) bool {

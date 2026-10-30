@@ -1,10 +1,13 @@
 package spike
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"time"
@@ -14,6 +17,7 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/docids"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/graphql"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/parse"
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/session"
 	"github.com/abdullah95k/securebrand-microservices/internal/fixtures"
 )
 
@@ -53,9 +57,17 @@ func (r *Runner) Capture(ctx context.Context, page, dir, name string) ([]string,
 	if err := write("page_html", "response.html", pl.HTML, map[string]any{"page_id": pg.PageId}); err != nil {
 		return written, err
 	}
+	failed := func(query string, resp *graphql.Response, err error) ([]string, error) {
+		err = fmt.Errorf("spike: %s: %w (%s)", query, errOr(err), classOf(resp))
+		d, kerr := r.keepFailure(id, query, date+"_"+name, pg.PageId, resp, keep)
+		if d != "" {
+			written = append(written, d)
+		}
+		return written, errors.Join(err, kerr)
+	}
 	resp, err := r.GQL.Do(ctx, id, graphql.Request{Query: "timeline", Vars: map[string]any{"page_id": strconv.FormatInt(pg.PageId, 10), "count": 10}})
 	if err != nil || resp.Class != detect.OK {
-		return written, fmt.Errorf("spike: timeline: %w (%s)", errOr(err), classOf(resp))
+		return failed("timeline", resp, err)
 	}
 	if err := write("timeline", "response.ndjson", resp.Body, map[string]any{"page_id": pg.PageId}); err != nil {
 		return written, err
@@ -68,7 +80,7 @@ func (r *Runner) Capture(ctx context.Context, page, dir, name string) ([]string,
 	p := tl.Posts[0].Post
 	cresp, err := r.GQL.Do(ctx, id, graphql.Request{Query: "comments", Vars: map[string]any{"feedback_id": p.FeedbackId}})
 	if err != nil || cresp.Class != detect.OK {
-		return written, fmt.Errorf("spike: comments: %w (%s)", errOr(err), classOf(cresp))
+		return failed("comments", cresp, err)
 	}
 	if err := write("comments", "response.ndjson", cresp.Body, map[string]any{"page_id": pg.PageId, "post_id": p.PostId}); err != nil {
 		return written, err
@@ -80,7 +92,7 @@ func (r *Runner) Capture(ctx context.Context, page, dir, name string) ([]string,
 	th := cr.Threads[0]
 	rresp, err := r.GQL.Do(ctx, id, graphql.Request{Query: "replies", Vars: map[string]any{"feedback_id": th.FeedbackID, "expansion_token": th.ExpansionToken}})
 	if err != nil || rresp.Class != detect.OK {
-		return written, fmt.Errorf("spike: replies: %w (%s)", errOr(err), classOf(rresp))
+		return failed("replies", rresp, err)
 	}
 	err = write("replies", "response.ndjson", rresp.Body, map[string]any{"page_id": pg.PageId, "post_id": p.PostId, "parent_comment_id": th.CommentID})
 	return written, err
@@ -100,7 +112,32 @@ func classOf(r *graphql.Response) string {
 	if r == nil {
 		return ""
 	}
-	return r.Class.String() + " " + r.Reason
+	if r.Status == 0 { // nothing was sent (an open breaker)
+		return r.Class.String() + " " + r.Reason
+	}
+	ct := r.ContentType
+	if ct == "" {
+		ct = "no content type"
+	}
+	return fmt.Sprintf("%s %s; http %d, %s, %d bytes", r.Class, r.Reason, r.Status, ct, len(r.Body))
+}
+
+// keepFailure writes a response that was not OK, scrubbed like a fixture,
+// to FailDir/<query>/<case>/ with what came back and which tokens and
+// cookies the identity held (names only), so the bundle shows what Facebook
+// said. Nothing is kept when no response came back.
+func (r *Runner) keepFailure(id *session.Identity, query, caseName string, pageID int64, resp *graphql.Response, keep []string) (string, error) {
+	if r.FailDir == "" || resp == nil || resp.Status == 0 {
+		return "", nil
+	}
+	file := "response.ndjson"
+	if bytes.HasPrefix(bytes.TrimSpace(resp.Body), []byte("<")) {
+		file = "response.html"
+	}
+	meta := map[string]any{"source": "capture", "page_id": pageID, "status": resp.Status, "content_type": resp.ContentType,
+		"class": resp.Class.String(), "reason": resp.Reason, "bytes": len(resp.Body),
+		"tokens_found": tokensFound(id.Tokens()), "cookies": slices.Sorted(maps.Keys(id.Doer.Cookies(id.Base)))}
+	return fixtures.Write(r.FailDir, query, caseName, file, resp.Body, meta, keep)
 }
 
 // DocIDs loads pages and scans them and their JS bundles for Relay

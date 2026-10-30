@@ -266,8 +266,12 @@ func (s *Server) page(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(body)
 }
 
+// gqlContentType is what Facebook labels its GraphQL responses: JSON, sent
+// as text/html.
+const gqlContentType = `text/html; charset="utf-8"`
+
 func gqlError(w http.ResponseWriter, code int, msg string) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", gqlContentType)
 	_ = json.NewEncoder(w).Encode(obj{"errors": []any{obj{"code": code, "message": msg, "severity": "CRITICAL", "summary": msg}}})
 }
 
@@ -290,7 +294,7 @@ func (s *Server) graphql(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	if !lsdOK || r.Header.Get("x-fb-lsd") != lsd {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", gqlContentType)
 		_, _ = io.WriteString(w, `for (;;);{"error":1357001,"errorSummary":"Sorry, something went wrong","errorDescription":"Please try again."}`)
 		return
 	}
@@ -306,7 +310,7 @@ func (s *Server) graphql(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		s.rateLimited++
 		s.mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", gqlContentType)
 		_, _ = io.WriteString(w, `for (;;);{"error":1675004,"errorSummary":"Rate limit exceeded","errorDescription":"Please try again later."}`)
 		return
 	}
@@ -337,7 +341,7 @@ func (s *Server) graphql(w http.ResponseWriter, r *http.Request) {
 		gqlError(w, 1675012, "PersistedQueryNotFound: unknown operation "+friendly)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Type", gqlContentType)
 	_, _ = w.Write(body)
 }
 

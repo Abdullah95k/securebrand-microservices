@@ -5,12 +5,15 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -230,6 +233,69 @@ func TestPhase0SmokeStopsWhenBlocked(t *testing.T) {
 	}
 }
 
+// A capture whose GraphQL responses are refused keeps them, scrubbed and
+// with what came back, in the bundle: the error alone does not say why.
+func TestPhase0CaptureKeepsRefusedResponses(t *testing.T) {
+	k, env, log := testKit(t, fbtest.Options{})
+	k.Cfg.From = StepCapture
+	reg := filepath.Join(t.TempDir(), "seed.yaml")
+	if err := WriteRegistry(reg, embeddedSeed(t), "test"); err != nil {
+		t.Fatal(err)
+	}
+	k.Cfg.Registry = reg
+	env.Fake.SetFaults(fakefb.Faults{RateLimitEvery: 1})
+	_, err := k.Run(context.Background())
+	var se *StepError
+	if !errors.As(err, &se) || se.Step != StepCapture || !strings.Contains(err.Error(), DirFailures) {
+		t.Fatalf("want a capture StepError naming %s, got %v\n%s", DirFailures, err, log)
+	}
+	if !strings.Contains(log.String(), `rate_limited fb error 1675004; http 200, text/html; charset="utf-8"`) {
+		t.Fatalf("the console must say what came back:\n%s", log)
+	}
+	files := bundleFiles(t, filepath.Join(k.Cfg.Out, FileBundle))
+	var metas int
+	for name, body := range files {
+		if !strings.HasPrefix(name, "phase0/"+DirFailures+"/timeline/") || !strings.HasSuffix(name, "/meta.json") {
+			continue
+		}
+		metas++
+		var m struct {
+			PageID      int64           `json:"page_id"`
+			Status      int             `json:"status"`
+			ContentType string          `json:"content_type"`
+			Class       string          `json:"class"`
+			Tokens      map[string]bool `json:"tokens_found"`
+			Cookies     []string        `json:"cookies"`
+			Scrubbed    bool            `json:"__scrubbed"`
+		}
+		if err := json.Unmarshal(body, &m); err != nil {
+			t.Fatal(err)
+		}
+		if m.PageID == 0 || m.Status != 200 || !strings.HasPrefix(m.ContentType, "text/html") || m.Class != "rate_limited" ||
+			!m.Tokens["lsd"] || !slices.Contains(m.Cookies, "datr") || !m.Scrubbed {
+			t.Errorf("%s: %+v", name, m)
+		}
+		if _, ok := files[strings.TrimSuffix(name, "meta.json")+"response.ndjson"]; !ok {
+			t.Errorf("%s: the response itself is missing", name)
+		}
+	}
+	if metas != len(refs(k.Cfg.Pages, k.Cfg.CapturePages)) {
+		t.Fatalf("%d refused timelines kept, want one per captured page; bundle: %v", metas, slices.Sorted(maps.Keys(files)))
+	}
+
+	// A capture that works again leaves no failures of the earlier one.
+	env.Fake.SetFaults(fakefb.Faults{})
+	k.Cfg.From = StepCapture
+	if _, err := k.Run(context.Background()); err != nil {
+		t.Fatalf("%v\n%s", err, log)
+	}
+	for name := range bundleFiles(t, filepath.Join(k.Cfg.Out, FileBundle)) {
+		if strings.HasPrefix(name, "phase0/"+DirFailures+"/") {
+			t.Fatalf("stale failure bundled: %s", name)
+		}
+	}
+}
+
 func TestBundleRefusesSecrets(t *testing.T) {
 	k, _, _ := testKit(t, fbtest.Options{})
 	if err := os.WriteFile(filepath.Join(k.Cfg.Out, RunFile("direct")), []byte(`{"reason":"`+testPassword+`"}`+"\n"), 0o644); err != nil {
@@ -244,8 +310,23 @@ func TestBundleRefusesSecrets(t *testing.T) {
 	if err := k.bundle(); !errors.Is(err, ErrSecretInBundle) {
 		t.Fatalf("want ErrSecretInBundle for a URL with credentials, got %v", err)
 	}
-	// Unknown files never enter the bundle.
 	_ = os.WriteFile(filepath.Join(k.Cfg.Out, RunFile("direct")), []byte("{}\n"), 0o644)
+	// A response kept under failures/ is Facebook content, which can hold
+	// such URLs; its meta.json is ours and is still checked.
+	kept := filepath.Join(k.Cfg.Out, DirFailures, "timeline", "20261030_page")
+	if err := os.MkdirAll(kept, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(kept, "response.html"), []byte(`<a href="https://www.facebook.com?next=a@b">x</a>`), 0o644)
+	_ = os.WriteFile(filepath.Join(kept, "meta.json"), []byte(`{"reason":"redirect http://u:p@1.2.3.4:80"}`), 0o644)
+	if err := k.bundle(); !errors.Is(err, ErrSecretInBundle) || !strings.Contains(err.Error(), "meta.json") {
+		t.Fatalf("want ErrSecretInBundle for the kept meta.json, got %v", err)
+	}
+	_ = os.WriteFile(filepath.Join(kept, "meta.json"), []byte(`{"source":"capture"}`), 0o644)
+	if err := k.bundle(); err != nil {
+		t.Fatalf("a kept Facebook response must not stop the bundle: %v", err)
+	}
+	// Unknown files never enter the bundle.
 	_ = os.WriteFile(filepath.Join(k.Cfg.Out, "proxies.yaml"), []byte("password: "+testPassword), 0o600)
 	if err := k.bundle(); err != nil {
 		t.Fatal(err)
