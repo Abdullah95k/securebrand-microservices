@@ -239,7 +239,7 @@ appears in it.
 - people's names and ids, including people mentioned in comments;
 - people's profile and `/people/` links;
 - signed media URLs;
-- the text people wrote: comment and post bodies, text that mentions someone, and media captions. Letters and digits become `x`, and the length is kept so mention offsets stay valid.
+- the text people wrote: comment and post bodies (any text inside a comment), text that mentions someone, a profile's status, and media captions. Letters and digits become `x`, and the length is kept so mention offsets stay valid.
 
 What stays is the page's own name, links and text (such as its follower line), and real structure: post and comment ids, permalinks, timestamps and counts.
 

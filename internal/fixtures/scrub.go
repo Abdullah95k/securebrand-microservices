@@ -61,7 +61,7 @@ func ScrubDir(dir string, keep []string) error {
 
 // scrubVersion is recorded in meta.json. Raise it when Scrub learns a new
 // pattern, so fixtures scrubbed before are scrubbed again when bundled.
-const scrubVersion = 2
+const scrubVersion = 3
 
 func scrubberVersion(meta map[string]any) int64 {
 	if n, ok := meta["__scrubber"].(json.Number); ok {
@@ -114,9 +114,11 @@ var (
 	nameKeys = map[string]bool{"name": true, "short_name": true, "alternate_name": true, "first_name": true,
 		"last_name": true, "display_name": true, "username": true}
 	// Keys whose {"text": ...} people wrote: comment and post bodies,
-	// translations, link previews.
-	authoredKeys = map[string]bool{"body": true, "preferred_body": true, "message": true, "translated_body_for_viewer": true,
-		"translation": true, "description": true, "title_with_entities": true, "snippet": true}
+	// translations, link previews, a profile's status. Any text inside a
+	// comment counts too (see transform).
+	authoredKeys = map[string]bool{"body": true, "body_renderer": true, "preferred_body": true, "message": true,
+		"translated_body_for_viewer": true, "translation": true, "description": true, "title_with_entities": true,
+		"snippet": true, "profile_status_text": true}
 	// Strings describing media, which name who is in it.
 	captionKeys = map[string]bool{"accessibility_caption": true, "alt_text": true}
 
@@ -208,7 +210,7 @@ func (sc *scrubber) jsonDocs(b []byte) ([]byte, bool) {
 		if i > 0 {
 			out.WriteByte('\n')
 		}
-		out.Write(encode(sc.transform(d, ""), false))
+		out.Write(encode(sc.transform(d, "", false), false))
 	}
 	if bytes.HasSuffix(b, []byte("\n")) {
 		out.WriteByte('\n')
@@ -234,7 +236,7 @@ func (sc *scrubber) html(s string) []byte {
 	last := 0
 	for _, bl := range blocks {
 		out.WriteString(sc.patterns(s[last:bl.start]))
-		out.Write(encode(sc.transform(bl.v, ""), true)) // escaped: it sits in a <script>
+		out.Write(encode(sc.transform(bl.v, "", false), true)) // escaped: it sits in a <script>
 		last = bl.end
 	}
 	out.WriteString(sc.patterns(s[last:]))
@@ -307,36 +309,38 @@ func (sc *scrubber) collectPatterns(s string) {
 }
 
 // transform scrubs names, people's text and people's links in v, which
-// sits under key.
-func (sc *scrubber) transform(v any, key string) any {
+// sits under key; inComment reports an enclosing comment, all of whose
+// text a person wrote, whatever key holds it.
+func (sc *scrubber) transform(v any, key string, inComment bool) any {
 	switch v := v.(type) {
 	case *object:
 		page := sc.keep[idString(v.get("id"))]
 		user := isUser(v) && !page
+		inComment = inComment || key == "comment" || v.get("__typename") == "Comment"
 		for i, k := range v.keys {
 			s, isString := v.vals[i].(string)
 			switch {
 			case isString && nameKeys[k] && !page:
 				v.vals[i] = "Person " + pseudo(s, "name")[:6]
-			case isString && k == "text" && (authoredKeys[key] || sc.mentionsPerson(v)):
+			case isString && k == "text" && (inComment || authoredKeys[key] || sc.mentionsPerson(v)):
 				v.vals[i] = blank(s)
 			case isString && captionKeys[k]:
 				v.vals[i] = blank(s)
 			case isString && user && strings.Contains(s, "facebook.com/") && !strings.Contains(s, "fbcdn.net"):
 				v.vals[i] = "https://www.facebook.com/scrubbed.profile"
 			default:
-				v.vals[i] = sc.transform(v.vals[i], k)
+				v.vals[i] = sc.transform(v.vals[i], k, inComment)
 			}
 		}
 		return v
 	case []any:
 		for i, x := range v {
-			v[i] = sc.transform(x, key)
+			v[i] = sc.transform(x, key, inComment)
 		}
 		return v
 	case string:
 		if inner, ok := serialized(v); ok {
-			return string(encode(sc.transform(inner, key), false))
+			return string(encode(sc.transform(inner, key, inComment), false))
 		}
 	}
 	return v
