@@ -225,3 +225,21 @@ func TestRetriesDroppedConnection(t *testing.T) {
 		t.Fatalf("%v %v after %d calls", subjects, err, calls.Load())
 	}
 }
+
+// Every request is marked replayable, so net/http itself retries a POST on
+// a kept-alive connection the registry closed while it sat idle.
+func TestRequestsAreReplayable(t *testing.T) {
+	var key string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key = r.Header.Get("Idempotency-Key")
+		_, _ = w.Write([]byte(`{"is_compatible":true}`))
+	}))
+	defer srv.Close()
+	c := &Client{URL: srv.URL}
+	if err := c.do(context.Background(), http.MethodPost, "/compatibility/subjects/x/versions/latest", map[string]string{"schema": "s"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if key == "" {
+		t.Fatal("POST without Idempotency-Key: net/http will not replay it")
+	}
+}

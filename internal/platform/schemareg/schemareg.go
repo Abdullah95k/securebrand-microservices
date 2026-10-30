@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -77,7 +78,10 @@ func IsIncompatible(err error) bool {
 
 // do sends one request. Every call this client makes is idempotent, so a
 // request on a connection the registry closed meanwhile (Redpanda drops
-// kept-alive connections after some error responses) is sent once more.
+// kept-alive connections after some error responses, and idle ones) is
+// sent once more. The Idempotency-Key header (see send) lets net/http
+// replay a POST on a reused connection itself; the retry here covers a
+// connection dropped mid-request and the transport's own error.
 func (c *Client) do(ctx context.Context, method, path string, in, out any) error {
 	var body []byte
 	if in != nil {
@@ -88,7 +92,8 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 		body = b
 	}
 	err := c.send(ctx, method, path, body, out)
-	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, syscall.ECONNRESET) {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, syscall.ECONNRESET) ||
+		(err != nil && strings.Contains(err.Error(), "server closed idle connection")) {
 		err = c.send(ctx, method, path, body, out)
 	}
 	return err
@@ -105,6 +110,9 @@ func (c *Client) send(ctx context.Context, method, path string, body []byte, out
 	}
 	req.Header.Set("Content-Type", "application/vnd.schemaregistry.v1+json")
 	req.Header.Set("Accept", "application/vnd.schemaregistry.v1+json, application/json")
+	// Marks the request replayable: net/http then retries a POST, like a
+	// GET, when the registry closed the kept-alive connection under it.
+	req.Header.Set("Idempotency-Key", strconv.FormatInt(time.Now().UnixNano(), 36))
 	if c.Username != "" {
 		req.SetBasicAuth(c.Username, c.Password)
 	}
