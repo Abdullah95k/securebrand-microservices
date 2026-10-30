@@ -182,9 +182,10 @@ func (t *tail) String() string {
 }
 
 // launchTimeout bounds Chromium's start, up to its DevTools port. A cold
-// start on a loaded machine (a fresh CI runner building its font caches, or
-// startup D-Bus calls, whose default timeout is 25s) takes far longer than
-// the usual second.
+// start on a loaded machine (a fresh CI runner building its font caches,
+// say) can take far longer than the usual second: 20s was not always enough.
+// The caller's context (the bootstrapper's fb.browser.timeout) still bounds
+// the whole render, launch included.
 const launchTimeout = 45 * time.Second
 
 // launch starts Chromium with a fresh profile and the DevTools endpoint on
@@ -248,8 +249,10 @@ func launch(ctx context.Context, binary string, noSandbox bool, args []string) (
 			}
 		}
 		if err := ctx.Err(); err != nil {
+			// The render's budget ran out first: what Chromium said is
+			// the only clue to why it was slow.
 			p.stop()
-			return nil, fmt.Errorf("browser: launch: %w", err)
+			return nil, fmt.Errorf("browser: launch: %w: %s", err, p.stderr)
 		}
 		select {
 		case <-p.done:
