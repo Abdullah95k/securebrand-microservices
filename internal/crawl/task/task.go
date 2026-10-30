@@ -59,21 +59,18 @@ func Continuation(t *taskv1.Task, cursor string) *taskv1.Task {
 	c := cloneShallow(t)
 	c.Seq = t.Seq + 1
 	c.Cursor = cursor
-	c.Attempt = 0
+	c.Attempt, c.Stalls = 0, 0
 	c.EnqueuedAt = nil
 	return Finalize(c)
 }
 
-// Retry returns the same task (same id) to run again from cursor. Attempt
-// counts failures since the task last made progress: a retry from a cursor
-// past the one the task started from is its first failure there, so a long
-// stream that advances between rate limits is not dead-lettered for them.
+// Retry returns the same task (same id) with attempt incremented. The worker
+// sets Stalls, which only it can tell from the task's checkpoint.
 func Retry(t *taskv1.Task, cursor string) *taskv1.Task {
 	c := cloneShallow(t)
 	c.Attempt = t.Attempt + 1
-	if cursor != "" && cursor != t.Cursor {
+	if cursor != "" {
 		c.Cursor = cursor
-		c.Attempt = 1
 	}
 	return c
 }
@@ -81,7 +78,7 @@ func Retry(t *taskv1.Task, cursor string) *taskv1.Task {
 func cloneShallow(t *taskv1.Task) *taskv1.Task {
 	c := &taskv1.Task{
 		TaskId: t.TaskId, LineageId: t.LineageId, Seq: t.Seq, JobId: t.JobId, Lane: t.Lane, Kind: t.Kind,
-		Mode: t.Mode, Cursor: t.Cursor, Limits: t.Limits, Affinity: t.Affinity, Attempt: t.Attempt, Trace: t.Trace,
+		Mode: t.Mode, Cursor: t.Cursor, Limits: t.Limits, Affinity: t.Affinity, Attempt: t.Attempt, Stalls: t.Stalls, Trace: t.Trace,
 	}
 	switch s := t.Scope.(type) {
 	case *taskv1.Task_Page:

@@ -131,7 +131,8 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 		Emit: &emit.Emitter{Producer: producer, HMACKey: []byte(cfg.Privacy.AuthorHMACKey),
 			Pseudonymize: cfg.Privacy.PIIMode == "pseudonymized", Suppression: supp},
 	}
-	worker := &stage.Worker{D: deps, MaxAttempts: uint32(cfg.Crawler.MaxAttempts), LeaseTTL: cfg.Crawler.LeaseTTL,
+	worker := &stage.Worker{D: deps, MaxAttempts: uint32(cfg.Crawler.MaxAttempts), MaxTotalAttempts: uint32(cfg.Crawler.MaxTotalAttempts),
+		LeaseTTL: cfg.Crawler.LeaseTTL,
 		Stages: map[taskv1.Kind]stage.Stage{
 			taskv1.Kind_KIND_PAGE:   &stage.PageStage{D: deps},
 			taskv1.Kind_KIND_POST:   &stage.PostStage{D: deps},

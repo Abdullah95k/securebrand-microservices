@@ -49,20 +49,17 @@ func TestDeterministicIDs(t *testing.T) {
 	}
 }
 
-// Attempts count failures without progress: a retry from the same cursor
-// is one more attempt, one from a cursor further on starts again at 1.
-func TestRetryCountsFailuresSinceProgress(t *testing.T) {
-	tk := &taskv1.Task{TaskId: "t", Cursor: "c1", Attempt: 4}
-	if r := Retry(tk, "c1"); r.Attempt != 5 || r.Cursor != "c1" {
-		t.Fatalf("same cursor: attempt %d cursor %q", r.Attempt, r.Cursor)
+// Retries keep counting attempts (they pick the proxy tier) and carry the
+// stall count the worker maintains; a continuation starts both again.
+func TestRetryAndContinuationCounters(t *testing.T) {
+	tk := &taskv1.Task{TaskId: "t", Cursor: "c1", Attempt: 2, Stalls: 1}
+	if r := Retry(tk, "c2"); r.Attempt != 3 || r.Stalls != 1 || r.Cursor != "c2" {
+		t.Fatalf("retry: %+v", r)
 	}
-	if r := Retry(tk, ""); r.Attempt != 5 || r.Cursor != "c1" {
-		t.Fatalf("no cursor: attempt %d cursor %q", r.Attempt, r.Cursor)
+	if r := Retry(tk, ""); r.Cursor != "c1" {
+		t.Fatalf("retry without cursor moved it: %q", r.Cursor)
 	}
-	if r := Retry(tk, "c2"); r.Attempt != 1 || r.Cursor != "c2" {
-		t.Fatalf("progress: attempt %d cursor %q", r.Attempt, r.Cursor)
-	}
-	if tk.Attempt != 4 || tk.Cursor != "c1" {
-		t.Fatal("Retry changed its input")
+	if c := Continuation(tk, "c9"); c.Attempt != 0 || c.Stalls != 0 || c.Seq != tk.Seq+1 {
+		t.Fatalf("continuation: %+v", c)
 	}
 }

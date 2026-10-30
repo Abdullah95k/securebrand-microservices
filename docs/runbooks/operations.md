@@ -94,7 +94,9 @@ The manual path is still there:
 2. `PUT /v1/admin/queries/{name}` with the new doc_id (and variables if they
    changed). Crawlers reload within 30s; parked tasks come back from the 5m
    retry topic. Tasks that exhausted retries are in the DLQ:
-   `fbctl dlq replay --reason max_attempts`.
+   `fbctl dlq replay --reason max_attempts`. That reason is
+   `crawler.max_attempts` retries in a row without the stream moving forward.
+   `max_total_attempts` is the cap on all retries of one task.
 
 `GET /v1/admin/queries` shows each entry's `last_check`, `last_checked_at` and `last_ok_at`. The sync's own requests are counted under `query="registry_sync:<name>"` in `fbs_fb_requests_total`, apart from crawl traffic.
 
