@@ -181,6 +181,12 @@ func (t *tail) String() string {
 	return strings.TrimSpace(string(t.buf))
 }
 
+// launchTimeout bounds Chromium's start, up to its DevTools port. A cold
+// start on a loaded machine (a fresh CI runner building its font caches, or
+// startup D-Bus calls, whose default timeout is 25s) takes far longer than
+// the usual second.
+const launchTimeout = 45 * time.Second
+
 // launch starts Chromium with a fresh profile and the DevTools endpoint on
 // a free port.
 func launch(ctx context.Context, binary string, noSandbox bool, args []string) (*process, error) {
@@ -227,7 +233,7 @@ func launch(ctx context.Context, binary string, noSandbox bool, args []string) (
 		close(p.done)
 	}()
 	// Chromium writes the port and the browser target path once listening.
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(launchTimeout)
 	for {
 		if f, err := os.Open(filepath.Join(profile, "DevToolsActivePort")); err == nil { //nolint:gosec // our own temp profile
 			sc := bufio.NewScanner(f)
@@ -257,7 +263,7 @@ func launch(ctx context.Context, binary string, noSandbox bool, args []string) (
 		}
 		if time.Now().After(deadline) {
 			p.stop()
-			return nil, fmt.Errorf("browser: chromium did not open its DevTools port within 20s: %s", p.stderr)
+			return nil, fmt.Errorf("browser: chromium did not open its DevTools port within %s: %s", launchTimeout, p.stderr)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
