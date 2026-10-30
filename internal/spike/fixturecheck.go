@@ -92,6 +92,9 @@ func checkFixture(query, dir string) FixtureCheck {
 		var tl parse.TimelineResult
 		tl, rep = parse.Timeline(graphql.SplitParts(body), m.PageID, "https://www.facebook.com")
 		res.Items = len(tl.Posts)
+		if tl.NoFeed {
+			res.Err = "no feed: the page id names something without a timeline (a new-style page's older Page id?)"
+		}
 	case "comments", "replies":
 		body := read("response.ndjson")
 		if res.Err != "" {

@@ -253,6 +253,10 @@ func (r *Runner) page(ctx context.Context, p PageRef) error {
 			end = "drift"
 			break
 		}
+		if tl.NoFeed {
+			end = "no_feed" // the page id has no timeline
+			break
+		}
 		for i := range tl.Posts {
 			b := tl.Posts[i]
 			posts = append(posts, &b)

@@ -112,16 +112,37 @@ func TestCommentsQuotedTwice(t *testing.T) {
 // that has nothing (more) to show still parses clean.
 func TestTimelineWithoutFeed(t *testing.T) {
 	bare := `{"data":{"node":{"__typename":"Page","id":"104000000000123"}},"extensions":{"is_final":true}}`
+	// Not a parser failure (that would count against the query's breaker):
+	// the page's own problem, flagged.
 	res, rep := Timeline([]gjson.Result{gjson.Parse(bare)}, 104000000000123, "https://www.facebook.com")
-	if len(res.Posts) != 0 || res.NodeNull || len(rep.Missing) != 1 || rep.Missing[0] != "timeline.feed" {
+	if len(res.Posts) != 0 || res.NodeNull || !res.NoFeed || !rep.OK() {
 		t.Fatalf("bare page node: %+v %+v", res, rep)
 	}
 	empty := `{"data":{"node":{"__typename":"User","id":"1","timeline_list_feed_units":{"edges":[],"page_info":{"has_next_page":false}}}}}`
-	if _, rep := Timeline([]gjson.Result{gjson.Parse(empty)}, 1, "https://www.facebook.com"); !rep.OK() {
-		t.Fatalf("empty feed: missing %v", rep.Missing)
+	if res, rep := Timeline([]gjson.Result{gjson.Parse(empty)}, 1, "https://www.facebook.com"); res.NoFeed || !rep.OK() {
+		t.Fatalf("empty feed: %+v %+v", res, rep)
 	}
 	gone := `{"data":{"node":null},"extensions":{"is_final":true}}`
-	if res, rep := Timeline([]gjson.Result{gjson.Parse(gone)}, 1, "https://www.facebook.com"); !res.NodeNull || !rep.OK() {
+	if res, rep := Timeline([]gjson.Result{gjson.Parse(gone)}, 1, "https://www.facebook.com"); !res.NodeNull || res.NoFeed || !rep.OK() {
 		t.Fatalf("deleted page: %+v %+v", res, rep)
+	}
+	if res, _ := Timeline(nil, 1, "https://www.facebook.com"); res.NoFeed {
+		t.Fatal("no parts is not a page without a feed")
+	}
+}
+
+// A new-style page's profile names its older Page object, whose node may
+// hold fields the profile's does not.
+func TestPageReadsItsPageObject(t *testing.T) {
+	html := `<script type="application/json">{"user":{"__typename":"User","id":"100064000000777","name":"News Iraq",` +
+		`"delegate_page":{"id":"104000000000123","category_name":"Media/news company"}}}</script>` +
+		`<script type="application/json">{"page":{"__typename":"Page","id":"104000000000123","page_likers":{"global_likers_count":5000},` +
+		`"website":"https://example.org"}}</script>` +
+		`<script type="application/json">{"other":{"__typename":"Page","id":"999","website":"https://wrong.example"}}</script>` +
+		`<script>{"props":{"userID":"100064000000777"}}</script>`
+	p, rep := Page([]byte(html), 0)
+	if p == nil || p.PageId != 100064000000777 || p.Name != "News Iraq" || p.GetLikesCount() != 5000 ||
+		p.Contact["website"] != "https://example.org" || len(p.Categories) != 1 {
+		t.Fatalf("page %+v, report %+v", p, rep)
 	}
 }

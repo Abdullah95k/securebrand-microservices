@@ -44,6 +44,14 @@ func TestPageIDPrefersTheProfile(t *testing.T) {
 	if id := PageID([]byte(`{"userID":"0"},{"pageID":"104000000000123"}`)); id != 104000000000123 {
 		t.Fatalf("page id = %d", id)
 	}
+	// Several userIDs: some are other people's, so none is trusted.
+	if id := PageID([]byte(`{"userID":"100012345678901"},{"userID":"100064000000777"},{"pageID":"104000000000123"}`)); id != 104000000000123 {
+		t.Fatalf("page id = %d with several userIDs", id)
+	}
+	// The same userID repeated is still the one.
+	if id := PageID([]byte(`{"userID":"100064000000777"},{"userID":"100064000000777"},{"pageID":"104000000000123"}`)); id != 100064000000777 {
+		t.Fatalf("page id = %d with a repeated userID", id)
+	}
 }
 
 func itoa(i int) string {
