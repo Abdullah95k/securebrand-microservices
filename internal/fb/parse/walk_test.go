@@ -106,3 +106,22 @@ func TestCommentsQuotedTwice(t *testing.T) {
 		})
 	}
 }
+
+// Asked with a new-style page's older Page id, Facebook returns a bare Page
+// node: no feed at all, which is not an empty timeline. A real timeline
+// that has nothing (more) to show still parses clean.
+func TestTimelineWithoutFeed(t *testing.T) {
+	bare := `{"data":{"node":{"__typename":"Page","id":"104000000000123"}},"extensions":{"is_final":true}}`
+	res, rep := Timeline([]gjson.Result{gjson.Parse(bare)}, 104000000000123, "https://www.facebook.com")
+	if len(res.Posts) != 0 || res.NodeNull || len(rep.Missing) != 1 || rep.Missing[0] != "timeline.feed" {
+		t.Fatalf("bare page node: %+v %+v", res, rep)
+	}
+	empty := `{"data":{"node":{"__typename":"User","id":"1","timeline_list_feed_units":{"edges":[],"page_info":{"has_next_page":false}}}}}`
+	if _, rep := Timeline([]gjson.Result{gjson.Parse(empty)}, 1, "https://www.facebook.com"); !rep.OK() {
+		t.Fatalf("empty feed: missing %v", rep.Missing)
+	}
+	gone := `{"data":{"node":null},"extensions":{"is_final":true}}`
+	if res, rep := Timeline([]gjson.Result{gjson.Parse(gone)}, 1, "https://www.facebook.com"); !res.NodeNull || !rep.OK() {
+		t.Fatalf("deleted page: %+v %+v", res, rep)
+	}
+}

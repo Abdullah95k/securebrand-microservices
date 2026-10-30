@@ -311,7 +311,7 @@ func (r *renderer) pageHTML(p *Page, lsd, datr string, consent bool) []byte {
 			"is_verified":     p.Verified,
 			"profilePicLarge": obj{"uri": r.base + "/media/profile_" + strconv.FormatInt(p.ID, 10) + ".jpg"},
 			"cover_photo":     obj{"photo": obj{"image": obj{"uri": r.base + "/media/cover_" + strconv.FormatInt(p.ID, 10) + ".jpg"}}},
-			"delegate_page":   obj{"id": strconv.FormatInt(p.ID, 10), "category_name": p.Category},
+			"delegate_page":   obj{"id": strconv.FormatInt(p.delegate(), 10), "category_name": p.Category},
 			"profile_social_context": obj{"content": []any{
 				obj{"text": obj{"text": humanCount(p.Likes) + " likes"}},
 				obj{"text": obj{"text": humanCount(p.Followers) + " followers"}},
@@ -327,7 +327,7 @@ func (r *renderer) pageHTML(p *Page, lsd, datr string, consent bool) []byte {
 	fmt.Fprintf(&b, "<title>%s | Facebook</title>", html.EscapeString(p.Name))
 	fmt.Fprintf(&b, `<meta property="og:title" content="%s"/>`, html.EscapeString(p.Name))
 	fmt.Fprintf(&b, `<meta property="og:url" content="%s"/>`, r.pageURL(p))
-	fmt.Fprintf(&b, `<meta property="al:android:url" content="fb://page/%d"/>`, p.ID)
+	fmt.Fprintf(&b, `<meta property="al:android:url" content="fb://page/%d"/>`, p.delegate())
 	bundle := r.bundle
 	if bundle == "" {
 		bundle = "/rsrc.php/v3/relay.js"
@@ -347,7 +347,9 @@ func (r *renderer) pageHTML(p *Page, lsd, datr string, consent bool) []byte {
 		fmt.Fprintf(&b, `<script type="application/json" data-sjs>%s</script>`, site)
 	}
 	fmt.Fprintf(&b, `<script type="application/json" data-sjs>%s</script>`, hb)
-	fmt.Fprintf(&b, `<script>window.requireLazy&&requireLazy(["pageID"],function(){});var x={"pageID":"%d"};</script>`, p.ID)
+	fmt.Fprintf(&b, `<script>window.requireLazy&&requireLazy(["pageID"],function(){});var x={"pageID":"%d"};</script>`, p.delegate())
+	// The profile route's props name the profile, the id with a timeline.
+	fmt.Fprintf(&b, `<script type="application/json" data-sjs>{"require":[["CometProfileRoot","props",null,[{"userID":"%d"}]]]}</script>`, p.ID)
 	if r.timeline != "" {
 		// The page's own first timeline request, as Facebook's client makes
 		// it: what a render-and-intercept captures.

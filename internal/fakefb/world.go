@@ -99,6 +99,18 @@ type Page struct {
 	Verified  bool
 	Intro     string
 	Posts     []*Post // newest first
+	// DelegateID, when set, is the id of the older Page object beside a
+	// new-style page's profile (ID), as Facebook's new Pages experience
+	// has it. Only the profile has a timeline.
+	DelegateID int64
+}
+
+// delegate returns the id the page's Page object has.
+func (p *Page) delegate() int64 {
+	if p.DelegateID != 0 {
+		return p.DelegateID
+	}
+	return p.ID
 }
 
 // World is the synthetic dataset. It is safe for concurrent use.
@@ -110,8 +122,10 @@ type World struct {
 	authors  []Author
 	pages    map[int64]*Page
 	byVanity map[string]*Page
-	posts    map[int64]*Post
-	comments map[int64]*Comment
+	// byDelegate maps new-style pages' Page object ids to the page.
+	byDelegate map[int64]*Page
+	posts      map[int64]*Post
+	comments   map[int64]*Comment
 }
 
 var reactionTypes = []string{"like", "love", "care", "haha", "wow", "sad", "angry"}
@@ -127,13 +141,14 @@ func NewWorld(spec Spec) *World {
 		spec.Now = time.Now().UTC()
 	}
 	w := &World{
-		rng:      rand.New(rand.NewPCG(spec.Seed, spec.Seed^0x9e3779b97f4a7c15)),
-		spec:     spec,
-		nextID:   1_000_000,
-		pages:    map[int64]*Page{},
-		byVanity: map[string]*Page{},
-		posts:    map[int64]*Post{},
-		comments: map[int64]*Comment{},
+		rng:        rand.New(rand.NewPCG(spec.Seed, spec.Seed^0x9e3779b97f4a7c15)),
+		spec:       spec,
+		nextID:     1_000_000,
+		pages:      map[int64]*Page{},
+		byVanity:   map[string]*Page{},
+		byDelegate: map[int64]*Page{},
+		posts:      map[int64]*Post{},
+		comments:   map[int64]*Comment{},
 	}
 	for i := 0; i < 200; i++ {
 		w.authors = append(w.authors, Author{
@@ -154,6 +169,10 @@ func NewWorld(spec Spec) *World {
 			Intro:     "Official page. Questions? Message us.",
 		}
 		p.Likes = p.Followers * 8 / 10
+		if i%2 == 1 { // every other page is a new-style one
+			p.DelegateID = 104_000_000_000_000 + int64(i)
+			w.byDelegate[p.DelegateID] = p
+		}
 		w.pages[p.ID] = p
 		w.byVanity[p.Vanity] = p
 		for j := 0; j < spec.PostsPerPage; j++ {

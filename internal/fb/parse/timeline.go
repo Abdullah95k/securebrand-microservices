@@ -46,10 +46,26 @@ func Timeline(parts []gjson.Result, pageID int64, baseURL string) (TimelineResul
 	if len(res.Posts) == 0 && allNodesNull(parts) {
 		res.NodeNull = true
 	}
+	// A node without any feed is not an empty timeline: the id named
+	// something with no timeline (a new-style page's older Page object).
+	if len(res.Posts) == 0 && !res.NodeNull && !hasFeed(parts) {
+		rep.missing("timeline.feed")
+	}
 	if !res.PageInfo.Found && len(res.Posts) > 0 {
 		rep.optional("page_info")
 	}
 	return res, rep
+}
+
+func hasFeed(parts []gjson.Result) bool {
+	for _, p := range parts {
+		for _, c := range timelineConnections {
+			if Find(p, c).Exists() {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func allNodesNull(parts []gjson.Result) bool {

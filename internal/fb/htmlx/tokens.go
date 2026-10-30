@@ -91,14 +91,19 @@ func ExtractTokens(html []byte) Tokens {
 	return t
 }
 
+// pageIDPatterns find the page's id, the profile's first. A page made in
+// the new Pages experience is a profile (typed User) beside an older Page
+// object with an id of its own (delegate_page, pageID). Only the profile
+// has a timeline: given the Page's id, the timeline query returns a bare
+// Page node with no posts.
 var pageIDPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`"userID"\s*:\s*"(\d{5,})"`),
+	regexp.MustCompile(`fb://profile/(\d+)`),
 	regexp.MustCompile(`"pageID"\s*:\s*"(\d+)"`),
 	regexp.MustCompile(`"page_id"\s*:\s*"(\d+)"`),
 	regexp.MustCompile(`"delegate_page"\s*:\s*\{\s*"id"\s*:\s*"(\d+)"`),
 	regexp.MustCompile(`fb://page/\?id=(\d+)`),
 	regexp.MustCompile(`fb://page/(\d+)`),
-	regexp.MustCompile(`fb://profile/(\d+)`),
-	regexp.MustCompile(`"userID"\s*:\s*"(\d{5,})"`),
 }
 
 // PageID returns the numeric id of the page/profile an HTML document is
