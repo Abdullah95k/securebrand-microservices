@@ -1,7 +1,6 @@
 package fixtures
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"time"
@@ -23,9 +22,7 @@ func Write(root, query, caseName, file string, body []byte, meta map[string]any,
 		meta = map[string]any{}
 	}
 	meta["captured_at"] = time.Now().UTC()
-	meta["__scrubbed"] = true
-	mb, _ := json.MarshalIndent(meta, "", "  ")
-	if err := os.WriteFile(filepath.Join(d, "meta.json"), append(mb, '\n'), 0o644); err != nil { //nolint:gosec // as above
+	if err := writeMeta(d, meta); err != nil {
 		return "", err
 	}
 	return d, nil

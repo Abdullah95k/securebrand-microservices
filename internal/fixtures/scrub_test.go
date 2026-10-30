@@ -1,6 +1,7 @@
 package fixtures
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,5 +53,102 @@ func TestWriteScrubsBeforeWriting(t *testing.T) {
 	meta, err := os.ReadFile(filepath.Join(d, "meta.json"))
 	if err != nil || !strings.Contains(string(meta), `"__scrubbed": true`) {
 		t.Fatalf("meta: %s, %v", meta, err)
+	}
+}
+
+// Names written with JSON escapes (Facebook writes non-ASCII as \uXXXX)
+// are scrubbed too.
+func TestScrubEscapedNames(t *testing.T) {
+	in := `{"a":{"name":"Jos\u00e9 Garc\u00eda"},"b":{"name":"Ali \"Al\" Hassan"},"c":{"name":"\u0639\u0644\u064a"}}`
+	out := string(Scrub([]byte(in), nil))
+	for _, leak := range []string{`Jos\u00e9`, `Hassan`, `\u0639\u0644\u064a`} {
+		if strings.Contains(out, leak) {
+			t.Fatalf("scrubbed output still contains %q: %s", leak, out)
+		}
+	}
+	var v map[string]map[string]string
+	if err := json.Unmarshal([]byte(out), &v); err != nil {
+		t.Fatalf("not JSON any more: %v: %s", err, out)
+	}
+}
+
+// A user id that is part of a longer number (the kept page id) does not
+// change that number, and the result does not depend on map order.
+func TestScrubReplacesWholeIDsOnly(t *testing.T) {
+	in := `{"page":{"__typename":"User","id":"100064000"},"x":{"__typename":"User","id":"1000"},` +
+		`"y":{"__typename":"User","id":"10006"},"post":"100064000_77","by":"1000_2"}`
+	keep := map[string]bool{"100064000": true}
+	out := string(Scrub([]byte(in), keep))
+	if !strings.Contains(out, `"id":"100064000"`) || !strings.Contains(out, `"post":"100064000_77"`) {
+		t.Fatalf("kept page id changed: %s", out)
+	}
+	if strings.Contains(out, `"1000"`) || strings.Contains(out, `"10006"`) || strings.Contains(out, `"1000_2"`) {
+		t.Fatalf("user ids kept: %s", out)
+	}
+	for range 20 {
+		if string(Scrub([]byte(in), keep)) != out {
+			t.Fatal("scrub must be deterministic")
+		}
+	}
+}
+
+// Signed URLs are found however they are escaped or quoted, and nothing
+// after them is lost.
+func TestScrubSignedURLContexts(t *testing.T) {
+	for _, tc := range []struct{ name, in, want string }{
+		{"json in a js string",
+			`"{\"u\":\"https:\\\/\\\/scontent.xx.fbcdn.net\\\/v\\\/b.jpg?oh=SECRET\\u0026oe=1\"}"`,
+			`"{\"u\":\"https://scontent.xx.fbcdn.net/scrubbed/b.jpg\"}"`},
+		{"unquoted attribute",
+			`<img src=https://scontent.xx.fbcdn.net/v/a.jpg?oh=SECRET&oe=2><b>x</b>`,
+			`<img src=https://scontent.xx.fbcdn.net/scrubbed/a.jpg><b>x</b>`},
+		{"entity-encoded json",
+			`<i data-store="{&quot;src&quot;:&quot;https:\/\/scontent.xx.fbcdn.net\/a.jpg?oh=SECRET&amp;oe=1&quot;}">`,
+			`<i data-store="{&quot;src&quot;:&quot;https://scontent.xx.fbcdn.net/scrubbed/a.jpg&quot;}">`},
+		{"single quotes",
+			`f('https://scontent.xx.fbcdn.net/a.jpg?_nc_cat=1&oh=SECRET')`,
+			`f('https://scontent.xx.fbcdn.net/scrubbed/a.jpg')`},
+	} {
+		if got := string(Scrub([]byte(tc.in), nil)); got != tc.want {
+			t.Errorf("%s:\n got %s\nwant %s", tc.name, got, tc.want)
+		}
+	}
+	var outer string
+	if err := json.Unmarshal(Scrub([]byte(`"{\"u\":\"https:\\\/\\\/scontent.xx.fbcdn.net\\\/b.jpg?oh=S\"}"`), nil), &outer); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(outer), &map[string]string{}); err != nil {
+		t.Fatalf("inner JSON broken: %v: %s", err, outer)
+	}
+}
+
+// ScrubDir scrubs a raw fixture once, keeping the page id from meta.json,
+// and leaves a scrubbed one alone.
+func TestScrubDirOnce(t *testing.T) {
+	dir := t.TempDir()
+	raw := `{"page":{"__typename":"User","id":"100064000"},"author":{"__typename":"User","id":"100012345","name":"Jane Real"}}`
+	if err := os.WriteFile(filepath.Join(dir, "response.ndjson"), []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "meta.json"), []byte(`{"page_id": 100064000}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ScrubDir(dir, nil); err != nil {
+		t.Fatal(err)
+	}
+	once, _ := os.ReadFile(filepath.Join(dir, "response.ndjson"))
+	if strings.Contains(string(once), "Jane Real") || strings.Contains(string(once), "100012345") ||
+		!strings.Contains(string(once), `"id":"100064000"`) {
+		t.Fatalf("scrubbed: %s", once)
+	}
+	meta, _ := os.ReadFile(filepath.Join(dir, "meta.json"))
+	if !strings.Contains(string(meta), `"page_id": 100064000`) || !strings.Contains(string(meta), `"__scrubbed": true`) {
+		t.Fatalf("meta: %s", meta)
+	}
+	if err := ScrubDir(dir, nil); err != nil {
+		t.Fatal(err)
+	}
+	if twice, _ := os.ReadFile(filepath.Join(dir, "response.ndjson")); string(twice) != string(once) {
+		t.Fatalf("scrubbed again:\n%s\n%s", once, twice)
 	}
 }

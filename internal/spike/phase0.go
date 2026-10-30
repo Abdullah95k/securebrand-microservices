@@ -25,6 +25,7 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/proxy"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/registry"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/session"
+	"github.com/abdullah95k/securebrand-microservices/internal/fixtures"
 )
 
 // Phase 0 steps, in order. Each can also be run on its own with fbs-spike.
@@ -585,6 +586,37 @@ func bundleFile(rel string) bool {
 	return (strings.HasPrefix(rel, "smoke-") || strings.HasPrefix(rel, "run-")) && strings.HasSuffix(rel, ".jsonl")
 }
 
+// scrubFixtures scrubs every fixture case under root that is not marked as
+// scrubbed. Fixtures are written scrubbed; one left raw by an older kit or
+// an interrupted write is scrubbed here, before it can be packed.
+func scrubFixtures(root string) error {
+	queries, err := os.ReadDir(root)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, q := range queries {
+		if !q.IsDir() {
+			continue
+		}
+		cases, err := os.ReadDir(filepath.Join(root, q.Name()))
+		if err != nil {
+			return err
+		}
+		for _, c := range cases {
+			if !c.IsDir() {
+				continue
+			}
+			if err := fixtures.ScrubDir(filepath.Join(root, q.Name(), c.Name()), nil); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // ErrSecretInBundle stops the bundle when a configured credential shows up
 // in a file.
 var ErrSecretInBundle = errors.New("spike: bundle would contain a proxy credential")
@@ -597,6 +629,9 @@ func (k *Kit) bundle() error {
 		"thresholds": k.Cfg.Report.Thresholds, "registry_flag": k.Cfg.Registry != "",
 	}
 	if err := writeJSON(k.path(FileMeta), meta); err != nil {
+		return err
+	}
+	if err := scrubFixtures(k.path(DirFixtures)); err != nil {
 		return err
 	}
 	var files []string

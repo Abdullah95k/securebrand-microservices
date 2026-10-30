@@ -255,6 +255,27 @@ func TestBundleRefusesSecrets(t *testing.T) {
 	}
 }
 
+// A fixture left raw (by an older kit or an interrupted write) is scrubbed
+// before it is packed.
+func TestBundleScrubsRawFixtures(t *testing.T) {
+	k, _, _ := testKit(t, fbtest.Options{})
+	d := filepath.Join(k.Cfg.Out, DirFixtures, "page_html", "20261030_har_session")
+	if err := os.MkdirAll(d, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	raw := `{"author":{"__typename":"User","id":"100012345","name":"Jane Real"}}`
+	if err := os.WriteFile(filepath.Join(d, "response.html"), []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.bundle(); err != nil {
+		t.Fatal(err)
+	}
+	got := string(bundleFiles(t, filepath.Join(k.Cfg.Out, FileBundle))["phase0/fixtures/page_html/20261030_har_session/response.html"])
+	if got == "" || strings.Contains(got, "Jane Real") || strings.Contains(got, "100012345") {
+		t.Fatalf("bundled fixture: %q", got)
+	}
+}
+
 func TestEstimateRun(t *testing.T) {
 	recs := []Record{
 		{Type: "bootstrap", Page: "a", Wire: 1000},

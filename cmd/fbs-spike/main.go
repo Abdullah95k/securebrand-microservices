@@ -381,12 +381,14 @@ func har(f flags) int {
 		}
 		fmt.Fprintf(os.Stderr, "wrote %s\n", f.writeRegistry)
 	}
+	if len(res.DocIDs.Missing) > 0 {
+		fmt.Fprintln(os.Stderr, "the HAR misses some queries: record again and open a post, choose \"All comments\" and expand replies")
+	}
 	if fixturesErr != nil {
 		fmt.Fprintln(os.Stderr, "fbs-spike: fixtures:", spike.Redact(fixturesErr.Error()))
 		return exitError
 	}
 	if len(res.DocIDs.Missing) > 0 {
-		fmt.Fprintln(os.Stderr, "the HAR misses some queries: record again and open a post, choose \"All comments\" and expand replies")
 		return exitNeedsAction
 	}
 	return 0
