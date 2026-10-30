@@ -111,6 +111,9 @@ type Runner struct {
 	// Progress, when set, is called after each page with the number of
 	// pages finished so far.
 	Progress func(done, total int, page string)
+	// FailDir, when set, is where Capture keeps a scrubbed copy of each
+	// response that was not OK, so the bundle shows what Facebook said.
+	FailDir string
 
 	mu sync.Mutex
 }
@@ -126,6 +129,12 @@ func (r *Runner) emit(rec Record) {
 }
 
 func boolp(b bool) *bool { return &b }
+
+// tokensFound reports which page tokens were found, without their values.
+func tokensFound(tok htmlx.Tokens) map[string]bool {
+	return map[string]bool{"lsd": tok.LSD != "", "js_datr": tok.JSDatr != "", "spin_r": tok.SpinR != "",
+		"hsi": tok.HSI != "", "rev": tok.Rev != "", "haste_session": tok.HasteSession != "", "dtsg": tok.DTSG != ""}
+}
 
 // Run writes a run header, then measures every page. Each page ends with a
 // page_done record (see Done), whatever its outcome. Run stops starting new
@@ -203,8 +212,7 @@ func (r *Runner) page(ctx context.Context, p PageRef) error {
 	brec.OK = boolp(pl.Class == detect.OK && id.Bootstrapped())
 	brec.Class, brec.Reason, brec.Status, brec.Bytes, brec.Wire = pl.Class.String(), pl.Reason, pl.Status, len(pl.HTML), pl.Bytes
 	brec.Consent = tok.ConsentWall
-	brec.TokensFound = map[string]bool{"lsd": tok.LSD != "", "js_datr": tok.JSDatr != "", "spin_r": tok.SpinR != "",
-		"hsi": tok.HSI != "", "rev": tok.Rev != "", "haste_session": tok.HasteSession != "", "dtsg": tok.DTSG != ""}
+	brec.TokensFound = tokensFound(tok)
 	r.emit(brec)
 	if !*brec.OK {
 		return nil

@@ -49,6 +49,7 @@ const (
 	FileRegistry  = "registry.yaml"
 	DirFixtures   = "fixtures"
 	FileFixtures  = "fixtures.json"
+	DirFailures   = "failures" // scrubbed responses capture could not use
 	FileReportTxt = "report.txt"
 	FileReport    = "report.json"
 	FileMeta      = "meta.json"
@@ -325,6 +326,7 @@ func (k *Kit) capture(ctx context.Context) error {
 	opt := k.Cfg.Options
 	opt.Tier = k.Cfg.Tiers[0]
 	r := k.runner(seed, opt, io.Discard)
+	r.FailDir = k.path(DirFailures)
 	root := k.path(DirFixtures)
 	for _, p := range refs(k.Cfg.Pages, k.Cfg.CapturePages) {
 		ref, err := task.NormalizeRef(p)
@@ -362,7 +364,8 @@ func (k *Kit) capture(ctx context.Context) error {
 		return &StepError{Step: StepCapture, NeedsAction: true, Err: fmt.Errorf("the parsers do not understand %d captured fixtures: "+
 			"Facebook's response shapes differ from the modelled ones; send %s so the parsers can be updated", len(bad), k.path(FileBundle))}
 	case !kinds["timeline"]:
-		return &StepError{Step: StepCapture, NeedsAction: true, Err: fmt.Errorf("no timeline fixture could be captured (see the lines above); send %s", k.path(FileBundle))}
+		return &StepError{Step: StepCapture, NeedsAction: true, Err: fmt.Errorf("no timeline fixture could be captured (see the lines above; "+
+			"the responses are under %s); send %s", k.path(DirFailures), k.path(FileBundle))}
 	}
 	return nil
 }
@@ -580,7 +583,7 @@ func bundleFile(rel string) bool {
 	case FilePreflight, FileDocIDs, FileRegistry, FileFixtures, FileReportTxt, FileReport, FileMeta:
 		return true
 	}
-	if strings.HasPrefix(rel, DirFixtures+"/") {
+	if strings.HasPrefix(rel, DirFixtures+"/") || strings.HasPrefix(rel, DirFailures+"/") {
 		return true
 	}
 	return (strings.HasPrefix(rel, "smoke-") || strings.HasPrefix(rel, "run-")) && strings.HasSuffix(rel, ".jsonl")
@@ -632,8 +635,10 @@ func (k *Kit) bundle() error {
 	if err := writeJSON(k.path(FileMeta), meta); err != nil {
 		return err
 	}
-	if err := scrubFixtures(k.path(DirFixtures)); err != nil {
-		return err
+	for _, d := range []string{DirFixtures, DirFailures} {
+		if err := scrubFixtures(k.path(d)); err != nil {
+			return err
+		}
 	}
 	var files []string
 	err := filepath.WalkDir(k.Cfg.Out, func(p string, d fs.DirEntry, err error) error {

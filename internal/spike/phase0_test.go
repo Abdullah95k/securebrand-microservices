@@ -5,12 +5,15 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -227,6 +230,56 @@ func TestPhase0SmokeStopsWhenBlocked(t *testing.T) {
 	var se *StepError
 	if !errors.As(err, &se) || se.Step != StepSmoke || !strings.Contains(err.Error(), "blocked") {
 		t.Fatalf("want a smoke StepError about blocks, got %v\n%s", err, log)
+	}
+}
+
+// A capture whose GraphQL responses are refused keeps them, scrubbed and
+// with what came back, in the bundle: the error alone does not say why.
+func TestPhase0CaptureKeepsRefusedResponses(t *testing.T) {
+	k, env, log := testKit(t, fbtest.Options{})
+	k.Cfg.From = StepCapture
+	reg := filepath.Join(t.TempDir(), "seed.yaml")
+	if err := WriteRegistry(reg, embeddedSeed(t), "test"); err != nil {
+		t.Fatal(err)
+	}
+	k.Cfg.Registry = reg
+	env.Fake.SetFaults(fakefb.Faults{RateLimitEvery: 1})
+	_, err := k.Run(context.Background())
+	var se *StepError
+	if !errors.As(err, &se) || se.Step != StepCapture || !strings.Contains(err.Error(), DirFailures) {
+		t.Fatalf("want a capture StepError naming %s, got %v\n%s", DirFailures, err, log)
+	}
+	if !strings.Contains(log.String(), `rate_limited fb error 1675004; http 200, text/html; charset="utf-8"`) {
+		t.Fatalf("the console must say what came back:\n%s", log)
+	}
+	files := bundleFiles(t, filepath.Join(k.Cfg.Out, FileBundle))
+	var metas int
+	for name, body := range files {
+		if !strings.HasPrefix(name, "phase0/"+DirFailures+"/timeline/") || !strings.HasSuffix(name, "/meta.json") {
+			continue
+		}
+		metas++
+		var m struct {
+			Status      int             `json:"status"`
+			ContentType string          `json:"content_type"`
+			Class       string          `json:"class"`
+			Tokens      map[string]bool `json:"tokens_found"`
+			Cookies     []string        `json:"cookies"`
+			Scrubbed    bool            `json:"__scrubbed"`
+		}
+		if err := json.Unmarshal(body, &m); err != nil {
+			t.Fatal(err)
+		}
+		if m.Status != 200 || !strings.HasPrefix(m.ContentType, "text/html") || m.Class != "rate_limited" ||
+			!m.Tokens["lsd"] || !slices.Contains(m.Cookies, "datr") || !m.Scrubbed {
+			t.Errorf("%s: %+v", name, m)
+		}
+		if _, ok := files[strings.TrimSuffix(name, "meta.json")+"response.ndjson"]; !ok {
+			t.Errorf("%s: the response itself is missing", name)
+		}
+	}
+	if metas != len(refs(k.Cfg.Pages, k.Cfg.CapturePages)) {
+		t.Fatalf("%d refused timelines kept, want one per captured page; bundle: %v", metas, slices.Sorted(maps.Keys(files)))
 	}
 }
 

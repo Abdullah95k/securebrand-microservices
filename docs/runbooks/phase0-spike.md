@@ -96,7 +96,7 @@ The steps, in order. Each prints what it found, and the output goes to `phase0/o
 |---|---|---|---|
 | `preflight` | Checks each tier's exits through an IP echo service: the IP stays the same within a session, and different sessions get different IPs. Then loads the first page through each tier. Also checks the config file permissions. | `preflight.json` | any FAIL line (wrong credentials, non-sticky sessions, a login wall) |
 | `docids` | Loads the first 3 pages, scans their JS bundles for the registry's queries and writes a registry with the current doc_ids | `docids.json`, `registry.yaml` | a query is not found. Use the [HAR fallback](#3-har-fallback-when-doc_ids-are-missing). |
-| `capture` | Records the page HTML, a timeline page, a comments page and a replies page of the first 2 pages; scrubs people's names, ids, links and text, and signed URLs; runs the parsers over them | `fixtures/`, `fixtures.json` | a parser does not understand a response: Facebook's shapes changed. Send the bundle. |
+| `capture` | Records the page HTML, a timeline page, a comments page and a replies page of the first 2 pages; scrubs people's names, ids, links and text, and signed URLs; runs the parsers over them | `fixtures/`, `fixtures.json`, `failures/` | a parser does not understand a response: Facebook's shapes changed. Or no timeline came back: the console line gives the class, HTTP status and content type, and `failures/` keeps the response. Send the bundle. |
 | `smoke` | Measures the first 3 pages per tier at reduced limits, then prints an estimate of the full run's time, traffic and cost | `smoke-<tier>.jsonl` | no bootstrap, blocks above 50%, or the timeline parser finds no posts |
 | `run` | The measurement, per tier. It can be resumed: pages already finished are skipped. | `run-<tier>.jsonl` | none |
 | `report` | The go/no-go report | `report.txt`, `report.json` | none |
@@ -228,6 +228,7 @@ least one tier is. The recommended tier is the cheapest passing one.
 - the discovered registry;
 - the run records: per request the query, outcome class, sizes and timing, with no content;
 - the scrubbed fixtures;
+- `failures/`: the responses capture could not use, scrubbed like the fixtures, each with its HTTP status, content type, outcome class, and which page tokens and cookies the identity held (names only, never values);
 - `meta.json` (versions and flags).
 
 It never holds `proxies.yaml`. Before writing it, the tool checks that no

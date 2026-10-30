@@ -39,14 +39,16 @@ type Request struct {
 
 // Response is the decoded result.
 type Response struct {
-	Query   registry.Query
-	Parts   []gjson.Result
-	Body    []byte
-	Status  int
-	Class   detect.Class
-	Reason  string
-	Errors  []detect.GQLError
-	Elapsed time.Duration
+	Query  registry.Query
+	Parts  []gjson.Result
+	Body   []byte
+	Status int
+	// ContentType is the response's header (Facebook labels JSON text/html).
+	ContentType string
+	Class       detect.Class
+	Reason      string
+	Errors      []detect.GQLError
+	Elapsed     time.Duration
 	// Vars are the request's template values.
 	Vars map[string]any
 	// Wire bytes (compressed, as billed by proxies).
@@ -201,7 +203,7 @@ func (c *Client) do(ctx context.Context, id *session.Identity, q registry.Query,
 	if c.Raw != nil && (c.CaptureAll || cls != detect.OK) {
 		c.Raw.Capture(ctx, q.Name, cls, tr.Body, req.Vars)
 	}
-	return &Response{Query: q, Parts: parts, Body: tr.Body, Status: tr.Status, Class: cls,
+	return &Response{Query: q, Parts: parts, Body: tr.Body, Status: tr.Status, ContentType: tr.Header.Get("Content-Type"), Class: cls,
 		Reason: reason, Errors: errs, Elapsed: elapsed, Vars: req.Vars, BytesIn: tr.BytesIn, BytesOut: tr.BytesOut}, nil
 }
 
