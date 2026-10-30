@@ -27,12 +27,14 @@ func TestTierFor(t *testing.T) {
 		tier     string
 		interval time.Duration
 	}{
+		// Every tier crawls for new posts every 3h; the tier still picks
+		// the comment refreshes and what a budget slows first.
 		{25, &recent, "T0", 3 * time.Hour},
 		{10, &recent, "T0", 3 * time.Hour},
-		{3, &recent, "T1", 12 * time.Hour},
-		{0.2, &recent, "T2", 24 * time.Hour},
-		{0.05, &recent, "T3", 72 * time.Hour},
-		{0, nil, "T4", 168 * time.Hour},
+		{3, &recent, "T1", 3 * time.Hour},
+		{0.2, &recent, "T2", 3 * time.Hour},
+		{0.05, &recent, "T3", 3 * time.Hour},
+		{0, nil, "T4", 3 * time.Hour},
 	} {
 		tier, iv := TierFor(sc, tc.rate, tc.last, now)
 		if tier != tc.tier || iv != tc.interval {

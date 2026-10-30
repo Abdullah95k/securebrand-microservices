@@ -21,14 +21,14 @@ Multiply the GB per tier by its price for the daily bill. The overview dashboard
 | Setting | Default | Effect on cost | Trade-off |
 |---|---|---|---|
 | `fb.proxy.routing` | `default: [isp, residential]` | Sends traffic to the cheapest tier that works. Residential is typically several times the price per GB of ISP. Keep `bootstrap_html` (page loads) on the tier that bootstraps reliably, and everything else on the cheapest one with an acceptable block rate (Phase 0 per-tier report). | A cheaper tier with a higher block rate costs retries and AIMD backoff. |
-| `scheduler.tiers` | T0 3h … T3 72h, T4 7d | Re-scrape frequency per page. Most pages are T2/T3; stretching their intervals cuts scheduled traffic nearly proportionally. | Fresher data on busy pages only. |
+| `scheduler.tiers` | every tier 3h | Re-scrape frequency per page. A run that finds no new post costs a request or two, so quiet pages are cheap at 3h; most of the traffic is new posts' comments and refreshes. Longer T2/T3/T4 intervals save those few requests. | Quiet pages' new posts arrive later. |
 | `scheduler.post_refresh` | 24h / 72h / 7d by age, `max_per_job: 50`, `max_backoff: 3` | Comment refreshes of older posts. An unchanged post costs one request, and the interval doubles while it stays unchanged. Tighten the windows or `max_per_job` if refreshes dominate `fbs_post_refreshes_total`. | New comments on older posts arrive later. |
 | `scheduler.post_refresh.recrawl_at`, `recrawl_min_comments` | 7d, 30d; 20 comments | Full re-reads of busy posts (reply threads, deletions). Each is a full comment pagination. | Fewer late replies and deletions seen. |
 | `limits.max_age_days` | 365 | Backfill depth for new pages: the biggest one-off cost per page. | Less history. |
 | `limits.include_replies`, `limits.max_depth` | on, 3 | Reply threads are a request each (plus pagination). | Missing replies. |
 | `crawler.timeline_page_size`, `crawler.comments_page_size` | 10, 50 | Bigger pages mean fewer requests for the same data, and less per-request overhead. Raise them only as far as Facebook serves without blocking (Phase 0). | Larger responses; possibly more blocks. |
 | `fb.identity_max_requests_min/max` | 150 / 400 | Each identity's bootstrap is a full page load (hundreds of KB). Longer-lived identities amortise it. | Longer identities are easier to rate-limit. |
-| `scheduler.budget` | unlimited | A hard daily cap in requests and/or bytes: pauses backfill, then stretches T4/T3/T2. On-demand work is never held. | Backfills wait; slow tiers go stale. |
+| `scheduler.budget` | unlimited | A hard daily cap in requests and/or bytes: pauses backfill, then stretches T4/T3/T2 past 3h. On-demand work is never held. With `stretch_tiers: []` every page stays at 3h and the budget pauses backfill only. | Backfills wait; slow tiers go stale. |
 | `fb.browser.max_share` | 2% | Browser bootstraps load a whole page, scripts included (media is refused). Keep the share low. | Pages that need JavaScript fail more often. |
 | `fb.capture_raw` | `failures` | `all` writes every response to S3 (storage, not proxy). Use it briefly. | — |
 | `limits.video_policy` | `sd` (`thumbnail` for backfills) | Media egress and storage (direct, not proxy). | Lower-quality media for the analysis service. |
