@@ -351,7 +351,7 @@ func har(f flags) int {
 		fmt.Printf("%d GraphQL requests and %d page loads in %s\n", len(c.Operations), len(c.Pages), f.in)
 		for _, q := range res.Queries {
 			if q.Kept != "" {
-				fmt.Printf("KEPT    %-18s %s = %s (not in the HAR; from --registry)\n", q.Query, q.FriendlyName, q.Kept)
+				fmt.Printf("KEPT    %-18s %s = %s (not in the HAR; the registry's doc_id stays)\n", q.Query, q.FriendlyName, q.Kept)
 				continue
 			}
 			if q.DocID == "" {

@@ -45,10 +45,17 @@ func SplitParts(body []byte) []gjson.Result {
 	return out
 }
 
-// HasData reports whether any part carries a non-empty data object.
+// HasData reports whether any part carries data: a data object with a
+// field that is not null. {"data":{"node":null}} beside an error is a
+// failed request, not a partial one.
 func HasData(parts []gjson.Result) bool {
+	found := false
 	for _, p := range parts {
-		if d := p.Get("data"); d.IsObject() && len(d.Map()) > 0 {
+		p.Get("data").ForEach(func(_, v gjson.Result) bool {
+			found = v.Type != gjson.Null
+			return !found
+		})
+		if found {
 			return true
 		}
 	}

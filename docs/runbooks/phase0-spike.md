@@ -153,13 +153,19 @@ make phase0 PHASE0_TIERS=isp,residential PHASE0_ARGS="--registry phase0/out/regi
 
 For each query, `har` also prints two lists: the variables Facebook now sends that the registry template lacks, and the template variables Facebook no longer sends.
 
-**Variables written to the registry.** When every request sent a variable with the same small value (a flag, a number, an enum or null), `har` writes it into the template. This covers both new variables and fixed values that changed. Facebook rejects requests that leave out required variables, such as the `__relay_internal__pv__*` provider flags. These are listed under "variables set in the registry".
+**Variables written to the registry.** `har` writes a variable into the template when every request sent it with the same small value: a flag, a number below a million, a short enum without an id in it, or null. This covers both new variables and fixed values that changed. Facebook rejects requests that leave out required variables, such as the `__relay_internal__pv__*` provider flags. These are listed under "variables set in the registry".
 
-**What stays as it is.** Caller values (`{{cursor}}`, `{{page_id}}`, ...) and the comment ordering are never changed.
+**What stays as it is.** Caller values (`{{cursor}}`, `{{page_id}}`, ...) and the comment ordering are never changed. A query whose ordering the recording lacks keeps its fixed values too.
 
-**Variables not set.** Some variables are left out of the template: those whose value changed between requests, and long strings or objects. Look at "variables not set" and "variables removed". If either is non-empty, send the bundle so the templates can be updated by hand.
+**Variables not set.** Some variables are left out of the template:
+- a value that changed between requests;
+- a variable only some requests sent;
+- a value that repeats a caller value, such as the page id;
+- long strings and objects.
 
-**The fixture.** For each query, the fixture is the largest successful response in the recording.
+Look at "variables not set" and "variables removed". If either is non-empty, send the bundle so the templates can be updated by hand.
+
+**The fixture.** For each query, the fixture is the largest successful response that carries data, never an error.
 
 **More than one recording.** Pass `--registry phase0/out/registry.yaml` to merge a second HAR into the registry the first one wrote.
 

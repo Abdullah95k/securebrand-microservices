@@ -6,12 +6,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/graphql"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/parse"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/registry"
 	"github.com/abdullah95k/securebrand-microservices/internal/fixtures"
@@ -284,12 +287,29 @@ func compareQuery(q registry.Query, ops []HAROperation, docID string) HARQueryRe
 			intents[t] = true
 		}
 	}
+	// What the caller fills in (page ids, feedback ids, cursors): a new
+	// variable carrying one of these is per-request data, not a setting.
+	callerValues := map[string]bool{}
+	for k, tv := range tmpl {
+		if s, _ := tv.(string); strings.HasPrefix(s, "{{") {
+			for _, op := range ops {
+				if v := op.Variables[k]; v != nil {
+					b, _ := json.Marshal(v)
+					callerValues[string(b)] = true
+				}
+			}
+		}
+	}
+	isSetting := func(v any) bool {
+		b, _ := json.Marshal(v)
+		return setting(v) && !callerValues[string(b)]
+	}
 	for k := range seen {
 		v, same := sameValue(ops, k)
 		old, inTemplate := tmpl[k]
 		if !inTemplate {
 			r.Added = append(r.Added, k)
-			if same && setting(v) {
+			if same && isSetting(v) {
 				r.setVar(k, v)
 			} else {
 				r.Unset = append(r.Unset, k)
@@ -297,13 +317,18 @@ func compareQuery(q registry.Query, ops []HAROperation, docID string) HARQueryRe
 			continue
 		}
 		// A fixed template value the browser sent differently. Caller
-		// values ("{{name}}") and the ordering, which the fallback above
-		// may have mixed, stay as they are.
-		if s, _ := old.(string); strings.HasPrefix(s, "{{") || k == intentKey {
+		// values ("{{name}}") and the ordering stay as they are, and so
+		// does everything else when the requests are another ordering's
+		// (the fallback above).
+		if s, _ := old.(string); strings.HasPrefix(s, "{{") || k == intentKey || r.IntentMissing != "" {
 			continue
 		}
-		if same && setting(v) && !jsonEqual(v, old) {
+		switch {
+		case same && jsonEqual(v, old):
+		case same && isSetting(v):
 			r.setVar(k, v)
+		default:
+			r.Unset = append(r.Unset, k)
 		}
 	}
 	for k := range tmpl {
@@ -328,33 +353,34 @@ func (r *HARQueryReport) setVar(k string, v any) {
 	r.Set[k] = v
 }
 
-// sameValue returns k's value when every request in ops that sent k sent
-// the same one.
+// sameValue returns k's value when every request in ops sent k, all with
+// the same value. A variable only some requests send is conditional.
 func sameValue(ops []HAROperation, k string) (any, bool) {
-	var first any
-	n := 0
-	for _, op := range ops {
-		v, ok := op.Variables[k]
-		if !ok {
-			continue
-		}
-		if n > 0 && !jsonEqual(v, first) {
+	first, ok := ops[0].Variables[k]
+	if !ok {
+		return nil, false
+	}
+	for _, op := range ops[1:] {
+		if v, ok := op.Variables[k]; !ok || !jsonEqual(v, first) {
 			return nil, false
 		}
-		first = v
-		n++
 	}
-	return first, n > 0
+	return first, true
 }
 
-// setting reports whether v looks like a client setting (a flag, a number,
-// an enum or null) rather than per-request or per-session data.
+var idLike = regexp.MustCompile(`\d{6,}`)
+
+// setting reports whether v looks like a client setting (a flag, a small
+// number, a short enum or null) rather than per-request or per-session data
+// such as an id.
 func setting(v any) bool {
 	switch v := v.(type) {
-	case nil, bool, float64:
+	case nil, bool:
 		return true
+	case float64:
+		return math.Abs(v) < 1e6
 	case string:
-		return len(v) < 40
+		return len(v) < 40 && !idLike.MatchString(v)
 	}
 	return false
 }
@@ -369,7 +395,9 @@ func jsonEqual(a, b any) bool {
 func setVariables(tmpl json.RawMessage, set map[string]any) (json.RawMessage, error) {
 	vars := map[string]any{}
 	if len(tmpl) > 0 {
-		if err := json.Unmarshal(tmpl, &vars); err != nil {
+		d := json.NewDecoder(bytes.NewReader(tmpl))
+		d.UseNumber() // numbers the template already has stay exact
+		if err := d.Decode(&vars); err != nil {
 			return nil, err
 		}
 	}
@@ -453,12 +481,13 @@ func harFixtures(c HARCapture, seed registry.Seed, root, name string) ([]string,
 	return written, nil
 }
 
-// largest returns the successful operation with the largest response: an
-// error or an empty last page is small, a page of posts or comments is not.
+// largest returns the successful operation with the largest response that
+// carries data: a page of posts or comments, not an error (Facebook sends
+// rate limits with HTTP 200) or an empty last page.
 func largest(ops []HAROperation) (HAROperation, bool) {
 	var best HAROperation
 	for _, op := range ops {
-		if op.Status == 200 && len(op.Body) > len(best.Body) {
+		if op.Status == 200 && len(op.Body) > len(best.Body) && graphql.HasData(graphql.SplitParts(op.Body)) {
 			best = op
 		}
 	}

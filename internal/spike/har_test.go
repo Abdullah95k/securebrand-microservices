@@ -70,15 +70,21 @@ func sampleHAR(t *testing.T) []byte {
 		harEntryJSON("GET", "https://static.xx.fbcdn.net/rsrc.php/v3/x.js", nil, false, []byte("js"), false),
 		// An empty last page first: the fixture must be the full one.
 		harEntryJSON("POST", gql, gqlForm("ProfileCometTimelineFeedRefetchQuery", "111", map[string]any{
-			"count": 3, "cursor": "AQHtail", "id": "100064000000000", "renderLocation": "timeline", "newKnob": true,
-			"scale": 2, "trackingCode": "a",
+			"count": 3, "cursor": "AQHtail", "id": "100064000000000", "renderLocation": "profile", "newKnob": true,
+			"scale": 2, "trackingCode": "a", "userID": "100064000000000", "onlyFirst": true,
 		}), false, []byte(`{"data":{"node":{"timeline_list_feed_units":{"edges":[]}}}}`), false),
+		// A rate-limit error, larger than the empty page above.
+		harEntryJSON("POST", gql, gqlForm("ProfileCometTimelineFeedRefetchQuery", "111", map[string]any{
+			"count": 3, "cursor": "AQHtail", "id": "100064000000000", "renderLocation": "timeline", "newKnob": true,
+			"scale": 2, "trackingCode": "a", "userID": "100064000000000",
+		}), false, []byte(`{"errors":[{"message":"Rate limit exceeded","severity":"CRITICAL","code":1675004}],"extensions":{"is_final":true}}`), false),
 		harEntryJSON("POST", gql, gqlForm("ProfileCometTimelineFeedRefetchQuery", "111", map[string]any{
 			"count": 3, "cursor": nil, "id": "100064000000000", "renderLocation": "timeline", "newKnob": true,
-			"scale": 2, "trackingCode": "b",
+			"scale": 2, "trackingCode": "b", "userID": "100064000000000",
 		}), false, fixture(t, "timeline", "response.ndjson"), true),
 		harEntryJSON("POST", gql, gqlForm("CommentsListComponentsPaginationQuery", "222", map[string]any{
 			"commentsIntentToken": "RANKED_UNFILTERED_CHRONOLOGICAL_REPLIES_INTENT_V1", "id": feedback, "commentsAfterCursor": nil,
+			"feedLocation": "COMET_MEDIA_VIEWER",
 		}), true, fixture(t, "comments", "response.ndjson"), false),
 		harEntryJSON("POST", gql, gqlForm("CommentsListComponentsPaginationQuery", "222", map[string]any{
 			"commentsIntentToken": "RANKED_FILTERED_INTENT_V1", "id": feedback,
@@ -100,7 +106,7 @@ func TestHARImport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(c.Operations) != 6 || len(c.Pages) != 2 {
+	if len(c.Operations) != 7 || len(c.Pages) != 2 {
 		t.Fatalf("operations %d pages %d", len(c.Operations), len(c.Pages))
 	}
 	root := t.TempDir()
@@ -123,9 +129,16 @@ func TestHARImport(t *testing.T) {
 	for _, q := range res.Queries {
 		by[q.Query] = q
 	}
-	if tl := by["timeline"]; strings.Join(tl.Added, ",") != "newKnob,trackingCode" || !contains(tl.Removed, "feedLocation") ||
-		len(tl.Set) != 2 || tl.Set["newKnob"] != true || tl.Set["scale"] != float64(2) || strings.Join(tl.Unset, ",") != "trackingCode" {
+	// Settings sent by every request are set. A value that changes, a
+	// variable only some requests send and one carrying the page id are
+	// not; neither is a template value the requests disagree on.
+	if tl := by["timeline"]; strings.Join(tl.Added, ",") != "newKnob,onlyFirst,trackingCode,userID" || !contains(tl.Removed, "feedLocation") ||
+		len(tl.Set) != 2 || tl.Set["newKnob"] != true || tl.Set["scale"] != float64(2) ||
+		strings.Join(tl.Unset, ",") != "onlyFirst,renderLocation,trackingCode,userID" {
 		t.Fatalf("timeline diff: %+v", tl)
+	}
+	if c := by["comments"]; c.Set["feedLocation"] != "COMET_MEDIA_VIEWER" {
+		t.Fatalf("comments diff: %+v", c)
 	}
 	// The registry gets the settings the browser sent; caller values and
 	// the comment ordering stay templates.
@@ -141,8 +154,10 @@ func TestHARImport(t *testing.T) {
 		tl["cursor"] != "{{cursor}}" || tl["id"] != "{{page_id}}" || tl["trackingCode"] != nil {
 		t.Fatalf("timeline template: %v", tl)
 	}
-	if vars["comments_newest"][intentKey] != "RECENT_ACTIVITY_INTENT_V1" {
-		t.Fatalf("comments_newest ordering changed: %v", vars["comments_newest"])
+	// comments_newest was not recorded: the other orderings' requests
+	// change neither its ordering nor its fixed values.
+	if n := vars["comments_newest"]; n[intentKey] != "RECENT_ACTIVITY_INTENT_V1" || n["feedLocation"] != "DEDICATED_COMMENTING_SURFACE" {
+		t.Fatalf("comments_newest changed: %v", n)
 	}
 	if c := by["comments"]; c.Requests != 1 || strings.Join(c.IntentTokens, ",") != "RANKED_UNFILTERED_CHRONOLOGICAL_REPLIES_INTENT_V1" {
 		t.Fatalf("comments: %+v", c)
@@ -216,6 +231,19 @@ func TestHARMergeSecondRecording(t *testing.T) {
 	res, _ = ImportHAR(c, embeddedSeed(t), "", "")
 	if len(res.DocIDs.Missing) != 2 {
 		t.Fatalf("missing against the seed: %v", res.DocIDs.Missing)
+	}
+}
+
+// A rate-limit error (HTTP 200, as Facebook sends it) never becomes the
+// fixture, even when it is larger than the only page with data.
+func TestLargestSkipsErrors(t *testing.T) {
+	empty := HAROperation{Status: 200, Body: []byte(`{"data":{"node":{"edges":[]}}}`)}
+	limited := HAROperation{Status: 200, Body: []byte(`{"errors":[{"message":"Rate limit exceeded","severity":"CRITICAL","code":1675004}],"extensions":{"is_final":true}}`)}
+	if op, ok := largest([]HAROperation{limited, empty, {Status: 500, Body: []byte(`{"data":{"node":{"edges":[1,2,3,4,5,6,7,8,9]}}}`)}}); !ok || string(op.Body) != string(empty.Body) {
+		t.Fatalf("got %s, %v", op.Body, ok)
+	}
+	if _, ok := largest([]HAROperation{limited}); ok {
+		t.Fatal("an error alone is no fixture")
 	}
 }
 
