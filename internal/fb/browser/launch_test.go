@@ -40,12 +40,15 @@ func TestLaunchCleanExitAndCancel(t *testing.T) {
 		t.Fatalf("clean exit: %v", err)
 	}
 	hang := filepath.Join(dir, "hang")
-	if err := os.WriteFile(hang, []byte("#!/bin/sh\nexec sleep 60\n"), 0o700); err != nil { //nolint:gosec // an executable test script
+	if err := os.WriteFile(hang, []byte("#!/bin/sh\necho 'Fontconfig error: cache rebuild' >&2\nexec sleep 60\n"), 0o700); err != nil { //nolint:gosec // an executable test script
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	// Long enough for the script to print on a loaded runner.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if _, err := launch(ctx, hang, true, nil); !errors.Is(err, context.DeadlineExceeded) {
+	// The caller's budget running out keeps what Chromium said.
+	if _, err := launch(ctx, hang, true, nil); !errors.Is(err, context.DeadlineExceeded) ||
+		!strings.Contains(err.Error(), "Fontconfig error") || strings.Contains(err.Error(), "%!") {
 		t.Fatalf("cancelled launch: %v", err)
 	}
 }
