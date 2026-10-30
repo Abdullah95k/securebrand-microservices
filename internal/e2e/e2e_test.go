@@ -18,6 +18,7 @@ import (
 	fbv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fb/v1"
 	"github.com/abdullah95k/securebrand-microservices/internal/api"
 	"github.com/abdullah95k/securebrand-microservices/internal/fakefb"
+	"github.com/abdullah95k/securebrand-microservices/internal/pilot"
 	"github.com/abdullah95k/securebrand-microservices/internal/topics"
 )
 
@@ -118,8 +119,23 @@ func TestEndToEnd(t *testing.T) {
 	if j.Completeness.MedianRatio != 1 || j.Completeness.MinRatio != 1 || j.Completeness.CommentsCollected != int64(wantComments) {
 		t.Fatalf("completeness = %+v (want all 1.0, %d comments)", j.Completeness, wantComments)
 	}
-	if j.Counters["requests"] == 0 || j.PageID == nil || *j.PageID != page.ID {
+	if j.Counters["requests"] == 0 || j.Counters["wire_bytes"] == 0 || j.PageID == nil || *j.PageID != page.ID {
 		t.Fatalf("counters/page id = %v %v", j.Counters, j.PageID)
+	}
+	// The pilot's load report reads the same counters from the jobs table.
+	if rep, err := pilot.Load(ctx, s.DB, start.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	} else {
+		var total pilot.Row
+		for _, r := range rep.Rows {
+			total.Jobs += r.Jobs
+			total.Requests += r.Requests
+			total.WireBytes += r.WireBytes
+			total.Posts += r.Posts
+		}
+		if total.Jobs == 0 || total.Requests < j.Counters["requests"] || total.WireBytes < j.Counters["wire_bytes"] || total.Posts == 0 {
+			t.Fatalf("load report %+v, job counters %v", rep, j.Counters)
+		}
 	}
 	if n := count(t, s, `SELECT count(*) FROM pages WHERE page_id = $1 AND name = $2 AND followers_count > 0`, page.ID, page.Name); n != 1 {
 		t.Fatal("page profile not stored")

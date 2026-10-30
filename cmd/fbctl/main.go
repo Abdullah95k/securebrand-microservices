@@ -7,6 +7,8 @@
 //	fbctl apikey revoke --prefix P
 //	fbctl registry list
 //	fbctl registry set --file query.json
+//	fbctl registry import --file phase0/out/registry.yaml   make every query of a registry file active
+//	fbctl report load [--since 24h] [--pages N] [--cost-per-gb P]   requests, bytes and blocks per page per day
 //	fbctl dlq replay [--reason R] [--max N]
 //	fbctl replay [--query Q] [--since 24h] [--fixtures-dir DIR]   re-parse captured raw responses; exit 3 while some drift
 //	fbctl fixtures scrub --dir testdata/fb/<query>/<case>
@@ -37,7 +39,8 @@ commands:
   schemas apply | schemas check
   apikey create --name NAME --scopes s1,s2 [--rate N]
   apikey revoke --prefix PREFIX
-  registry list | registry set --file query.json
+  registry list | registry set --file query.json | registry import --file registry.yaml
+  report load [--since 24h] [--pages N] [--cost-per-gb P] [--json]
   dlq replay [--reason R] [--max N]
   replay [--prefix raw-failures] [--query Q,..] [--since 168h] [--fixtures-dir DIR --name N --samples 3]
   fixtures scrub --dir DIR
@@ -81,6 +84,10 @@ func main() {
 		err = registryList(ctx, cfg)
 	case "registry set":
 		err = registrySet(ctx, cfg, rest)
+	case "registry import":
+		err = registryImport(ctx, cfg, rest)
+	case "report load":
+		err = reportLoad(ctx, cfg, rest)
 	case "replay ":
 		err = replayRaw(ctx, cfg, rest)
 	case "dlq replay":

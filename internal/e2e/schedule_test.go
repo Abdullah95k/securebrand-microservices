@@ -58,7 +58,8 @@ func TestAdaptiveScheduleAndPostRefresh(t *testing.T) {
 		t.Fatalf("second registration: %+v", r)
 	}
 
-	// 8 posts 20h apart: 1.2 posts a day is tier T1 (12h).
+	// 8 posts 20h apart: 1.2 posts a day is tier T1, crawled every 3h like
+	// every tier.
 	var tier string
 	var interval int
 	var adaptive bool
@@ -68,8 +69,8 @@ func TestAdaptiveScheduleAndPostRefresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("tier %s, interval %ds, %.2f posts/day", tier, interval, rate)
-	if tier != "T1" || interval != 12*3600 || !adaptive {
-		t.Fatalf("want adaptive T1 / 12h, got %s / %ds (adaptive=%v)", tier, interval, adaptive)
+	if tier != "T1" || interval != 3*3600 || !adaptive {
+		t.Fatalf("want adaptive T1 / 3h, got %s / %ds (adaptive=%v)", tier, interval, adaptive)
 	}
 	if n := count(t, s, `SELECT count(*) FROM post_refresh WHERE page_id = $1`, page.ID); n != len(page.Posts) {
 		t.Fatalf("post_refresh rows %d, want %d", n, len(page.Posts))
@@ -99,7 +100,7 @@ func TestAdaptiveScheduleAndPostRefresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The budget stretches T1 by a fractional factor: the next run is planned
-	// 12h x 1.5 (+-10% jitter) out.
+	// 3h x 1.5 (+-10% jitter) out.
 	s.Planner.Budget = func(context.Context) ratelimit.BudgetState {
 		return ratelimit.BudgetState{Stretch: 1.5, StretchTiers: []string{"T1"}}
 	}
@@ -111,7 +112,7 @@ func TestAdaptiveScheduleAndPostRefresh(t *testing.T) {
 		Scan(&nextIn); err != nil {
 		t.Fatal(err)
 	}
-	if want := 18 * 3600.0; nextIn < want*0.89 || nextIn > want*1.11 {
+	if want := 4.5 * 3600; nextIn < want*0.89 || nextIn > want*1.11 {
 		t.Fatalf("stretched next run in %.0fs, want about %.0fs", nextIn, want)
 	}
 	var jobID string

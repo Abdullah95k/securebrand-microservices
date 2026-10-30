@@ -181,17 +181,19 @@ and `GET /v1/jobs/{id}` counters.
 - Running it again is safe: pages already registered keep their schedule and options and are not backfilled again. A page that has never had a job (its backfill failed to start) is backfilled then.
 - It prints `{"created", "existing", "failed"}`; the failed pages and their errors are listed even when it is interrupted.
 
-Pages registered without `schedule.interval_hours` are scheduled adaptively.
+Pages registered without `schedule.interval_hours` are scheduled adaptively. Every tier crawls for new posts **every 3 hours**: a run that finds nothing new costs a request or two. The tier still decides which posts' comments are refreshed (`scheduler.post_refresh` windows can be limited to some tiers) and which pages a daily budget slows down first.
 
 - **When the tier is set:** after every job, the page's posting rate over `scheduler.rate_window` (14 days) picks its tier. If the stored history is shorter, the rate uses that span, with a 1-day floor.
 
 | Tier | Posts per day | Interval |
 |---|---|---|
 | T0 | ≥ 10 | 3h |
-| T1 | ≥ 1 | 12h |
-| T2 | weekly or more | 24h |
-| T3 | less than weekly | 72h |
-| T4 | no post for 90 days | 7d |
+| T1 | ≥ 1 | 3h |
+| T2 | weekly or more | 3h |
+| T3 | less than weekly | 3h |
+| T4 | no post for 90 days | 3h |
+
+- **Longer intervals for quiet pages,** if cost ever matters more than freshness: raise the T1–T4 `interval`s (and `dormant_interval`) in the config. A page's next run moves after its next job.
 
 - **What a tier change does:** a faster tier pulls the next run forward; a slower one takes effect after the run already planned.
 - **Failing pages** still back off exponentially, up to 30 days.

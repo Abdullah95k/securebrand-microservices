@@ -264,6 +264,44 @@ curl -X PUT https://fbs/v1/admin/queries/timeline -H "Authorization: Bearer $ADM
 Crawlers reload the registry within `fb.registry_refresh` (30s). The previous
 entry becomes the fallback.
 
+## 7. Cost experiments
+
+Three measurements decide what production costs. Run them after the Phase 0 run, not beside it: they use the same proxy IPs, and would skew its block rates.
+
+### Smaller responses: `make phase0-trim`
+
+```
+make phase0-trim                    # the first 3 pages of pages.csv, on the isp tier
+make phase0-trim TRIM_ARGS="--each" # also every provider flag on its own (about 10 minutes more)
+```
+
+For each page it sends the timeline request the crawler makes, then variants:
+- `flags_off`: every `__relay_internal__pv__*` provider flag that is on, switched off. These flags switch parts of the response on, mostly display-only.
+- `off:<flag>` (with `--each`): one flag at a time, to see what each costs.
+- `count=N`: other timeline page sizes (`--timeline-counts`, default 3,25; the baseline is the crawler's 10).
+
+Then the same for the comments of the page's busiest post, for both comment queries the crawler sends (`comments` for full reads, `comments_newest` for the refreshes), with `after_count=N` for comment page sizes (`--comment-counts`, default 10,25,50; the template's is -1, Facebook's default). The baseline is the crawler's own request: `crawler.timeline_page_size`, and the Referer it sends.
+
+It keeps no response content: each request leaves one line in `phase0/out/trim.jsonl` with its size, class and the field names the parser missed. The summary (again with `fbs-spike trim-report --in phase0/out/trim.jsonl`) shows each variant's **wire bytes per post or comment** against the production request, and whether it is usable: every request ok, no required field missing and, for flag changes, as many items as the baseline. "loses optional ..." names fields the variant drops that the baseline had: decide whether you need them.
+
+**Adopting a result:**
+- A provider flag that is usable off: set it to `false` in the `variables` of each query it was measured on, in the registry (`phase0/out/registry.yaml`, or the `fb_queries` table in a deployment, section 6). `comments` and `comments_newest` are separate entries.
+- A bigger timeline page that is usable: `crawler.timeline_page_size`.
+- A comment page size Facebook honours (more items per request): tell the maintainers; `crawler.comments_page_size` is not wired into the comments template yet.
+
+### Faster per IP: `make phase0-rate`
+
+```
+make phase0-rate                                # the first 30 pages at 0.5, then 1.0 requests/s per IP, isp tier
+make phase0-rate RATES="0.5 1.0 2.0" RATE_PAGES=50
+```
+
+Each rate runs the same pages with the production comment ordering only, and writes `phase0/out/rate-<r>.jsonl` and its report `rate-<r>.txt`. The highest rate whose block rate stays near 0 sets `fb.identity_rps` (now 0.33): twice the rate halves the IPs production needs. Leave headroom: blocks tend to start a while after a rate turns unsafe.
+
+### Real steady-state load: the pilot
+
+Phase 0 measures first crawls. What production pays for each day is the steady state: every page every 3 hours for new posts, plus comment refreshes. The 48-hour pilot (`docs/runbooks/pilot.md`) runs the real pipeline on the Phase 0 pages and measures requests per page per day.
+
 ## Reference: the steps as separate commands
 
 `phase0` runs these for you; each also works on its own. Add

@@ -11,6 +11,8 @@
 //	fbs-spike check-fixtures --dir testdata/fb
 //	fbs-spike run            --registry my-seed.yaml --pages pages.csv --tier residential --out results.jsonl
 //	fbs-spike report         --in a.jsonl[,b.jsonl] [--json]
+//	fbs-spike trim           --registry my-seed.yaml --pages pages.csv --tier isp --out trim.jsonl [--each]
+//	fbs-spike trim-report    --in trim.jsonl [--json]
 //
 // Exit codes: 0 ok (GO), 1 error, 2 usage, 3 NO-GO, 4 needs action (missing
 // doc_ids, parser drift), 130 interrupted.
@@ -28,6 +30,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -60,10 +63,11 @@ const (
 
 type flags struct {
 	cfgPath, registryFile, tier, tiers, pagesFile, out, outDir, in, page, name, dir, fixturesDir string
-	writeRegistry, orderings, from, ipEcho                                                       string
-	asJSON, resume                                                                               bool
+	writeRegistry, orderings, from, ipEcho, timelineCounts, commentCounts                        string
+	asJSON, resume, each                                                                         bool
 	rps, reqPerDay, minDays                                                                      float64
 	timelinePages, postsPerPage, commentPages, threads, mediaSamples, conc, maxBundles, compare  int
+	trimPages, timelineCount                                                                     int
 	maxPostComments                                                                              int64
 }
 
@@ -111,6 +115,11 @@ func main() {
 	fs.IntVar(&f.mediaSamples, "media-samples", 3, "CDN downloads per page")
 	fs.IntVar(&f.conc, "concurrency", 4, "pages in parallel")
 	fs.IntVar(&f.maxBundles, "max-bundles", 150, "JS bundles to scan (docids)")
+	fs.IntVar(&f.trimPages, "trim-pages", 3, "pages measured, the first ones of --pages (trim)")
+	fs.BoolVar(&f.each, "each", false, "also switch each provider flag off on its own (trim)")
+	fs.IntVar(&f.timelineCount, "timeline-count", 0, "the baseline's timeline page size (trim; default crawler.timeline_page_size)")
+	fs.StringVar(&f.timelineCounts, "timeline-counts", "3,25", "timeline page sizes measured besides the baseline (trim)")
+	fs.StringVar(&f.commentCounts, "comment-counts", "10,25,50", "commentsAfterCount values measured besides the template's (trim)")
 	_ = fs.Parse(args)
 
 	cfg, err := config.Load(f.cfgPath)
@@ -128,6 +137,8 @@ func main() {
 		os.Exit(checkFixtures(f))
 	case "har":
 		os.Exit(har(f))
+	case "trim-report":
+		os.Exit(trimReport(f))
 	}
 
 	seed, err := loadSeed(f.registryFile)
@@ -224,6 +235,8 @@ func main() {
 		}
 	case "render":
 		os.Exit(render(ctx, cfg, f, st, seed))
+	case "trim":
+		os.Exit(trim(ctx, cfg, f, runner, seed))
 	case "capture":
 		if err := spike.CheckRegistry(seed, cfg.FB.BaseURL); err != nil {
 			fail(err)
@@ -494,6 +507,78 @@ func firstPage(f flags) string {
 	return ""
 }
 
+// trim runs the payload experiment and prints its summary.
+func trim(ctx context.Context, cfg *config.Config, f flags, runner func(io.Writer) *spike.Runner, seed registry.Seed) int {
+	if err := spike.CheckRegistry(seed, cfg.FB.BaseURL); err != nil {
+		fail(err)
+	}
+	pages, err := spike.ReadPagesFile(f.pagesFile)
+	if err != nil {
+		fail(err)
+	}
+	var refs []string
+	for i := 0; i < len(pages) && i < f.trimPages; i++ {
+		refs = append(refs, pages[i].Ref)
+	}
+	if len(refs) == 0 {
+		fail(errors.New("trim needs --pages"))
+	}
+	tc, err := intList(f.timelineCounts)
+	if err != nil {
+		fail(err)
+	}
+	cc, err := intList(f.commentCounts)
+	if err != nil {
+		fail(err)
+	}
+	out, err := os.OpenFile(f.out, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		fail(err)
+	}
+	defer func() { _ = out.Close() }()
+	count := f.timelineCount
+	if count <= 0 {
+		count = cfg.Crawler.TimelinePageSize
+	}
+	recs := runner(out).Trim(ctx, refs, spike.TrimOptions{Each: f.each, TimelineCount: count, TimelineCounts: tc, CommentCounts: cc})
+	fmt.Print(spike.FormatTrim(spike.TrimSummary(recs)))
+	fmt.Printf("records appended to %s; again: fbs-spike trim-report --in %s\n", f.out, f.out)
+	if ctx.Err() != nil {
+		return exitInterrupted
+	}
+	return 0
+}
+
+func trimReport(f flags) int {
+	var recs []spike.TrimRecord
+	for _, p := range splitList(f.in) {
+		r, err := spike.ReadTrim(p)
+		if err != nil {
+			fail(err)
+		}
+		recs = append(recs, r...)
+	}
+	rows := spike.TrimSummary(recs)
+	if f.asJSON {
+		printJSON(rows)
+	} else {
+		fmt.Print(spike.FormatTrim(rows))
+	}
+	return 0
+}
+
+func intList(s string) ([]int, error) {
+	var out []int
+	for _, v := range splitList(s) {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("%q is not a number", v)
+		}
+		out = append(out, n)
+	}
+	return out, nil
+}
+
 func splitList(s string) []string {
 	var out []string
 	for _, v := range strings.Split(s, ",") {
@@ -567,7 +652,7 @@ func render(ctx context.Context, cfg *config.Config, f flags, st spike.Stack, se
 }
 
 func usage() {
-	cmds := []string{"phase0", "preflight", "docids", "har", "render", "capture", "check-fixtures", "run", "report", "version"}
+	cmds := []string{"phase0", "preflight", "docids", "har", "render", "capture", "check-fixtures", "run", "report", "trim", "trim-report", "version"}
 	sort.Strings(cmds)
 	fmt.Fprintf(os.Stderr, "usage: fbs-spike <%s> [flags]   (fbs-spike <cmd> -h for flags)\nsee docs/runbooks/phase0-spike.md\n", strings.Join(cmds, "|"))
 	os.Exit(exitUsage)
