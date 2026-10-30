@@ -156,6 +156,15 @@ You are the **planning session** for igs. Your job is to **think, analyse and pl
 
 If the owner's HARs are available, analyse them first and answer whatever they settle, citing the request in the HAR. **Never commit raw HARs.**
 
+**Owner constraints (October 2026):** logged out only; **no official Instagram API and no third-party scrapers** (Apify, ScrapeCreators and the like). Only our own tool. If logged-out access is too limited, the scope narrows (D4). The owner's answers and recording notes are kept in a Claude doc linked from the planning prompt; read it with the docs tools.
+
+**Web research notes (October 2026, unverified; mostly scraper vendors' reports, so treat them as leads):**
+- Logged-out profile and single-post data now come mainly from **JSON embedded in the page HTML**. A profile's post feed still pages through `graphql/query` with a `doc_id` ([Scrapfly, 2026](https://scrapfly.io/blog/posts/how-to-scrape-instagram)).
+- `api/v1/users/web_profile_info/` reportedly answers HTTP 400 "log in" for a growing share of public profiles, and 429 after a handful of requests from one IP. Do not build on it without testing.
+- Throttling is **per IP**, datacenter ranges are throttled sooner, and the login wall can come back as **HTTP 200**. Detection must classify the wall in the body, not only by status code.
+- **Comments are largely gated for anonymous users**; at most the visible or preview comments come back logged out. The embed page (`/p/<code>/embed/captioned/`) reportedly gives caption, type, comment count and thumbnail, but not likes or exact time ([Apify actor notes](https://apify.com/cynix_dev/instagram-post-scraper-comments-metadata/changelog.md)). Search and hashtags require login.
+- Consequence for planning: plan for **scenario B** (posts, metrics and visible comments, with completeness reported) as the likely case, and keep scenario A as the upside if the HARs and Phase 0 show more.
+
 ### 2.5 How to analyse: the method
 
 Work through these steps and write your reasoning into the plan. Where you make a judgement call, say what would change your mind.
