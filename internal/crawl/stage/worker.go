@@ -114,6 +114,13 @@ func (w *Worker) Run(ctx context.Context, t *taskv1.Task) error {
 				"attempts", next.Attempt, "stalls", next.Stalls, "reason", out.Reason)
 			return w.deadLetter(ctx, t, reason, out.Reason, out.Counters)
 		}
+		// The attempt's cost is real even though it collects nothing that
+		// counts: its data is collected again by the retry.
+		if cost := costCounters(out.Counters); len(cost) > 0 && t.JobId != "" {
+			if err := d.Jobs.AddCounters(ctx, t.JobId, cost); err != nil {
+				slog.Debug("jobs: retry counters", "job", t.JobId, "err", err)
+			}
+		}
 		metrics.Tasks.WithLabelValues(name, lane, "retry").Inc()
 		metrics.Retries.WithLabelValues(name, out.Delay).Inc()
 		slog.Debug("task retry", "stage", name, "task", t.TaskId, "attempt", next.Attempt, "stalls", next.Stalls,
@@ -123,6 +130,20 @@ func (w *Worker) Run(ctx context.Context, t *taskv1.Task) error {
 		metrics.Tasks.WithLabelValues(name, lane, "failed").Inc()
 		return w.deadLetter(ctx, t, "permanent", out.Reason, out.Counters)
 	}
+}
+
+// costKeys are the counters a retried attempt still adds to its job: what
+// it cost and why it failed, not what it collected.
+var costKeys = []string{"requests", "wire_bytes", "blocked", "soft_errors", "transport_errors", "drift"}
+
+func costCounters(c map[string]int64) map[string]int64 {
+	out := map[string]int64{}
+	for _, k := range costKeys {
+		if v := c[k]; v != 0 {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // advanced reports whether a stream's checkpoint moved between two loads:

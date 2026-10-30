@@ -98,6 +98,7 @@ func (s *PostStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 		if err != nil {
 			return retry(t, st.Cursor, "30s", err.Error(), c)
 		}
+		c["wire_bytes"] += resp.BytesIn + resp.BytesOut
 		if resp.Class == detect.LoginWall {
 			if wallTruncates(&st, st.Cursor) {
 				truncated = true
@@ -382,6 +383,7 @@ func (s *ThreadStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 		if err != nil {
 			return retry(t, st.Cursor, "30s", err.Error(), c)
 		}
+		c["wire_bytes"] += resp.BytesIn + resp.BytesOut
 		if resp.Class == detect.LoginWall {
 			if wallTruncates(&st, st.Cursor) {
 				truncated = true

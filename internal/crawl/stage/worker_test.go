@@ -51,3 +51,15 @@ func TestExhausted(t *testing.T) {
 		t.Errorf("configured total cap: %q", got)
 	}
 }
+
+// A retried attempt adds what it cost to its job, not what it collected
+// (the retry collects that again).
+func TestCostCounters(t *testing.T) {
+	got := costCounters(map[string]int64{"requests": 3, "wire_bytes": 9000, "blocked": 1, "posts": 10, "comments": 40, "drift": 0})
+	if len(got) != 3 || got["requests"] != 3 || got["wire_bytes"] != 9000 || got["blocked"] != 1 {
+		t.Fatalf("cost counters: %v", got)
+	}
+	if len(costCounters(nil)) != 0 {
+		t.Fatal("nil counters")
+	}
+}

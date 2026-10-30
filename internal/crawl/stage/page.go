@@ -77,6 +77,7 @@ func (s *PageStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 			return retry(t, st.Cursor, "30s", "page load: "+err.Error(), c)
 		}
 		c["requests"]++
+		c["wire_bytes"] += pl.Bytes
 		switch pl.Class {
 		case detect.OK:
 		case detect.ContentUnavailable:
@@ -169,6 +170,7 @@ func (s *PageStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 		if err != nil {
 			return retry(t, st.Cursor, "30s", err.Error(), c)
 		}
+		c["wire_bytes"] += resp.BytesIn + resp.BytesOut
 		if resp.Class == detect.LoginWall {
 			if wallTruncates(&st, st.Cursor) {
 				truncated = "login_wall"

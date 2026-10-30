@@ -136,6 +136,19 @@ func (d *Deps) observeLoad(pl *session.PageLoad, err error, lane taskv1.Lane) {
 // classOutcome maps a non-OK response class to an outcome for task t.
 // cursor is the resume point to retry from.
 func classOutcome(t *taskv1.Task, cls detect.Class, reason, cursor string, c map[string]int64) Outcome {
+	if c == nil {
+		c = map[string]int64{}
+	}
+	switch cls {
+	case detect.RateLimited, detect.Checkpoint, detect.LoginWall:
+		c["blocked"]++
+	case detect.Transport:
+		c["transport_errors"]++
+	case detect.SoftError:
+		c["soft_errors"]++
+	case detect.RegistryStale, detect.SchemaDrift:
+		c["drift"]++
+	}
 	switch cls {
 	case detect.RateLimited, detect.Transport, detect.Checkpoint, detect.LoginWall:
 		return retry(t, cursor, "30s", cls.String()+": "+reason, c)

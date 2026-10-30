@@ -5,7 +5,7 @@ PG_DSN ?= postgres://fbs:fbs@localhost:5432/fbs?sslmode=disable
 TEST_ENV = FBS_TEST_PG_DSN="$(PG_DSN)" FBS_TEST_REDIS_ADDR=localhost:6379 FBS_TEST_KAFKA_BROKERS=localhost:19092 FBS_TEST_SCHEMA_REGISTRY=http://localhost:18081
 COMPOSE = docker compose -f deploy/compose/docker-compose.yml
 
-.PHONY: all build test lint vet generate golden fixtures infra-up infra-down test-integration e2e loadtest soak docker docker-prebuilt compose-up compose-down spike-report phase0 phase0-dryrun spike-bin chart-check chart-smoke clean
+.PHONY: all build test lint vet generate golden fixtures infra-up infra-down test-integration e2e loadtest soak docker docker-prebuilt compose-up compose-down spike-report phase0 phase0-dryrun phase0-trim phase0-rate pilot-up pilot-register pilot-report pilot-down pilot-clean spike-bin chart-check chart-smoke clean
 
 all: generate build test
 
@@ -111,6 +111,70 @@ phase0:
 	@test -f $(PHASE0_CONFIG) || { echo "missing $(PHASE0_CONFIG): cp phase0/proxies.example.yaml $(PHASE0_CONFIG), fill it in, chmod 600"; exit 2; }
 	@test -f $(PHASE0_PAGES) || { echo "missing $(PHASE0_PAGES): cp phase0/pages.example.csv $(PHASE0_PAGES) and fill it in"; exit 2; }
 	$(GO) run ./cmd/fbs-spike phase0 --config $(PHASE0_CONFIG) --pages $(PHASE0_PAGES) --tiers $(PHASE0_TIERS) --out-dir $(PHASE0_OUT) $(PHASE0_ARGS)
+
+TRIM_TIER ?= isp
+TRIM_ARGS ?=
+## Payload experiment: what each change to the timeline and comments queries'
+## variables does to response size and parsing, on the first 3 pages
+## (docs/runbooks/phase0-spike.md, "Cost experiments"). TRIM_ARGS="--each" also
+## measures every provider flag alone.
+phase0-trim:
+	$(GO) run ./cmd/fbs-spike trim --config $(PHASE0_CONFIG) --pages $(PHASE0_PAGES) --registry $(PHASE0_OUT)/registry.yaml \
+	  --tier $(TRIM_TIER) --out $(PHASE0_OUT)/trim.jsonl $(TRIM_ARGS)
+
+RATE_TIER ?= isp
+RATES ?= 0.5 1.0
+RATE_PAGES ?= 30
+RATE_ARGS ?= --orderings comments --timeline-pages 10
+## Rate experiment: the same RATE_PAGES pages at each per-identity rate in
+## RATES (requests per second per IP), one result file and report each.
+phase0-rate:
+	@mkdir -p $(PHASE0_OUT)
+	@grep -v '^#' $(PHASE0_PAGES) | head -n $$(( $(RATE_PAGES) + 1 )) > $(PHASE0_OUT)/rate-pages.csv
+	@for r in $(RATES); do \
+	  echo "== $(RATE_TIER) at $$r requests/s per IP"; \
+	  $(GO) run ./cmd/fbs-spike run --config $(PHASE0_CONFIG) --pages $(PHASE0_OUT)/rate-pages.csv \
+	    --registry $(PHASE0_OUT)/registry.yaml --tier $(RATE_TIER) --rps $$r --out $(PHASE0_OUT)/rate-$$r.jsonl $(RATE_ARGS) || exit 1; \
+	  $(GO) run ./cmd/fbs-spike report --in $(PHASE0_OUT)/rate-$$r.jsonl > $(PHASE0_OUT)/rate-$$r.txt; \
+	  grep -E 'block rate|bootstrap|VERDICT|requests' $(PHASE0_OUT)/rate-$$r.txt | head -n 8; \
+	done
+
+PILOT_COMPOSE = $(COMPOSE) -f deploy/compose/pilot.yml
+PILOT_SINCE ?= 24h
+PILOT_PROJECT ?= 5000
+PILOT_COST_PER_GB ?= 4
+PILOT_FBCTL = $(PILOT_COMPOSE) run --rm --no-deps -T --entrypoint /usr/local/bin/fbctl api
+## Pilot: the real pipeline against real Facebook on this machine, to measure
+## the steady state (docs/runbooks/pilot.md). Needs Docker, phase0/proxies.yaml
+## and the Phase 0 registry. Start with the Phase 0 run finished.
+pilot-up:
+	@test -f $(PHASE0_CONFIG) || { echo "missing $(PHASE0_CONFIG)"; exit 2; }
+	@test -s $(PHASE0_OUT)/registry.yaml || { echo "missing $(PHASE0_OUT)/registry.yaml: finish Phase 0 first"; exit 2; }
+	@command -v docker >/dev/null || { echo "Docker is not installed: docs/runbooks/pilot.md, step 1"; exit 2; }
+	@printf 'registry_sync:\n  canary_pages: [%s]\n' \
+	  "$$(grep -v '^#' $(PHASE0_PAGES) | grep -v '^[[:space:]]*$$' | sed -n '2,4p' | cut -d, -f1 | sed 's/.*/"&"/' | paste -sd, -)" \
+	  > $(PHASE0_OUT)/pilot-canary.yaml
+	$(MAKE) docker
+	$(PILOT_COMPOSE) up -d
+	@echo "up; register the pages with: make pilot-register"
+
+## Registers every page of phase0/pages.csv; each is backfilled (a week), then crawled every 3 hours.
+pilot-register:
+	@key=$$($(PILOT_FBCTL) apikey create --name pilot --scopes pages:write,jobs:write,data:read \
+	  | sed -n 's/.*"api_key": *"\([^"]*\)".*/\1/p'); \
+	test -n "$$key" || { echo "could not create an API key"; exit 1; }; \
+	$(PILOT_COMPOSE) run --rm --no-deps -T -v $(CURDIR)/$(PHASE0_PAGES):/pages.csv:ro --entrypoint /usr/local/bin/fbctl api \
+	  pages import --api http://api:8080 --key "$$key" /pages.csv
+
+## Requests, bytes and blocks per page per day over the last PILOT_SINCE, projected to PILOT_PROJECT pages.
+pilot-report:
+	@$(PILOT_FBCTL) report load --since $(PILOT_SINCE) --pages $(PILOT_PROJECT) --cost-per-gb $(PILOT_COST_PER_GB)
+
+## Stops the pilot and keeps its database; pilot-clean also deletes it.
+pilot-down:
+	$(PILOT_COMPOSE) down
+pilot-clean:
+	$(PILOT_COMPOSE) down -v
 
 ## Rehearse Phase 0 against a local fakefb (no proxies, no Facebook, about a minute).
 phase0-dryrun:
