@@ -33,6 +33,9 @@ type Faults struct {
 	// inserts them), so HTTP bootstraps fail and need the browser.
 	JSOnlyTokens bool          `json:"js_only_tokens"`
 	MediaTTL     time.Duration `json:"media_ttl"`
+	// FieldErrors streams a partial "field_exception" error part after each
+	// timeline page, as real Facebook does beside the posts.
+	FieldErrors bool `json:"field_errors"`
 }
 
 // Options configures a Server.
@@ -321,6 +324,11 @@ func (s *Server) graphql(w http.ResponseWriter, r *http.Request) {
 	switch friendly {
 	case "ProfileCometTimelineFeedRefetchQuery":
 		body = s.timeline(rd, vars)
+		if f.FieldErrors {
+			body = append(body, "\n"+`{"label":"ProfileCometTimelineFeed_feedback$defer","path":["node","timeline_list_feed_units","edges",0],`+
+				`"data":null,"errors":[{"message":"A server error field_exception occured. Check server logs for details.","severity":"ERROR",`+ //nolint:misspell // Facebook's own spelling
+				`"path":["node","timeline_list_feed_units","edges",0,"node","feedback"]}]}`...)
+		}
 	case "CommentsListComponentsPaginationQuery":
 		body = s.comments(rd, vars)
 	case "Depth1CommentsListPaginationQuery":

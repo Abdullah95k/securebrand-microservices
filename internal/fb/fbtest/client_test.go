@@ -198,6 +198,26 @@ func TestLoginWallAndRateLimitAreClassified(t *testing.T) {
 	}
 }
 
+// A page of posts with a partial field error beside it (as real Facebook
+// streams) is OK, not a soft error to retry.
+func TestPartialFieldErrorsAreOK(t *testing.T) {
+	env := New(t, Options{Faults: fakefb.Faults{FieldErrors: true}})
+	ctx := context.Background()
+	id, _ := env.Pool.Acquire(ctx, "direct")
+	p := env.World.Pages()[0]
+	if _, err := env.Loader.Bootstrap(ctx, id, env.HTTP.URL+"/"+p.Vanity); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := env.GQL.Do(ctx, id, graphql.Request{Query: "timeline", Vars: map[string]any{"count": 3, "page_id": p.ID}})
+	if err != nil || resp.Class != detect.OK || len(resp.Errors) != 1 {
+		t.Fatalf("got %v %v (%s), errors %v", err, resp.Class, resp.Reason, resp.Errors)
+	}
+	tl, rep := parse.Timeline(resp.Parts, p.ID, env.HTTP.URL)
+	if !rep.OK() || len(tl.Posts) == 0 {
+		t.Fatalf("parse: %d posts, missing %v", len(tl.Posts), rep.Missing)
+	}
+}
+
 func TestDocRotationFallsBackToFallbackEntry(t *testing.T) {
 	env := New(t, Options{})
 	ctx := context.Background()

@@ -350,6 +350,10 @@ func har(f flags) int {
 	} else {
 		fmt.Printf("%d GraphQL requests and %d page loads in %s\n", len(c.Operations), len(c.Pages), f.in)
 		for _, q := range res.Queries {
+			if q.Kept != "" {
+				fmt.Printf("KEPT    %-18s %s = %s (not in the HAR; from --registry)\n", q.Query, q.FriendlyName, q.Kept)
+				continue
+			}
 			if q.DocID == "" {
 				fmt.Printf("MISSING %-18s %s: not in the HAR\n", q.Query, q.FriendlyName)
 				continue
@@ -360,6 +364,18 @@ func har(f flags) int {
 			}
 			if len(q.Removed) > 0 {
 				fmt.Printf("        variables removed: %s\n", strings.Join(q.Removed, ", "))
+			}
+			if len(q.Set) > 0 {
+				set := make([]string, 0, len(q.Set))
+				for k, v := range q.Set {
+					b, _ := json.Marshal(v)
+					set = append(set, k+"="+string(b))
+				}
+				sort.Strings(set)
+				fmt.Printf("        variables set in the registry: %s\n", strings.Join(set, ", "))
+			}
+			if len(q.Unset) > 0 {
+				fmt.Printf("        variables not set (they differ between requests or are not settings): %s\n", strings.Join(q.Unset, ", "))
 			}
 			if len(q.IntentTokens) > 0 {
 				fmt.Printf("        comment orderings: %s\n", strings.Join(q.IntentTokens, ", "))

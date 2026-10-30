@@ -45,6 +45,16 @@ func SplitParts(body []byte) []gjson.Result {
 	return out
 }
 
+// HasData reports whether any part carries a non-empty data object.
+func HasData(parts []gjson.Result) bool {
+	for _, p := range parts {
+		if d := p.Get("data"); d.IsObject() && len(d.Map()) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // Errors extracts GraphQL and legacy errors from every part.
 func Errors(parts []gjson.Result) []detect.GQLError {
 	var out []detect.GQLError

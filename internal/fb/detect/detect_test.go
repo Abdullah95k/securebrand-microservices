@@ -22,6 +22,12 @@ func TestClassify(t *testing.T) {
 		{"proxy auth", Input{Status: 407, Expect: "graphql"}, Transport},
 		{"404 page", Input{Status: 404, Expect: "html"}, ContentUnavailable},
 		{"unknown error", Input{Status: 200, Errors: []GQLError{{Code: 99}}, Expect: "graphql"}, SoftError},
+		// A real timeline page streams field errors beside its posts.
+		{"partial field error", Input{Status: 200, HasData: true, Expect: "graphql",
+			Errors: []GQLError{{Message: "A server error field_exception occured.", Severity: "ERROR"}}}, OK}, //nolint:misspell // Facebook's own spelling
+		{"critical error with data", Input{Status: 200, HasData: true, Expect: "graphql",
+			Errors: []GQLError{{Code: 99, Severity: "CRITICAL"}}}, SoftError},
+		{"rate limit code with data", Input{Status: 200, HasData: true, Errors: []GQLError{{Code: 1675004}}, Expect: "graphql"}, RateLimited},
 	}
 	for _, c := range cases {
 		if got, reason := r.Classify(c.in); got != c.want {

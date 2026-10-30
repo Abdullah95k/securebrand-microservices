@@ -136,7 +136,7 @@ The bundle scan can miss queries that Facebook loads lazily. A browser
 recording of a logged-out session has them all:
 
 1. Open a **private window, logged out**, then open DevTools → Network. Tick "Preserve log" and filter on `graphql`.
-2. Open a busy public page and scroll down a few screens.
+2. Open a busy public page and scroll down a few screens, **slowly**. Facebook rate-limits logged-out timeline scrolling early. The first real recording got one page of posts. After that, the browser retried about 6 times a second for minutes, and every retry came back as "Rate limit exceeded" (code 1675004, sent with HTTP 200). If posts stop loading, stop scrolling and move on to the post.
 3. Open a post with many comments. Switch the comment filter to **"All comments"**, then to "Newest". Click "View more comments" and "View N replies" a few times.
 4. Right-click the request list → **Save all as HAR** (recent Chrome versions export a sanitized HAR, without cookies, by default). The tool never reads headers or cookies either way, and never writes them anywhere.
 
@@ -151,10 +151,17 @@ go run ./cmd/fbs-spike har --in session.har --write-registry phase0/out/registry
 make phase0 PHASE0_TIERS=isp,residential PHASE0_ARGS="--registry phase0/out/registry.yaml --from capture"
 ```
 
-`har` also prints, for each query, the variables Facebook now sends that
-the registry template lacks, and the template variables Facebook no longer
-sends. If either list is non-empty, send the bundle: the templates need
-updating.
+For each query, `har` also prints two lists: the variables Facebook now sends that the registry template lacks, and the template variables Facebook no longer sends.
+
+**Variables written to the registry.** When every request sent a variable with the same small value (a flag, a number, an enum or null), `har` writes it into the template. This covers both new variables and fixed values that changed. Facebook rejects requests that leave out required variables, such as the `__relay_internal__pv__*` provider flags. These are listed under "variables set in the registry".
+
+**What stays as it is.** Caller values (`{{cursor}}`, `{{page_id}}`, ...) and the comment ordering are never changed.
+
+**Variables not set.** Some variables are left out of the template: those whose value changed between requests, and long strings or objects. Look at "variables not set" and "variables removed". If either is non-empty, send the bundle so the templates can be updated by hand.
+
+**The fixture.** For each query, the fixture is the largest successful response in the recording.
+
+**More than one recording.** Pass `--registry phase0/out/registry.yaml` to merge a second HAR into the registry the first one wrote.
 
 ## 4. Reading the report
 

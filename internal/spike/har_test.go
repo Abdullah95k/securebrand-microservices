@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/parse"
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/registry"
 )
 
 const harCookie = "datr=HARCOOKIEVALUE123"
@@ -67,8 +68,14 @@ func sampleHAR(t *testing.T) []byte {
 		harEntryJSON("GET", "https://www.facebook.com/ajax/bz", nil, false, []byte("<html>not a page</html>"), false),
 		harEntryJSON("GET", "https://www.facebook.com/brand0", nil, false, fixture(t, "page_html", "response.html"), false),
 		harEntryJSON("GET", "https://static.xx.fbcdn.net/rsrc.php/v3/x.js", nil, false, []byte("js"), false),
+		// An empty last page first: the fixture must be the full one.
+		harEntryJSON("POST", gql, gqlForm("ProfileCometTimelineFeedRefetchQuery", "111", map[string]any{
+			"count": 3, "cursor": "AQHtail", "id": "100064000000000", "renderLocation": "timeline", "newKnob": true,
+			"scale": 2, "trackingCode": "a",
+		}), false, []byte(`{"data":{"node":{"timeline_list_feed_units":{"edges":[]}}}}`), false),
 		harEntryJSON("POST", gql, gqlForm("ProfileCometTimelineFeedRefetchQuery", "111", map[string]any{
 			"count": 3, "cursor": nil, "id": "100064000000000", "renderLocation": "timeline", "newKnob": true,
+			"scale": 2, "trackingCode": "b",
 		}), false, fixture(t, "timeline", "response.ndjson"), true),
 		harEntryJSON("POST", gql, gqlForm("CommentsListComponentsPaginationQuery", "222", map[string]any{
 			"commentsIntentToken": "RANKED_UNFILTERED_CHRONOLOGICAL_REPLIES_INTENT_V1", "id": feedback, "commentsAfterCursor": nil,
@@ -93,7 +100,7 @@ func TestHARImport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(c.Operations) != 5 || len(c.Pages) != 2 {
+	if len(c.Operations) != 6 || len(c.Pages) != 2 {
 		t.Fatalf("operations %d pages %d", len(c.Operations), len(c.Pages))
 	}
 	root := t.TempDir()
@@ -116,8 +123,26 @@ func TestHARImport(t *testing.T) {
 	for _, q := range res.Queries {
 		by[q.Query] = q
 	}
-	if tl := by["timeline"]; strings.Join(tl.Added, ",") != "newKnob" || !contains(tl.Removed, "feedLocation") {
+	if tl := by["timeline"]; strings.Join(tl.Added, ",") != "newKnob,trackingCode" || !contains(tl.Removed, "feedLocation") ||
+		len(tl.Set) != 2 || tl.Set["newKnob"] != true || tl.Set["scale"] != float64(2) || strings.Join(tl.Unset, ",") != "trackingCode" {
 		t.Fatalf("timeline diff: %+v", tl)
+	}
+	// The registry gets the settings the browser sent; caller values and
+	// the comment ordering stay templates.
+	vars := map[string]map[string]any{}
+	for _, q := range res.Seed.Queries {
+		v := map[string]any{}
+		if err := json.Unmarshal(q.Variables, &v); err != nil {
+			t.Fatal(err)
+		}
+		vars[q.Name] = v
+	}
+	if tl := vars["timeline"]; tl["newKnob"] != true || tl["scale"] != float64(2) || tl["count"] != "{{count}}" ||
+		tl["cursor"] != "{{cursor}}" || tl["id"] != "{{page_id}}" || tl["trackingCode"] != nil {
+		t.Fatalf("timeline template: %v", tl)
+	}
+	if vars["comments_newest"][intentKey] != "RECENT_ACTIVITY_INTENT_V1" {
+		t.Fatalf("comments_newest ordering changed: %v", vars["comments_newest"])
 	}
 	if c := by["comments"]; c.Requests != 1 || strings.Join(c.IntentTokens, ",") != "RANKED_UNFILTERED_CHRONOLOGICAL_REPLIES_INTENT_V1" {
 		t.Fatalf("comments: %+v", c)
@@ -151,6 +176,46 @@ func TestHARImport(t *testing.T) {
 	_ = json.Unmarshal(b, &meta)
 	if meta["parent_comment_id"] != float64(1200001013840) || meta["__scrubbed"] != true {
 		t.Fatalf("replies meta: %v", meta)
+	}
+}
+
+// A second recording of replies only, merged into the registry the first
+// one wrote, keeps the doc_ids it lacks and is not missing anything.
+func TestHARMergeSecondRecording(t *testing.T) {
+	base, _ := MergeDocIDs(embeddedSeed(t), map[string]string{
+		"ProfileCometTimelineFeedRefetchQuery": "111", "CommentsListComponentsPaginationQuery": "222"})
+	replyFeedback := base64.StdEncoding.EncodeToString([]byte("feedback:1200001008975_1200001013840"))
+	b, _ := json.Marshal(map[string]any{"log": map[string]any{"entries": []map[string]any{
+		harEntryJSON("POST", "https://www.facebook.com/api/graphql/", gqlForm("Depth1CommentsListPaginationQuery", "333",
+			map[string]any{"expansionToken": "tok", "id": replyFeedback}), false, fixture(t, "replies", "response.ndjson"), false),
+	}}})
+	c, err := ReadHAR(bytes.NewReader(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := ImportHAR(c, base, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.DocIDs.Missing) != 0 {
+		t.Fatalf("missing: %v", res.DocIDs.Missing)
+	}
+	by := map[string]HARQueryReport{}
+	for _, q := range res.Queries {
+		by[q.Query] = q
+	}
+	if by["timeline"].Kept != "111" || by["comments_newest"].Kept != "222" || by["replies"].DocID != "333" {
+		t.Fatalf("reports: %+v", res.Queries)
+	}
+	for _, q := range res.Seed.Queries {
+		if registry.IsPlaceholderDocID(q.DocID) {
+			t.Fatalf("%s still has a placeholder", q.Name)
+		}
+	}
+	// Against the embedded seed the same recording misses the rest.
+	res, _ = ImportHAR(c, embeddedSeed(t), "", "")
+	if len(res.DocIDs.Missing) != 2 {
+		t.Fatalf("missing against the seed: %v", res.DocIDs.Missing)
 	}
 }
 

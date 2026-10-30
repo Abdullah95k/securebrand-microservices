@@ -189,7 +189,7 @@ func (c *Client) do(ctx context.Context, id *session.Identity, q registry.Query,
 	parts := SplitParts(tr.Body)
 	errs := Errors(parts)
 	cls, reason := c.Rules.Classify(detect.Input{Status: tr.Status, Location: tr.Location,
-		ContentType: tr.Header.Get("Content-Type"), Body: tr.Body, Errors: errs, Expect: "graphql"})
+		ContentType: tr.Header.Get("Content-Type"), Body: tr.Body, Errors: errs, HasData: HasData(parts), Expect: "graphql"})
 	if cls == detect.OK && len(parts) == 0 {
 		cls, reason = detect.SoftError, "empty body"
 	}

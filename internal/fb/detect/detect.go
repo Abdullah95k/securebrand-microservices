@@ -93,6 +93,10 @@ type Input struct {
 	ContentType string
 	Body        []byte
 	Errors      []GQLError
+	// HasData reports that a GraphQL response carries data. Errors beside
+	// it that are not critical are partial (Facebook streams pages with
+	// "field_exception" errors for single fields) and leave it OK.
+	HasData bool
 	// Expect is "graphql" for API calls and "html" for page loads.
 	Expect string
 }
@@ -168,10 +172,19 @@ func (r Rules) Classify(in Input) (Class, string) {
 			}
 		}
 	}
-	if len(in.Errors) > 0 {
+	if len(in.Errors) > 0 && (!in.HasData || critical(in.Errors)) {
 		return SoftError, "fb error " + i64toa(in.Errors[0].Code) + " " + truncate(in.Errors[0].Message, 60)
 	}
 	return OK, ""
+}
+
+func critical(errs []GQLError) bool {
+	for _, e := range errs {
+		if strings.EqualFold(e.Severity, "CRITICAL") {
+			return true
+		}
+	}
+	return false
 }
 
 func contains(xs []int64, x int64) bool {
