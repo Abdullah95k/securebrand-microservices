@@ -22,12 +22,7 @@ func ScrubDir(dir string, keep []string) error {
 	if dir == "" {
 		return fmt.Errorf("fixtures: directory is required")
 	}
-	keepIDs := map[string]bool{}
-	for _, k := range keep {
-		if k != "" {
-			keepIDs[k] = true
-		}
-	}
+	keepIDs := keepSet(keep)
 	for _, name := range []string{"response.ndjson", "response.html"} {
 		p := filepath.Join(dir, name)
 		b, err := os.ReadFile(p)
@@ -49,6 +44,16 @@ func ScrubDir(dir string, keep []string) error {
 	meta["__scrubbed"] = true
 	mb, _ := json.MarshalIndent(meta, "", "  ")
 	return os.WriteFile(mp, append(mb, '\n'), 0o644)
+}
+
+func keepSet(keep []string) map[string]bool {
+	ids := map[string]bool{}
+	for _, k := range keep {
+		if k != "" {
+			ids[k] = true
+		}
+	}
+	return ids
 }
 
 var (
@@ -87,7 +92,11 @@ func Scrub(b []byte, keep map[string]bool) []byte {
 		if err != nil {
 			return "https://scontent.example.fbcdn.net/scrubbed.jpg"
 		}
-		return "https://" + u.Host + "/scrubbed" + u.Path[strings.LastIndexByte(u.Path, '/'):]
+		file := "/"
+		if i := strings.LastIndexByte(u.Path, '/'); i >= 0 {
+			file = u.Path[i:]
+		}
+		return "https://" + u.Host + "/scrubbed" + file
 	})
 	s = profileRe.ReplaceAllString(s, `https://www.facebook.com/scrubbed.profile$2`)
 	return []byte(s)
