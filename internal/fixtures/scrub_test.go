@@ -222,7 +222,7 @@ func TestScrubDirRescrubsOlderVersions(t *testing.T) {
 		t.Fatalf("not scrubbed again: %s", once)
 	}
 	meta, _ := os.ReadFile(filepath.Join(dir, "meta.json"))
-	if !strings.Contains(string(meta), `"__scrubber": 2`) {
+	if !strings.Contains(string(meta), `"__scrubber": 3`) {
 		t.Fatalf("meta: %s", meta)
 	}
 	if err := ScrubDir(dir, nil); err != nil {
@@ -281,5 +281,24 @@ func TestScrubTruncatedJSON(t *testing.T) {
 	out := string(Scrub([]byte(in), nil))
 	if strings.Contains(out, "Jane Real") || strings.Contains(out, "100012345") || !strings.HasSuffix(out, `"rest":`) {
 		t.Fatalf("scrubbed: %s", out)
+	}
+}
+
+// Comment text is blanked wherever Facebook nests it: body_renderer in a
+// Comment, a post's interesting_top_level_comments, and any text inside a
+// comment (an attachment title). The page's own UI text stays.
+func TestScrubCommentBodies(t *testing.T) {
+	in := `{"interesting_top_level_comments":[{"comment":{"body_renderer":{"__typename":"TextWithEntities","text":"Ali says hi"}}}],` +
+		`"edges":[{"node":{"__typename":"Comment","body_renderer":{"__typename":"TextWithEntities","text":"secret words"},` +
+		`"attachments":[{"title":{"text":"Hassan gif"}}]}}],` +
+		`"intro":{"profile_status_text":{"text":"Mona status"}},"tile":{"title":{"text":"Photos"}}}`
+	out := string(Scrub([]byte(in), nil))
+	for _, leak := range []string{"Ali", "secret", "Hassan", "Mona"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("scrubbed output still contains %q: %s", leak, out)
+		}
+	}
+	if !strings.Contains(out, `"text":"Photos"`) {
+		t.Errorf("UI text lost: %s", out)
 	}
 }
