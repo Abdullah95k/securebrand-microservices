@@ -48,3 +48,21 @@ func TestDeterministicIDs(t *testing.T) {
 		t.Fatal("retry keeps the task id")
 	}
 }
+
+// Attempts count failures without progress: a retry from the same cursor
+// is one more attempt, one from a cursor further on starts again at 1.
+func TestRetryCountsFailuresSinceProgress(t *testing.T) {
+	tk := &taskv1.Task{TaskId: "t", Cursor: "c1", Attempt: 4}
+	if r := Retry(tk, "c1"); r.Attempt != 5 || r.Cursor != "c1" {
+		t.Fatalf("same cursor: attempt %d cursor %q", r.Attempt, r.Cursor)
+	}
+	if r := Retry(tk, ""); r.Attempt != 5 || r.Cursor != "c1" {
+		t.Fatalf("no cursor: attempt %d cursor %q", r.Attempt, r.Cursor)
+	}
+	if r := Retry(tk, "c2"); r.Attempt != 1 || r.Cursor != "c2" {
+		t.Fatalf("progress: attempt %d cursor %q", r.Attempt, r.Cursor)
+	}
+	if tk.Attempt != 4 || tk.Cursor != "c1" {
+		t.Fatal("Retry changed its input")
+	}
+}

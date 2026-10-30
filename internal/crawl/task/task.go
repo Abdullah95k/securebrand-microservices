@@ -64,12 +64,16 @@ func Continuation(t *taskv1.Task, cursor string) *taskv1.Task {
 	return Finalize(c)
 }
 
-// Retry returns the same task (same id) with attempt incremented.
+// Retry returns the same task (same id) to run again from cursor. Attempt
+// counts failures since the task last made progress: a retry from a cursor
+// past the one the task started from is its first failure there, so a long
+// stream that advances between rate limits is not dead-lettered for them.
 func Retry(t *taskv1.Task, cursor string) *taskv1.Task {
 	c := cloneShallow(t)
 	c.Attempt = t.Attempt + 1
-	if cursor != "" {
+	if cursor != "" && cursor != t.Cursor {
 		c.Cursor = cursor
+		c.Attempt = 1
 	}
 	return c
 }
