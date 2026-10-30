@@ -96,7 +96,7 @@ The steps, in order. Each prints what it found, and the output goes to `phase0/o
 |---|---|---|---|
 | `preflight` | Checks each tier's exits through an IP echo service: the IP stays the same within a session, and different sessions get different IPs. Then loads the first page through each tier. Also checks the config file permissions. | `preflight.json` | any FAIL line (wrong credentials, non-sticky sessions, a login wall) |
 | `docids` | Loads the first 3 pages, scans their JS bundles for the registry's queries and writes a registry with the current doc_ids | `docids.json`, `registry.yaml` | a query is not found. Use the [HAR fallback](#3-har-fallback-when-doc_ids-are-missing). |
-| `capture` | Records the page HTML, a timeline page, a comments page and a replies page of the first 2 pages; scrubs names, person ids, profile links, signed URLs and text; runs the parsers over them | `fixtures/`, `fixtures.json` | a parser does not understand a response: Facebook's shapes changed. Send the bundle. |
+| `capture` | Records the page HTML, a timeline page, a comments page and a replies page of the first 2 pages; scrubs people's names, ids, links and text, and signed URLs; runs the parsers over them | `fixtures/`, `fixtures.json` | a parser does not understand a response: Facebook's shapes changed. Send the bundle. |
 | `smoke` | Measures the first 3 pages per tier at reduced limits, then prints an estimate of the full run's time, traffic and cost | `smoke-<tier>.jsonl` | no bootstrap, blocks above 50%, or the timeline parser finds no posts |
 | `run` | The measurement, per tier. It can be resumed: pages already finished are skipped. | `run-<tier>.jsonl` | none |
 | `report` | The go/no-go report | `report.txt`, `report.json` | none |
@@ -235,13 +235,13 @@ configured proxy user name or password, and no URL with credentials,
 appears in it.
 
 **Share it privately. Never commit it to this repository, which is public.**
-**What the fixtures still hold.** The scrubber removes:
+**What the fixtures still hold.** The scrubber walks each response as JSON, including JSON nested inside strings. It removes:
 - people's names and ids, including people mentioned in comments;
-- profile and `/people/` links;
+- people's profile and `/people/` links;
 - signed media URLs;
-- all text, which is replaced by `x`s of the same length so mention offsets stay valid.
+- the text people wrote: comment and post bodies, text that mentions someone, and media captions. Letters and digits become `x`, and the length is kept so mention offsets stay valid.
 
-What stays is real structure: post and comment ids, timestamps and counts.
+What stays is the page's own name, links and text (such as its follower line), and real structure: post and comment ids, permalinks, timestamps and counts.
 
 **Re-scrubbing.** Each fixture records the scrubber version. When the bundle is built, fixtures scrubbed by an older version are scrubbed again.
 
