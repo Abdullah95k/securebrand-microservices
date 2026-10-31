@@ -147,10 +147,15 @@ PILOT_OUT = phase0/out
 PILOT_SINCE ?= 24h
 PILOT_PROJECT ?= 5000
 PILOT_COST_PER_GB ?= 4
-# Requests per second per IP (fb.identity_rps) for the pilot run; Phase 0's
-# rate test passed 0.5 and 1.0 over a few minutes.
-PILOT_RPS ?= 0.33
+# Requests per second per IP (fb.identity_rps) for the pilot run; empty keeps
+# configs/default.yaml's. Phase 0's rate test passed 0.5 and 1.0 over a few
+# minutes. Read from the environment by pilot-up, never pasted into a command.
+PILOT_RPS ?=
+export PILOT_RPS
 PILOT_FBCTL = $(PILOT_COMPOSE) run --rm --no-deps -T --entrypoint /usr/local/bin/fbctl api
+# pilot.yml mounts the run file pilot-up writes; without it Docker would
+# create a directory in its place.
+PILOT_RUN = @test -f $(PILOT_OUT)/pilot-run.yaml || { echo "missing $(PILOT_OUT)/pilot-run.yaml: run make pilot-up first"; exit 2; }
 ## Pilot: the real pipeline against real Facebook on this machine, to measure
 ## the steady state (docs/runbooks/pilot.md). Needs Docker, phase0/proxies.yaml
 ## and the Phase 0 registry. Start with the Phase 0 run finished.
@@ -158,17 +163,21 @@ pilot-up:
 	@test -f $(PILOT_PROXIES) || { echo "missing $(PILOT_PROXIES)"; exit 2; }
 	@test -s $(PILOT_OUT)/registry.yaml || { echo "missing $(PILOT_OUT)/registry.yaml: finish Phase 0 first"; exit 2; }
 	@command -v docker >/dev/null || { echo "Docker is not installed: docs/runbooks/pilot.md, step 1"; exit 2; }
-	@echo '$(PILOT_RPS)' | grep -Eq '^[0-9]*\.?[0-9]+$$' || { echo "PILOT_RPS must be a number of requests per second, e.g. 0.5"; exit 2; }
-	@printf 'fb:\n  identity_rps: %s\nregistry_sync:\n  canary_pages: [%s]\n' '$(PILOT_RPS)' \
-	  "$$(grep -v '^#' $(PHASE0_PAGES) | grep -v '^[[:space:]]*$$' \
-	    | awk -F, 'NR == 1 && tolower($$1) == "page" { next } c < 3 { print $$1; c++ }' | sed 's/.*/"&"/' | paste -sd, -)" \
-	  > $(PILOT_OUT)/pilot-run.yaml
+	@rps=$$(awk 'BEGIN { r = ENVIRON["PILOT_RPS"]; if (r == "") exit 0; if (r !~ /^[0-9]*\.?[0-9]+$$/ || r + 0 <= 0 || r + 0 > 2) exit 1; printf "%g", r + 0 }') \
+	  || { echo "PILOT_RPS must be requests per second above 0 and at most 2, e.g. 0.5"; exit 2; }; \
+	{ test -z "$$rps" || printf 'fb:\n  identity_rps: %s\n' "$$rps"; \
+	  printf 'registry_sync:\n  canary_pages: [%s]\n' \
+	    "$$(grep -v '^#' $(PHASE0_PAGES) | grep -v '^[[:space:]]*$$' \
+	      | awk -F, 'NR == 1 && tolower($$1) == "page" { next } c < 3 { print $$1; c++ }' | sed 's/.*/"&"/' | paste -sd, -)"; \
+	} > $(PILOT_OUT)/pilot-run.yaml; \
+	echo "requests/s per IP: $${rps:-the default of configs/default.yaml}"
 	$(MAKE) docker
-	$(PILOT_COMPOSE) up -d
-	@echo "up at $(PILOT_RPS) requests/s per IP; register the pages with: make pilot-register"
+	$(PILOT_COMPOSE) up -d --force-recreate
+	@echo "up; register the pages with: make pilot-register"
 
 ## Registers every page of phase0/pages.csv; each is backfilled (a week), then crawled every 3 hours.
 pilot-register:
+	$(PILOT_RUN)
 	@key=$$($(PILOT_FBCTL) apikey create --name pilot --scopes pages:write,jobs:write,data:read \
 	  | sed -n 's/.*"api_key": *"\([^"]*\)".*/\1/p'); \
 	test -n "$$key" || { echo "could not create an API key"; exit 1; }; \
@@ -177,11 +186,13 @@ pilot-register:
 
 ## Makes every query of phase0/out/registry.yaml active, over what registry-sync promoted.
 pilot-registry:
+	$(PILOT_RUN)
 	$(PILOT_COMPOSE) run --rm --no-deps -T -v $(CURDIR)/$(PILOT_OUT)/registry.yaml:/etc/fbs/registry.yaml:ro \
 	  --entrypoint /usr/local/bin/fbctl api registry import --file /etc/fbs/registry.yaml
 
 ## Requests, bytes and blocks per page per day over the last PILOT_SINCE, projected to PILOT_PROJECT pages.
 pilot-report:
+	$(PILOT_RUN)
 	@$(PILOT_FBCTL) report load --since $(PILOT_SINCE) --pages $(PILOT_PROJECT) --cost-per-gb $(PILOT_COST_PER_GB)
 
 ## Stops the pilot and keeps its database; pilot-clean also deletes it.
