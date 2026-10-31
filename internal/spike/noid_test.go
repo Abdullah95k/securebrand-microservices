@@ -228,3 +228,30 @@ func TestTrimRetriesAPageLoadOnAFreshIdentity(t *testing.T) {
 		}
 	}
 }
+
+// A page restricted to logged-in viewers (Facebook serves its login page)
+// ends unavailable, and is left out of bootstrap success.
+func TestSpikeRestrictedPage(t *testing.T) {
+	r, env, out := runner(t, fakefb.Faults{Restricted: true})
+	p := env.World.Pages()[0]
+	r.Run(context.Background(), []PageRef{{Ref: p.Vanity}})
+	var end string
+	for _, line := range bytes.Split(bytes.TrimSpace(out.Bytes()), []byte("\n")) {
+		var rec Record
+		if err := json.Unmarshal(line, &rec); err != nil {
+			t.Fatal(err)
+		}
+		switch rec.Type {
+		case "bootstrap":
+			if rec.Class != "content_unavailable" {
+				t.Fatalf("bootstrap %+v", rec)
+			}
+		case "timeline":
+			end = rec.EndReason
+		}
+	}
+	s, err := Report(bytes.NewReader(out.Bytes()), DefaultThresholds)
+	if err != nil || end != "unavailable" || s.Unavailable != 1 || s.BootstrapSuccess != 0 || !strings.Contains(Format(s), "unavailable: 1") {
+		t.Fatalf("end %q, summary %+v, err %v", end, s, err)
+	}
+}

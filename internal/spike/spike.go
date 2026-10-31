@@ -249,6 +249,10 @@ func (r *Runner) page(ctx context.Context, p PageRef) error {
 	brec.TokensFound = tokensFound(tok)
 	r.emit(brec)
 	if !*brec.OK {
+		if pl.Class == detect.ContentUnavailable {
+			// Deleted, or restricted to logged-in viewers: nothing to measure.
+			r.emit(Record{Type: "timeline", Page: ref, EndReason: "unavailable"})
+		}
 		return nil
 	}
 	pg, rep := parse.Page(pl.HTML, 0, task.RefID(ref))

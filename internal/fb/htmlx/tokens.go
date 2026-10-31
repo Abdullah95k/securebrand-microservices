@@ -82,13 +82,18 @@ func ExtractTokens(html []byte) Tokens {
 			p.set(&t, string(m[1]))
 		}
 	}
+	t.ConsentWall = ConsentWall(html)
+	return t
+}
+
+// ConsentWall reports whether html is behind Facebook's cookie-consent wall.
+func ConsentWall(html []byte) bool {
 	for _, m := range consentMarkers {
 		if bytes.Contains(html, m) {
-			t.ConsentWall = true
-			break
+			return true
 		}
 	}
-	return t
+	return false
 }
 
 // The page's id, the profile's first. A page made in the new Pages

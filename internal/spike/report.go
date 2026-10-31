@@ -8,6 +8,8 @@ import (
 	"math"
 	"sort"
 	"strings"
+
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/detect"
 )
 
 // Thresholds are the Phase 0 go/no-go criteria.
@@ -57,9 +59,12 @@ type Summary struct {
 	RPS          float64 `json:"rps,omitempty"`
 	CostPerGBUSD float64 `json:"cost_per_gb_usd,omitempty"`
 
-	Pages              int                        `json:"pages"`
-	BootstrapSuccess   float64                    `json:"bootstrap_success"`
-	ConsentWalls       int                        `json:"consent_walls"`
+	Pages            int     `json:"pages"`
+	BootstrapSuccess float64 `json:"bootstrap_success"`
+	ConsentWalls     int     `json:"consent_walls"`
+	// Unavailable counts pages that are deleted or restricted to logged-in
+	// viewers; they are left out of BootstrapSuccess.
+	Unavailable        int                        `json:"unavailable_pages,omitempty"`
 	TokensFoundRate    map[string]float64         `json:"tokens_found_rate"`
 	Requests           int                        `json:"requests"`
 	ClassRate          map[string]float64         `json:"class_rate"`
@@ -276,6 +281,12 @@ func summarize(tier string, recs []Record, opt ReportOptions) Summary {
 				a.labels = r.Labels
 			}
 		case "bootstrap":
+			if r.Class == detect.ContentUnavailable.String() {
+				// The page is deleted or restricted to logged-in viewers:
+				// it says nothing about whether sessions work.
+				s.Unavailable++
+				break
+			}
 			boots++
 			a.boots++
 			if r.OK != nil && *r.OK {
@@ -504,7 +515,11 @@ func Format(s Summary) string {
 	if s.RPS > 0 {
 		fmt.Fprintf(&b, "  rps/identity: %.2f", s.RPS)
 	}
-	fmt.Fprintf(&b, "\npages: %d  requests: %d\n", s.Pages, s.Requests)
+	fmt.Fprintf(&b, "\npages: %d  requests: %d", s.Pages, s.Requests)
+	if s.Unavailable > 0 {
+		fmt.Fprintf(&b, "  unavailable: %d (deleted, or restricted to logged-in viewers; not counted in bootstrap success)", s.Unavailable)
+	}
+	b.WriteString("\n")
 	fmt.Fprintf(&b, "bootstrap success: %.1f%%  consent walls: %d  tokens:", 100*s.BootstrapSuccess, s.ConsentWalls)
 	for _, k := range sortedKeys(s.TokensFoundRate) {
 		fmt.Fprintf(&b, " %s=%.0f%%", k, 100*s.TokensFoundRate[k])

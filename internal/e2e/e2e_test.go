@@ -397,3 +397,20 @@ func TestPageWithoutAnIDInItsHTML(t *testing.T) {
 		t.Fatalf("page registered by id: status=%s posts=%d/3", j.Status, posts)
 	}
 }
+
+// A page restricted to logged-in viewers is marked unavailable, not taken
+// for parser drift: like a deleted page, its job ends failed with nothing
+// to collect.
+func TestRestrictedPage(t *testing.T) {
+	s := Start(t, Options{
+		Spec:   fakefb.Spec{Seed: 13, Pages: 1, PostsPerPage: 2, PostSpacing: 20 * time.Hour, MaxComments: 3},
+		Faults: fakefb.Faults{Restricted: true},
+	})
+	key := s.Key(t, api.ScopeJobsWrite, api.ScopeDataRead)
+	page := s.Fake.World.Pages()[0]
+	j := s.runJobWithin(t, key, page.Vanity, 2*time.Minute)
+	t.Logf("job %s %s: counters=%v", j.ID, j.Status, j.Counters)
+	if j.Status != "failed" || j.Counters["pages_unavailable"] != 1 || j.Counters["drift"] != 0 {
+		t.Fatalf("restricted page: status=%s counters=%v", j.Status, j.Counters)
+	}
+}
