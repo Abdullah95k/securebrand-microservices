@@ -30,23 +30,23 @@ func (r *Runner) Capture(ctx context.Context, page, dir, name string) ([]string,
 	if err != nil {
 		return nil, err
 	}
-	id, err := r.Pool.Acquire(ctx, r.Opt.Tier)
+	id, pl, _, err := r.loadPage(ctx, ref, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer r.Pool.Release(id)
-	u, _ := id.Base.Parse(task.RefPath(ref))
-	pl, err := r.Loader.Bootstrap(ctx, id, u.String())
-	if err != nil {
-		return nil, err
-	}
 	date := time.Now().UTC().Format("20060102")
-	if pl.Class != detect.OK {
-		return r.keepPage(id, date+"_"+name, pl, fmt.Errorf("spike: page load: %s %s", pl.Class, pl.Reason))
+	if pl.Class != detect.OK || !id.Bootstrapped() {
+		return r.keepPage(id, date+"_"+name, pl, fmt.Errorf("%w: %s (%s)", session.ErrBootstrap, pl.Class, pl.Reason))
 	}
 	pg, _ := parse.Page(pl.HTML, 0, task.RefID(ref))
 	if pg == nil {
 		return r.keepPage(id, date+"_"+name, pl, errors.New("spike: page id not found in html"))
+	}
+	pageMeta := map[string]any{"page_id": pg.PageId}
+	if htmlx.PageID(pl.HTML) == 0 {
+		// The id is the one the page was asked for: the HTML names none.
+		pageMeta["id_from_ref"] = true
 	}
 	keep := []string{strconv.FormatInt(pg.PageId, 10)}
 	var written []string
@@ -58,7 +58,7 @@ func (r *Runner) Capture(ctx context.Context, page, dir, name string) ([]string,
 		}
 		return err
 	}
-	if err := write("page_html", "response.html", pl.HTML, map[string]any{"page_id": pg.PageId}); err != nil {
+	if err := write("page_html", "response.html", pl.HTML, pageMeta); err != nil {
 		return written, err
 	}
 	failed := func(query string, resp *graphql.Response, err error) ([]string, error) {
@@ -145,10 +145,11 @@ func (r *Runner) keepFailure(id *session.Identity, query, caseName string, pageI
 }
 
 // keepPage writes a page capture could not use (not ok, or no id found),
-// scrubbed like a fixture, to FailDir/page_html/<case>/, with the path it
-// ended on (a redirect to a login or checkpoint page shows there) and which
-// id hints its HTML holds (counts only), so the bundle shows what the
-// extractor missed. It returns err, naming where the page is kept.
+// scrubbed like a fixture, to FailDir/page_html/<case>/, with its outcome
+// class, the path it ended on after same-site redirects, which tokens it
+// held, and how many ids its HTML holds under each key the extractor knows
+// (counts only), so the bundle shows what the extractor missed. It returns
+// err, naming where the page is kept.
 func (r *Runner) keepPage(id *session.Identity, caseName string, pl *session.PageLoad, err error) ([]string, error) {
 	if r.FailDir == "" {
 		return nil, err
@@ -159,7 +160,7 @@ func (r *Runner) keepPage(id *session.Identity, caseName string, pl *session.Pag
 	}
 	meta := map[string]any{"source": "capture", "status": pl.Status, "class": pl.Class.String(), "reason": pl.Reason,
 		"bytes": len(pl.HTML), "final_path": final, "id_hints": htmlx.PageIDHints(pl.HTML),
-		"tokens_found": tokensFound(id.Tokens()), "cookies": slices.Sorted(maps.Keys(id.Doer.Cookies(id.Base)))}
+		"tokens_found": tokensFound(htmlx.ExtractTokens(pl.HTML)), "cookies": slices.Sorted(maps.Keys(id.Doer.Cookies(id.Base)))}
 	d, kerr := fixtures.Write(r.FailDir, "page_html", caseName, "response.html", pl.HTML, meta, nil)
 	if d == "" {
 		return nil, errors.Join(err, kerr)

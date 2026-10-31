@@ -142,18 +142,13 @@ func (r *Runner) trimPage(ctx context.Context, page string, opt TrimOptions) []T
 	if err != nil {
 		return fail("page", err)
 	}
-	id, err := r.Pool.Acquire(ctx, r.Opt.Tier)
+	id, pl, _, err := r.loadPage(ctx, ref, nil)
 	if err != nil {
 		return fail("page", err)
 	}
 	defer r.Pool.Release(id)
-	u, _ := id.Base.Parse(task.RefPath(ref))
-	pl, err := r.Loader.Bootstrap(ctx, id, u.String())
-	if err != nil {
-		return fail("page", err)
-	}
-	if pl.Class != detect.OK {
-		return fail("page", fmt.Errorf("spike: page load: %s %s", pl.Class, pl.Reason))
+	if pl.Class != detect.OK || !id.Bootstrapped() {
+		return fail("page", fmt.Errorf("%w: %s (%s)", session.ErrBootstrap, pl.Class, pl.Reason))
 	}
 	pg, _ := parse.Page(pl.HTML, 0, task.RefID(ref))
 	if pg == nil {

@@ -15,6 +15,7 @@ import (
 
 	"github.com/abdullah95k/securebrand-microservices/internal/fakefb"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/fbtest"
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/session"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/transport"
 )
 
@@ -89,11 +90,24 @@ func TestCaptureKeepsAPageWithoutAnID(t *testing.T) {
 		t.Fatalf("dirs %v, err %v", dirs, err)
 	}
 
-	// The same page by its numeric id is captured.
+	// The same page by its numeric id is captured, marked as such, and the
+	// fixture check reads it with that id.
 	dir := t.TempDir()
 	dirs, err = r.Capture(context.Background(), strconv.FormatInt(p.ID, 10), dir, "byid")
 	if err != nil || len(dirs) == 0 || !strings.HasPrefix(dirs[0], filepath.Join(dir, "page_html")) {
 		t.Fatalf("by id: dirs %v, err %v", dirs, err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dirs[0], "meta.json")); !bytes.Contains(b, []byte(`"id_from_ref": true`)) {
+		t.Fatalf("page meta %s", b)
+	}
+	checks, err := CheckFixtures(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range checks {
+		if c.Query == "page_html" && !c.OK() {
+			t.Fatalf("fixture check: %+v", c)
+		}
 	}
 }
 
@@ -175,7 +189,42 @@ func TestCaptureRefusesAWallLoadedByID(t *testing.T) {
 	}
 	r.Pool.Release(id)
 	dirs, err := r.Capture(context.Background(), "id:1", t.TempDir(), "gone")
-	if err == nil || !strings.Contains(err.Error(), "page load") || len(dirs) != 1 || !strings.HasPrefix(dirs[0], r.FailDir) {
-		t.Fatalf("dirs %v, err %v", dirs, err)
+	if !errors.Is(err, session.ErrBootstrap) || len(dirs) != 1 || !strings.HasPrefix(dirs[0], r.FailDir) {
+		t.Fatalf("bootstrapped identity: dirs %v, err %v", dirs, err)
+	}
+	// On a fresh identity too.
+	r2, _, _ := runner(t, fakefb.Faults{})
+	r2.FailDir = t.TempDir()
+	dirs, err = r2.Capture(context.Background(), "id:1", t.TempDir(), "gone")
+	if !errors.Is(err, session.ErrBootstrap) || len(dirs) != 1 || !strings.HasPrefix(dirs[0], r2.FailDir) {
+		t.Fatalf("fresh identity: dirs %v, err %v", dirs, err)
+	}
+	b, _ := os.ReadFile(filepath.Join(dirs[0], "meta.json"))
+	if !bytes.Contains(b, []byte(`"class": "content_unavailable"`)) {
+		t.Fatalf("meta %s", b)
+	}
+}
+
+// The trim experiment's page load is retried on a fresh identity too.
+func TestTrimRetriesAPageLoadOnAFreshIdentity(t *testing.T) {
+	var created atomic.Int32
+	var calls atomic.Int32
+	env := fbtest.New(t, fbtest.Options{Doers: func(transport.Options) (transport.Doer, error) {
+		std := transport.NewStd(10 * time.Second)
+		if created.Add(1) == 1 {
+			return dead{Doer: std, calls: &calls}, nil
+		}
+		return std, nil
+	}})
+	var out bytes.Buffer
+	r := &Runner{Pool: env.Pool, Loader: env.Loader, GQL: env.GQL, Out: &out, Opt: Options{Tier: "direct"}}
+	recs := r.Trim(context.Background(), []string{env.World.Pages()[0].Vanity}, TrimOptions{TimelineCount: 3, CommentCounts: []int{5}})
+	if len(recs) == 0 || calls.Load() != 1 {
+		t.Fatalf("records %d, dead exit tried %d times", len(recs), calls.Load())
+	}
+	for _, rec := range recs {
+		if rec.Query == "page" || rec.Class != "ok" {
+			t.Fatalf("record %+v", rec)
+		}
 	}
 }

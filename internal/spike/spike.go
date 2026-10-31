@@ -185,12 +185,12 @@ func (r *Runner) do(ctx context.Context, page string, id *session.Identity, req 
 const loadAttempts = 2
 
 // loadPage loads ref's page on an identity of the tier, and returns the
-// identity (for the caller to release) with the page's bootstrap record. A
-// load that got no response, a dead or stalled exit, retires its identity so
-// that no other page lands on it, and is tried once more on a fresh one; the
-// failed attempt is recorded as a failed bootstrap, since the tier's exits
-// are part of what is measured. On an error there is no identity to release.
-func (r *Runner) loadPage(ctx context.Context, ref string) (*session.Identity, *session.PageLoad, Record, error) {
+// identity (for the caller to release) with the bootstrap record of the
+// attempt that answered. A load that got no response, a dead or stalled
+// exit, retires its identity so that no other page lands on it, and is tried
+// once more on a fresh one; failed, when set, gets that attempt's record.
+// On an error there is no identity to release.
+func (r *Runner) loadPage(ctx context.Context, ref string, failed func(Record)) (*session.Identity, *session.PageLoad, Record, error) {
 	for attempt := 1; ; attempt++ {
 		rec := Record{Type: "bootstrap", Page: ref}
 		id, err := r.Pool.Acquire(ctx, r.Opt.Tier)
@@ -212,8 +212,10 @@ func (r *Runner) loadPage(ctx context.Context, ref string) (*session.Identity, *
 		if attempt == loadAttempts {
 			return nil, nil, rec, err
 		}
-		rec.OK, rec.Reason = boolp(false), err.Error()
-		r.emit(rec)
+		if failed != nil {
+			rec.OK, rec.Reason = boolp(false), err.Error()
+			failed(rec)
+		}
 		slog.Warn("spike: page load failed; trying a fresh identity", "page", ref, "err", Redact(err.Error()))
 	}
 }
@@ -231,7 +233,9 @@ func (r *Runner) page(ctx context.Context, p PageRef) error {
 			r.emit(Record{Type: "page_done", Page: ref})
 		}
 	}()
-	id, pl, brec, err := r.loadPage(ctx, ref)
+	// A failed attempt counts as a failed bootstrap: the tier's exits are
+	// part of what is measured.
+	id, pl, brec, err := r.loadPage(ctx, ref, r.emit)
 	if err != nil {
 		brec.OK, brec.Reason = boolp(false), err.Error()
 		r.emit(brec)

@@ -305,20 +305,23 @@ func parseCursor(c string) (kind string, scope int64, offset int, ok bool) {
 // pageHTML renders a page's server HTML with tokens and the preloaded
 // profile header.
 func (r *renderer) pageHTML(p *Page, lsd, datr string, consent bool) []byte {
+	user := obj{
+		"__typename": "User", "id": strconv.FormatInt(p.ID, 10), "name": p.Name, "url": r.pageURL(p),
+		"is_verified":     p.Verified,
+		"profilePicLarge": obj{"uri": r.base + "/media/profile_" + strconv.FormatInt(p.ID, 10) + ".jpg"},
+		"cover_photo":     obj{"photo": obj{"image": obj{"uri": r.base + "/media/cover_" + strconv.FormatInt(p.ID, 10) + ".jpg"}}},
+		"profile_social_context": obj{"content": []any{
+			obj{"text": obj{"text": humanCount(p.Likes) + " likes"}},
+			obj{"text": obj{"text": humanCount(p.Followers) + " followers"}},
+		}},
+		"profile_intro_card": obj{"bio": obj{"text": p.Intro}},
+	}
+	if !r.noID {
+		user["delegate_page"] = obj{"id": strconv.FormatInt(p.delegate(), 10), "category_name": p.Category}
+	}
 	header := obj{"require": []any{[]any{"RelayPrefetchedStreamCache", "next", []any{}, []any{
 		"adp_ProfileCometHeaderQueryRelayPreloader_1",
-		obj{"__bbox": obj{"complete": true, "result": obj{"data": obj{"user": obj{
-			"__typename": "User", "id": strconv.FormatInt(p.ID, 10), "name": p.Name, "url": r.pageURL(p),
-			"is_verified":     p.Verified,
-			"profilePicLarge": obj{"uri": r.base + "/media/profile_" + strconv.FormatInt(p.ID, 10) + ".jpg"},
-			"cover_photo":     obj{"photo": obj{"image": obj{"uri": r.base + "/media/cover_" + strconv.FormatInt(p.ID, 10) + ".jpg"}}},
-			"delegate_page":   obj{"id": strconv.FormatInt(p.delegate(), 10), "category_name": p.Category},
-			"profile_social_context": obj{"content": []any{
-				obj{"text": obj{"text": humanCount(p.Likes) + " likes"}},
-				obj{"text": obj{"text": humanCount(p.Followers) + " followers"}},
-			}},
-			"profile_intro_card": obj{"bio": obj{"text": p.Intro}},
-		}}}}},
+		obj{"__bbox": obj{"complete": true, "result": obj{"data": obj{"user": user}}}},
 	}}}}
 	hb, _ := json.Marshal(header)
 	site := fmt.Sprintf(`{"require":[["ScheduledServerJS","handle",null,[{"__bbox":{"define":[["LSD",[],{"token":"%s"},323],["SiteData",[],{"server_revision":1017000000,"client_revision":1017000000,"haste_session":"20390.HYP:comet_loggedout_pkg.2.1...0","hsi":"7431000000000000001","__spin_r":1017000000,"__spin_b":"trunk","__spin_t":%d},317],["CurrentUserInitialData",[],{"USER_ID":"0"},270]]}}]],["CookieCoreConfig","set",null,[["_js_datr","%s",1800000]]]]}`,
@@ -349,8 +352,8 @@ func (r *renderer) pageHTML(p *Page, lsd, datr string, consent bool) []byte {
 	} else {
 		fmt.Fprintf(&b, `<script type="application/json" data-sjs>%s</script>`, site)
 	}
+	fmt.Fprintf(&b, `<script type="application/json" data-sjs>%s</script>`, hb)
 	if !r.noID {
-		fmt.Fprintf(&b, `<script type="application/json" data-sjs>%s</script>`, hb)
 		fmt.Fprintf(&b, `<script>window.requireLazy&&requireLazy(["pageID"],function(){});var x={"pageID":"%d"};</script>`, p.delegate())
 		// The profile route's props name the profile, the id with a timeline.
 		fmt.Fprintf(&b, `<script type="application/json" data-sjs>{"require":[["CometProfileRoot","props",null,[{"userID":"%d"}]]]}</script>`, p.ID)
