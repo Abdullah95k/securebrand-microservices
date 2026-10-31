@@ -147,6 +147,9 @@ PILOT_OUT = phase0/out
 PILOT_SINCE ?= 24h
 PILOT_PROJECT ?= 5000
 PILOT_COST_PER_GB ?= 4
+# Requests per second per IP (fb.identity_rps) for the pilot run; Phase 0's
+# rate test passed 0.5 and 1.0 over a few minutes.
+PILOT_RPS ?= 0.33
 PILOT_FBCTL = $(PILOT_COMPOSE) run --rm --no-deps -T --entrypoint /usr/local/bin/fbctl api
 ## Pilot: the real pipeline against real Facebook on this machine, to measure
 ## the steady state (docs/runbooks/pilot.md). Needs Docker, phase0/proxies.yaml
@@ -155,13 +158,14 @@ pilot-up:
 	@test -f $(PILOT_PROXIES) || { echo "missing $(PILOT_PROXIES)"; exit 2; }
 	@test -s $(PILOT_OUT)/registry.yaml || { echo "missing $(PILOT_OUT)/registry.yaml: finish Phase 0 first"; exit 2; }
 	@command -v docker >/dev/null || { echo "Docker is not installed: docs/runbooks/pilot.md, step 1"; exit 2; }
-	@printf 'registry_sync:\n  canary_pages: [%s]\n' \
+	@echo '$(PILOT_RPS)' | grep -Eq '^[0-9]*\.?[0-9]+$$' || { echo "PILOT_RPS must be a number of requests per second, e.g. 0.5"; exit 2; }
+	@printf 'fb:\n  identity_rps: %s\nregistry_sync:\n  canary_pages: [%s]\n' '$(PILOT_RPS)' \
 	  "$$(grep -v '^#' $(PHASE0_PAGES) | grep -v '^[[:space:]]*$$' \
 	    | awk -F, 'NR == 1 && tolower($$1) == "page" { next } c < 3 { print $$1; c++ }' | sed 's/.*/"&"/' | paste -sd, -)" \
-	  > $(PILOT_OUT)/pilot-canary.yaml
+	  > $(PILOT_OUT)/pilot-run.yaml
 	$(MAKE) docker
 	$(PILOT_COMPOSE) up -d
-	@echo "up; register the pages with: make pilot-register"
+	@echo "up at $(PILOT_RPS) requests/s per IP; register the pages with: make pilot-register"
 
 ## Registers every page of phase0/pages.csv; each is backfilled (a week), then crawled every 3 hours.
 pilot-register:

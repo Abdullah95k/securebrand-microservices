@@ -2,7 +2,8 @@
 # Facebook on one machine (docs/runbooks/pilot.md). `make pilot-up` runs:
 #   docker compose -f docker-compose.yml -f pilot.yml up -d
 # Differences from the local stack:
-# - config: phase0/proxies.yaml + pilot.yaml (+ pilot-canary.yaml), never
+# - config: phase0/proxies.yaml + pilot.yaml + pilot-run.yaml (written by
+#   `make pilot-up`: the requests/s per IP and the canary pages), never
 #   local.yaml, whose fakefb pacing must not reach Facebook;
 # - every port is bound to 127.0.0.1 (the stack's Postgres password is "fbs");
 # - no fakefb; the Phase 0 registry is imported before the crawler starts;
@@ -12,12 +13,12 @@
 x-pilot: &pilot
   user: "0:0"
   environment:
-    FBS_CONFIG: /etc/fbs/proxies.yaml,/etc/fbs/pilot.yaml,/etc/fbs/pilot-canary.yaml
+    FBS_CONFIG: /etc/fbs/proxies.yaml,/etc/fbs/pilot.yaml,/etc/fbs/pilot-run.yaml
     FBS_FB__BASE_URL: https://www.facebook.com
   volumes:
     - ../../phase0/proxies.yaml:/etc/fbs/proxies.yaml:ro
     - ./pilot.yaml:/etc/fbs/pilot.yaml:ro
-    - ../../phase0/out/pilot-canary.yaml:/etc/fbs/pilot-canary.yaml:ro
+    - ../../phase0/out/pilot-run.yaml:/etc/fbs/pilot-run.yaml:ro
 
 services:
   postgres:
@@ -40,12 +41,12 @@ services:
     image: ${FBS_IMAGE:-fbs:dev}
     <<: *pilot
     environment:
-      FBS_CONFIG: /etc/fbs/proxies.yaml,/etc/fbs/pilot.yaml,/etc/fbs/pilot-canary.yaml
+      FBS_CONFIG: /etc/fbs/proxies.yaml,/etc/fbs/pilot.yaml,/etc/fbs/pilot-run.yaml
       FBS_POSTGRES__DSN: postgres://fbs:fbs@postgres:5432/fbs?sslmode=disable
     volumes:
       - ../../phase0/proxies.yaml:/etc/fbs/proxies.yaml:ro
       - ./pilot.yaml:/etc/fbs/pilot.yaml:ro
-      - ../../phase0/out/pilot-canary.yaml:/etc/fbs/pilot-canary.yaml:ro
+      - ../../phase0/out/pilot-run.yaml:/etc/fbs/pilot-run.yaml:ro
       - ../../phase0/out/registry.yaml:/etc/fbs/registry.yaml:ro
     # Only over the seed's placeholders: a restart keeps what registry-sync promoted.
     entrypoint: ["/usr/local/bin/fbctl", "registry", "import", "--keep-promoted", "--file", "/etc/fbs/registry.yaml"]
