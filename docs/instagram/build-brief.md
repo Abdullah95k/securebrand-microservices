@@ -1,6 +1,6 @@
 # igs build brief: building the Instagram scraper microservice
 
-This brief drives the sessions that **build** igs, the logged-out Instagram public-profile scraper, in this repository. igs reuses the design and much of the code of fbs, the Facebook page scraper.
+This brief drives the sessions that **build** igs, the logged-out Instagram public-profile scraper, in its own repository, `Abdullah95k/securebrand-igs` (D7). igs reuses the design and a copy of much of the code of fbs, the Facebook page scraper, whose repository igs work never changes.
 
 **How to use it:**
 - Every build session starts by reading this brief and [`build-status.md`](build-status.md). It then does the next unfinished milestone (§6), opens one draft PR for that milestone, and updates `build-status.md`.
@@ -29,7 +29,7 @@ This brief drives the sessions that **build** igs, the logged-out Instagram publ
 | D4 | **Sources** | Our own tool only. **No official Instagram API, no third-party scrapers or data providers** (Apify, ScrapeCreators and the like), not even as a fallback. If logged-out access is too limited, the scope narrows |
 | D5 | **Media** | The same contract as fbs: temporary files, acknowledgement by consumers, a TTL, video `sd`, thumbnails only for backfills. **The analysis service doesn't exist yet (D10).** Until it does, collect media **metadata** always and keep file downloads **switched off by default** (`ig.limits.include_media: false`). Otherwise every file would expire unread at the TTL. Make it one config switch |
 | D6 | **Infrastructure** | Testing and staging use the **fbs infrastructure** (the same Kafka, Postgres 18, Valkey, S3, cluster), with separate topics, tables, lock keys, consumer groups and metric prefixes. Production may be shared or separate later, so nothing may assume either |
-| D7 | **Code** | **Share code with fbs, without risk to fbs.** Extract the platform-neutral packages out of `internal/fb/*` into neutral paths in pure-move PRs, with every fbs test green before and after. Fix the shared defects (§5) once, in shared code |
+| D7 | **Code** | **A separate repository, `Abdullah95k/securebrand-igs`, that owns a copy of fbs's code** (owner, 2026-10-31; this replaced "share code with fbs in this repository"). igs work must not impact fbs in any way: igs sessions never push to `securebrand-microservices`. The copy starts from fbs's history at `f1377a9`; igs fixes the shared defects (§5) in its own copy, and `UPSTREAM.md` records what is ported in either direction. See [ADR 0004](../adr/0004-ig-code-organisation.md) |
 | D8 | **Privacy** | Record both profiles and commenters, because the analysis will relate them later. Analysis output will not show names or accounts. Apply fbs's protections to both: HMAC `author_key` on the Instagram **user pk** (never the username, which is mutable), PII behind the `pii:read` scope, `pseudonymized` mode, erasure with suppression, retention by partition drop |
 | D9 | **Budget** | Set after the Phase 0 measurement. Build the daily request and byte budget in from the start (fbs's `scheduler.budget`) |
 | D10 | **Downstream** | The analysis service will be built later. For now, igs publishes `ig.*.v1` topics and stores everything queryable in Postgres |
@@ -97,10 +97,11 @@ igs-registry-sync: canary profiles ─▶ bundle scan / render ─▶ candidate 
 igs-spike: Phase 0 kit and the probe the owner runs     fakeig: synthetic Instagram for all tests
 ```
 
-**Code layout (proposed; confirm or adjust in ADR 0004, M0):**
-- **Neutral, shared, moved out of `internal/fb`:**
-  - `internal/scrape/{transport,proxy,ratelimit,session,registry,docids,browser,walk}`;
-  - `internal/crawl/*` generalised over a small platform interface (stage bodies, scopes, ref normalisation, parsers, detect rules).
+**Code layout, in the igs repository (decided in [ADR 0004](../adr/0004-ig-code-organisation.md)):**
+- **Neutral, moved out of the copied `internal/fb`:**
+  - `internal/scrape/{transport,detect,proxy,ratelimit,session,htmlx,registry,gql,docids,browser,walk}`;
+  - `internal/crawl/*`, working on igs's own task envelope.
+- **The copied Facebook code and its tests** stay as the regression net for the copied pipeline until igs's own `fakeig` suites cover it (M6–M8).
 - **Instagram-only:**
   - `internal/ig/{htmlx,detect,client,parse,stage}`;
   - `internal/fakeig`;
@@ -129,9 +130,9 @@ igs-spike: Phase 0 kit and the probe the owner runs     fakeig: synthetic Instag
 
 ---
 
-## 5. Shared fbs defects to fix first (they become shared code)
+## 5. fbs defects to fix first, in igs's copy
 
-Each fix needs a regression test, and fbs's full test suite must stay green. Details are in `../fbs-reference/README.md` § Known issues.
+Each fix needs a regression test, and the copied fbs test suites must stay green in the igs repository. fbs's own repository is not changed; `UPSTREAM.md` lists the fixes fbs may want to port. Details are in `../fbs-reference/README.md` § Known issues and [`reuse-matrix.md`](reuse-matrix.md) §8–9, which adds a seventh: a task of unknown kind crashes the crawler.
 
 1. **DLQ replay does nothing for 7 days.** Dead-lettering marks the task `done:`, and the replay re-sends the same task id. Fix it by clearing the marker on replay, or by replaying under a new id, and re-open job accounting.
 2. **The persister retries a bad batch forever.** Quarantine bad records (bisect the batch, send them to a DLQ topic, add a metric and an alert), and actually skip undecodable records.
@@ -149,8 +150,8 @@ One draft PR per milestone (a large one may split into several). A milestone is 
 | # | Milestone | Deliverables | Acceptance criteria |
 |---|---|---|---|
 | **M0** | Verify and decide | `docs/adr/0004-ig-code-organisation.md`, `docs/adr/0005-ig-data-model-and-contracts.md`, and the reuse matrix verified at HEAD (`go list -deps`, import graph) in `docs/instagram/reuse-matrix.md` | Every package classified as reuse, parameterise or rewrite, with its Facebook coupling named. Both ADRs accepted by the owner (ask with AskUserQuestion only for real trade-offs) |
-| **M1** | Shared-code extraction | Pure-move PRs: generic packages to neutral paths, with small interfaces where fbs code is coupled | No behaviour change. `make test`, `make test-integration`, `make e2e` and CI all green. fbs binaries unchanged in function |
-| **M2** | Shared fixes | §5 items 1–6 | A regression test for each. fbs suites green |
+| **M1** | Seed and neutralise (igs repository) | Seed `securebrand-igs` from fbs's history (ADR 0004 §1); rename the module and every name that would collide on shared infrastructure (ADR 0004 §4–5); move neutral code to `internal/scrape/*`; add the Instagram seams with fbs's defaults | The copied suites green after each step: `make test`, `make test-integration`, `make e2e` and CI in the igs repository. Nothing pushed to fbs's repository |
+| **M2** | Fixes in igs's copy | §5 items 1–6 and the unknown-kind crash | A regression test for each. The copied suites green. Each fix listed in `UPSTREAM.md` |
 | **C1** | *Owner:* 2 more HARs | Record in the same way as before: (a) open a post **by clicking it in a profile grid** (single-page navigation), for U2; (b) open a profile's **reels** tab and **tagged** tab, for U7 and the reels question. Re-share the Drive folder by link, as before | The session downloads the HARs into a git-ignored folder, analyses them, and appends the findings to `har-findings-*.md` |
 | **M3** | Contracts | `securebrand.ig.v1` protos (+ `common.v1`), `buf` setup, topics in `configs/` (`ig.*.v1`, `igs.task.*`), `migrations/ig`, `ig:` config section with defaults and validation, metrics `igs_` | `buf breaking` clean, migrations up and down on Postgres 18, config tests, Schema Registry apply works |
 | **M4** | Instagram client + **probe** | `internal/ig/{htmlx,detect,client}`:<ul><li>tokens from HTML;</li><li>the form and header builder exactly as in the HARs (header order, client hints);</li><li>both endpoints;</li><li>NDJSON reader;</li><li>detect rules for 200-with-login-wall, 401/403/429, redirects to `/accounts/login` and `/challenge`, persisted-query errors;</li><li>registry seed with the 5 operations above.</li></ul>`fakeig` first slice (bootstrap page + the 5 operations + faults). **`igs-spike probe`**: a single-binary command the owner runs locally | Client tests against fakeig over both transports, as fbs's `fbtest` does. The probe runs end to end against fakeig. It answers U1, U3, U5 and U8 when the owner runs it |
@@ -172,7 +173,7 @@ One draft PR per milestone (a large one may split into several). A milestone is 
 
 - **No live traffic to Instagram from the cloud session.** Build tools that the owner runs (probe, Phase 0). Never fabricate captures or results.
 - **Never commit:** raw HARs, unscrubbed responses, proxy credentials, keys, or any real username, name or comment text. HARs go only into a git-ignored folder, such as `.local/har/` (add it to `.gitignore`).
-- **Keep fbs safe:** every shared change keeps fbs's unit, integration and e2e suites green. Say so in the PR with the commands run.
+- **Keep fbs safe:** never push to `securebrand-microservices`; all igs work goes to `securebrand-igs`. Every change to copied code keeps the copied unit, integration and e2e suites green; say so in the PR with the commands run. On shared infrastructure, never use one of fbs's topic, group, key, lock, bucket or metric names (ADR 0004 §4).
 - **Facts vs hypotheses:** Instagram behaviour comes only from the HAR findings or the owner's probe and Phase 0 results. Anything else is labelled a hypothesis with its U-number.
 - **Match the repo's style:** Go idioms, comment density, naming, the config layering, the metric conventions, and `docs/` tone.
 - **Ask the owner** (AskUserQuestion) only for decisions that are theirs. §2 is settled. Give a recommendation with every question.
@@ -182,13 +183,13 @@ One draft PR per milestone (a large one may split into several). A milestone is 
 
 ## Prompt for a build session
 
-Use the same prompt for every build session. Before the first one, merge PR #22 (`docs/fbs-reference/` and `docs/instagram/`). Otherwise the session checks out its branch.
+Use the same prompt for every build session, started with the **`Abdullah95k/securebrand-igs`** repository selected. Since 2026-10-31 igs has its own repository (D7); the first sessions ran in `securebrand-microservices`.
 
 ```text
-You are a build session for "igs", the logged-out Instagram public-profile scraper being built in this repository (Abdullah95k/securebrand-microservices) on the design and shared code of "fbs", the Facebook page scraper.
+You are a build session for "igs", the logged-out Instagram public-profile scraper, built in its own repository (Abdullah95k/securebrand-igs) from a copy of "fbs", the Facebook page scraper (Abdullah95k/securebrand-microservices). Never push to the fbs repository.
 
-1. Read docs/instagram/build-brief.md completely, then docs/instagram/build-status.md. If either is missing on your checkout, fetch and check out origin/claude/beautiful-franklin-kphaix (PR #22), which adds them. Follow the brief's reading order (har-findings, the owner's decisions doc via your Claude Docs tools: https://claude.ai/artifact/C7CX2otkiE7Gtb1ugaE2RB, then docs/fbs-reference/).
-2. Find the next unfinished milestone in build-status.md (M0 first) and do it: think through the design first, verify every fbs claim against the current code, then implement with tests, matching the repo's style. Open one draft PR per milestone and keep CI green; for shared code, run fbs's unit, integration and e2e suites and show they pass.
+1. Read docs/instagram/build-brief.md completely, then docs/instagram/build-status.md. Follow the brief's reading order (har-findings, the owner's decisions doc via your Claude Docs tools: https://claude.ai/artifact/C7CX2otkiE7Gtb1ugaE2RB, then docs/fbs-reference/, ADRs 0004 and 0005, reuse-matrix.md). If they are missing, the repository was not seeded yet: follow "What the owner needs to do" in build-status.md of fbs's PR #25 (https://github.com/Abdullah95k/securebrand-microservices/pull/25).
+2. Find the next unfinished milestone in build-status.md and do it: think through the design first, verify every fbs claim against the current code, then implement with tests, matching the repo's style. Open one draft PR per milestone and keep CI green; for copied code, run the unit, integration and e2e suites and show they pass.
 3. Continue to the following milestone in the same session only if the current one is merged-ready and context allows; otherwise stop cleanly.
 4. Stop at owner checkpoints (C1–C4) and tell me exactly what to do, in simple numbered steps.
 5. Rules: no live requests to Instagram from this session; never commit HARs, credentials or any real usernames, names or comment text; decisions in §2 of the brief are settled, so ask me (AskUserQuestion, with a recommendation) only about genuinely open trade-offs.

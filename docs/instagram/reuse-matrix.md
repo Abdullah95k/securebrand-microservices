@@ -2,6 +2,8 @@
 
 Every fbs package classified for igs, with its Facebook coupling and the seam that makes it shareable. It was checked against the code at `df76ce1` (main `f1377a9` plus the docs of PR #22) on 2026-10-31. `path:line` references are at that commit. Regenerate the import graph with `scripts/import-graph.sh`. The decisions it supports are in [ADR 0004](../adr/0004-ig-code-organisation.md) (code) and [ADR 0005](../adr/0005-ig-data-model-and-contracts.md) (data).
 
+> **Reading this after the separate-repository decision (2026-10-31, ADR 0004 §1).** igs owns a copy of this code in `Abdullah95k/securebrand-igs`, so every change named here is made in igs's copy and fbs's repository never changes. The classification and the evidence stand as written. "Seam" now describes the change in igs's copy, where keeping fbs's default matters only while the copied fbs tests are igs's regression net. §2 still applies in full: fbs's code keeps every single-tenant assumption, so on shared infrastructure igs must avoid each of fbs's names.
+
 **Classes:**
 - **reuse:** moves to a neutral path unchanged; only its import path changes.
 - **parameterise:** shared after a small seam. fbs passes values that reproduce today's behaviour exactly; igs passes its own.

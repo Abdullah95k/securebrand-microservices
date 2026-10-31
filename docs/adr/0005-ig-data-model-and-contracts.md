@@ -60,8 +60,10 @@ without names (D8).
   `MediaDeleted` and their enums, with `platform` and neutral ids:
   `source_media_id`, `account_id`, `post_id`, `comment_id`), `JobEvent` and
   `Completeness` (with `subject_ref`/`subject_id`), and `ErasureEvent`
-  (subjects `AUTHOR`, `ACCOUNT`). `securebrand.fb.v1` stays exactly as it is:
-  moving a message out of it would break its contract.
+  (subjects `AUTHOR`, `ACCOUNT`). fbs's `securebrand.fb.v1` is not changed:
+  it lives in fbs's repository, and moving a message out of it would break
+  its contract. The copy of it in the igs repository goes with the copied
+  Facebook code (ADR 0004 §2).
 * **`securebrand.ig.v1`**: `Profile`, `Post` (with `children`, `usertags`,
   `coauthors`, `location`, `music`), `PostMetrics`, `Comment`, `Media`,
   `Highlight` (with items). Fields Instagram may stop serving are optional or
@@ -72,7 +74,7 @@ without names (D8).
 * **`securebrand.igs.task.v1`** (internal, never public): igs's task envelope.
   It keeps fbs's generic fields with the same names and numbers (task and
   lineage ids, `seq`, `job_id`, `lane`, `kind`, `mode`, `cursor`, `limits`,
-  `attempt`, `stalls`, …) so the shared worker treats both alike (ADR 0004).
+  `attempt`, `stalls`, …), since igs's worker is a copy of fbs's (ADR 0004).
   What is Instagram's own is disjoint from fbs's: kind values start at 100
   (`PROFILE`, `POST`, `MEDIA`; `REPLIES` reserved) and scope fields at
   number 20. A task that lands on the other service's topic then decodes with
@@ -98,8 +100,8 @@ Public contract (keys keep a post's records in order):
 
 Internal: `igs.task.profile.{p0,p1,p2}`, `igs.task.post.{p0,p1,p2}`,
 `igs.task.media`, `igs.task.retry.{30s,5m}`, `igs.task.dlq`, and the
-persister's quarantine topic (brief §5 item 2; its fbs twin gets the same
-shape). The wire format is fbs's: plain protobuf, the full message name in a
+persister's quarantine topic `igs.persist.dlq` (brief §5 item 2). The wire
+format is fbs's: plain protobuf, the full message name in a
 type header (`igs-type`), `content-type: application/x-protobuf`, subjects
 `<topic>-value`. PII topics use delete retention, never compaction.
 
@@ -111,9 +113,14 @@ All igs tables live in a Postgres schema named `ig`. igs's connection pool
 pins `search_path` to `ig` in code, and goose keeps its version table there
 (`ig.goose_db_version`), so the two services migrate independently. This
 works whether igs gets its own database or shares fbs's, which D6 leaves open.
-In testing and staging igs uses its own database (`igs`) on fbs's Postgres
-server: nothing in fbs can then see igs's tables, and the schema keeps a
-later move into one database possible.
+igs uses its own database (`igs`) on fbs's Postgres server in testing and
+staging, so nothing in fbs can see igs's tables (see Consequences).
+
+Freshness (D2, and the owner's answer of 2026-10-31): each profile's newest
+posts are checked every 3 hours; the profile itself (counts, bio, verified,
+the highlights list) is re-read **daily**, so `profile_snapshots` is a daily
+follower history; highlight items are fetched only when the highlights list
+changed.
 
 Content tables (monthly partitions where marked; every post and comment
 primary key starts with the post, as in fbs):
@@ -133,8 +140,8 @@ primary key starts with the post, as in fbs):
 | `highlights` | `highlight_id` | — | `user_pk`, title, cover, item count, status |
 | `highlight_items` | `(highlight_id, item_pk)` | — | `taken_at`, media type, media ids |
 
-Machinery tables keep fbs's names and columns, so shared code runs on both
-(ADR 0004): `api_clients`, `jobs`, `crawl_cursors`, `post_refresh`,
+Machinery tables keep fbs's names and columns, so the copied code runs on
+them unchanged (ADR 0004): `api_clients`, `jobs`, `crawl_cursors`, `post_refresh`,
 `erasure_requests`, `suppression`, `registry_sync_runs`. The only renames are
 Facebook-named columns: `page_ref`/`page_id` become `profile_ref`/`user_pk`
 (in `jobs`) and `post_id`/`page_id` become `media_pk`/`user_pk` (in
@@ -189,12 +196,12 @@ fbs contract (TTL, acknowledgements, orphan sweep) with igs's own buckets and
 * A shared schema name or `search_path` mistake could point igs at fbs's
   tables. The pool sets `search_path` in code, the binaries check it at start,
   and production grants give igs's role no rights on fbs's schema.
-* **Before igs creates tables in a database fbs uses,** fbs's partition
-  maintenance must become schema-aware. `store.DropPartitionsBefore`
-  (`internal/store/partitions.go:146-151`) finds partitions by parent table
-  name alone, so it would list `ig.comments`'s partitions as well as
-  `public.comments`'s and then fail on the unqualified `DROP`. M1 adds the
-  schema filter; until it lands, igs uses its own database.
+* **igs never creates tables in a database fbs maintains.** fbs's
+  `store.DropPartitionsBefore` (`internal/store/partitions.go:146-151`)
+  finds partitions by parent table name alone, so it would list
+  `ig.comments`'s partitions as well as `public.comments`'s and then fail on
+  the unqualified `DROP`. igs's copy gets a schema filter in M1, but fbs's
+  code keeps the old lookup, so igs keeps its own database `igs`.
 * Hypotheses the build must check (not facts yet): whether a profile whose
   username changed can be read by pk alone (U9, the probe in M4), and whether
   a media pk encodes its creation time (U10, against the HAR timestamps in
