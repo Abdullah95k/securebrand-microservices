@@ -81,7 +81,7 @@ func Comments(parts []gjson.Result, cc CommentContext) (CommentsResult, Report) 
 	first := map[int64]*Node{}
 	canon := map[*Node]*Node{}
 	for _, n := range nodes {
-		if n.Typename != "Comment" {
+		if n.Typename != "Comment" || isReference(n.V) {
 			continue
 		}
 		parent := n.Ancestor("Comment")
@@ -145,6 +145,19 @@ func Comments(parts []gjson.Result, cc CommentContext) (CommentsResult, Report) 
 		res.NodeNull = true
 	}
 	return res, rep
+}
+
+// isReference reports a Comment object that only points at a comment (a
+// reply's comment_direct_parent, say): it carries no text, author, time or
+// feedback of its own, so it is not a comment to parse. A comment whose
+// fields were renamed still has some of these and is reported as drift.
+func isReference(v gjson.Result) bool {
+	for _, k := range []string{"body", "preferred_body", "body_renderer", "author", "created_time", "creation_time", "feedback"} {
+		if v.Get(k).Exists() {
+			return false
+		}
+	}
+	return true
 }
 
 func comment(n, parentNode *Node, parent *fbv1.Comment, cc CommentContext) (*fbv1.Comment, Report) {
