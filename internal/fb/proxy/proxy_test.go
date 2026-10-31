@@ -43,9 +43,16 @@ func TestBuckets(t *testing.T) {
 		"http://u:p@isp.proxy.example:10002": "isp|isp.proxy.example:10002",
 		"http://proxy.example":               "isp|proxy.example",
 		"socks5://[2001:db8::1]:1080":        "isp|2001:db8::/48",
+		// Not URLs: the provider's host:port:user:pass, and user:pass@host:port.
+		"isp.proxy.example:10003:user1:secret1": "isp|isp.proxy.example:10003",
+		"user1:secret1@isp.proxy.example:10004": "isp|isp.proxy.example:10004",
+		"203.0.113.12:8000:user1:secret1":       "isp|203.0.113.0/24",
 	} {
 		if got := staticBucket("isp", raw); got != want {
 			t.Errorf("staticBucket(%q) = %q, want %q", raw, got, want)
+		}
+		if got := staticBucket("isp", raw); strings.Contains(got, "secret1") || strings.Contains(got, "user1") {
+			t.Errorf("credentials in bucket %q", got)
 		}
 	}
 	p := testPool(t)
