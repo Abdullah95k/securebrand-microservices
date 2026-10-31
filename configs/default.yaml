@@ -137,7 +137,8 @@ fb:
     #   country: us
     routing:
       default: [direct]
-    # Circuit breaker per exit bucket (a static endpoint's /24, or a gateway
+    # Circuit breaker per exit bucket (a static IP endpoint's /24, a hostname
+    # endpoint's host:port (one static IP per port), or a gateway
     # and country): one blocked or failing too often gets no new identities
     # until its cooldown ends, then a single probe identity.
     breaker:

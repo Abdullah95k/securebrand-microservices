@@ -159,13 +159,32 @@ func (p *Pool) Observe(ep Endpoint, c detect.Class) {
 	p.breakers.Observe(ep.Bucket, c.Blocking() || c == detect.Transport)
 }
 
-// staticBucket is the /24 of an IPv4 endpoint, else its host.
+// staticBucket is the /24 of an IPv4 endpoint (/48 for IPv6). An endpoint
+// named by hostname is its host and port: providers that sell static IPs
+// behind one hostname give each IP its own port, so one breaker per host
+// would stop every IP when one of them is blocked.
+// The name never carries credentials: it is logged and used as a metric
+// label, so an endpoint that is not a URL (host:port:user:pass) is read as
+// host and port, after any user:pass@.
 func staticBucket(tier, raw string) string {
-	host := raw
+	var host, port string
 	if u, err := url.Parse(raw); err == nil && u.Hostname() != "" {
-		host = u.Hostname()
+		host, port = u.Hostname(), u.Port()
+	} else {
+		rest := raw
+		if i := strings.LastIndex(rest, "@"); i >= 0 {
+			rest = rest[i+1:]
+		}
+		host, rest, _ = strings.Cut(rest, ":")
+		if p, _, _ := strings.Cut(rest, ":"); p != "" && strings.Trim(p, "0123456789") == "" {
+			port = p
+		}
 	}
-	if ip := net.ParseIP(host); ip != nil {
+	ip := net.ParseIP(host)
+	if ip == nil && port != "" {
+		return tier + "|" + net.JoinHostPort(host, port)
+	}
+	if ip != nil {
 		if v4 := ip.To4(); v4 != nil {
 			host = fmt.Sprintf("%d.%d.%d.0/24", v4[0], v4[1], v4[2])
 		} else {

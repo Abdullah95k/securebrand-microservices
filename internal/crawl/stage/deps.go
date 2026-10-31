@@ -88,12 +88,28 @@ type Outcome struct {
 	// FollowUps are new streams to start once this task released its lease
 	// (for example a full comment pass after an incremental one).
 	FollowUps []*taskv1.Task
+	// Waiting marks a retry the task did not cause (every proxy exit is
+	// cooling down): it does not count toward the task's stalls.
+	Waiting bool
 }
 
 func done(c map[string]int64) Outcome { return Outcome{Result: Done, Counters: c} }
 
 func retry(t *taskv1.Task, cursor, delay, reason string, c map[string]int64) Outcome {
 	return Outcome{Result: Retry, Next: task.Retry(t, cursor), Delay: delay, Reason: reason, Counters: c}
+}
+
+// noIdentity retries a task that got no identity. When every exit of its
+// tiers is cooling down behind its breaker (2m, doubling up to 30m), the
+// task waits 5 minutes and the wait is not held against it: 30s retries
+// would dead-letter it before the exits come back.
+func noIdentity(t *taskv1.Task, err error, c map[string]int64) Outcome {
+	if errors.Is(err, proxy.ErrTierOpen) {
+		o := retry(t, "", "5m", "no identity: "+err.Error(), c)
+		o.Waiting = true
+		return o
+	}
+	return retry(t, "", "30s", "no identity: "+err.Error(), c)
 }
 
 // Stage runs one task kind.

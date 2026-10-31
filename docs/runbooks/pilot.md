@@ -15,7 +15,7 @@ IPs.
 
 ## What you need
 
-- The Phase 0 machine, with `phase0/proxies.yaml` and `phase0/out/registry.yaml` (Phase 0 wrote it). The tiers must be named `isp` and `residential`: the pilot routes every Facebook request ISP first, residential when ISP is blocked (`deploy/compose/pilot.yaml`), and refuses to start on a missing tier rather than use the machine's own IP.
+- The Phase 0 machine, with `phase0/proxies.yaml` and `phase0/out/registry.yaml` (Phase 0 wrote it). The ISP tier must be named `isp`: the pilot routes every Facebook request through it, retries included (`deploy/compose/pilot.yaml`), and refuses to start without it rather than use the machine's own IP. A residential tier in the file is not used unless you add it to that routing.
 - About 8 GB of memory (Redpanda, Postgres, Valkey and the services). On a 4 GB droplet, resize it first, or add swap.
 - About 48 hours. Proxy traffic: roughly 150 pages × a few hundred requests a day × ~80 KB, a few GB a day, mostly on ISP.
 
