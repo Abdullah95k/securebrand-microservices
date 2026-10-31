@@ -171,8 +171,11 @@ raw payloads age out by retention (7 days).
 ## Stuck jobs
 
 The reaper marks jobs `partial` after `scheduler.reaper_after` (30m) without
-activity, or `failed` when their accounting state is gone. Inspect the DLQ
-and `GET /v1/jobs/{id}` counters.
+activity, or `failed` when their accounting state is gone. While crawl tasks
+wait in the job's lane (consumer lag on its page, post or thread topics, as
+in a burst of backfills), a quiet job is taken to be queued and is left
+until `scheduler.reaper_max_age` (24h). Inspect the DLQ and
+`GET /v1/jobs/{id}` counters.
 
 ## Schedule and tiers
 

@@ -214,8 +214,8 @@ scheduler:
   finalizer_interval: 2s
   finalize_timeout: 10m
   # A job without progress for reaper_after is closed as partial, unless
-  # other jobs of its lane are progressing (its tasks are queued behind
-  # theirs, as in a burst of backfills); then only past reaper_max_age.
+  # tasks wait in its lane's topics (its own are queued behind them, as in a
+  # burst of backfills); then only once it is older than reaper_max_age.
   reaper_after: 30m
   reaper_max_age: 24h
   partition_months_ahead: 3
