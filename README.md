@@ -140,7 +140,7 @@ Settings that matter most:
 | `fb.identity_rps`, `fb.page_rps`, `fb.global_rps` | 0.33 / 3 / 50 | Pacing per identity, per page fleet-wide and globally (Redis GCRA). Adding pods never raises load. |
 | `fb.aimd` | on, 5–500 rps | Moves the global ceiling with the fleet's block rate: ×0.7 above 6% blocks, +2% per 10s below 2% |
 | `fb.browser` | off | Headless-Chromium fallback for pages whose HTML carries no tokens (≤ 2% of loads, 2 browsers per pod), and doc_id discovery from a rendered page's own requests. Needs the `--target browser` image. |
-| `fb.proxy.breaker`, `fb.query_breaker` | 15% / 50% | Circuit breakers per exit bucket (static /24, gateway+country) and per (query, doc_id) |
+| `fb.proxy.breaker`, `fb.query_breaker` | 15% / 50% | Circuit breakers per exit bucket (static IP's /24, or host:port for a hostname endpoint; gateway+country) and per (query, doc_id) |
 | `limits.max_age_days` | 365 | Backfill window per job/page, capped by `limits.max_age_cap_days` |
 | `scheduler.tiers` | every tier 3h | Re-scrape interval by posting rate (pages registered without `interval_hours`): every page every 3 hours; the tier picks comment refreshes and what a budget slows first |
 | `scheduler.post_refresh` | 24h / 72h / 7d by post age | Comment refresh of posts older than the timeline overlap, riding on the page's scheduled job; recrawls at 7 and 30 days |

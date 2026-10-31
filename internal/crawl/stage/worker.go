@@ -102,11 +102,8 @@ func (w *Worker) Run(ctx context.Context, t *taskv1.Task) error {
 		return w.finish(ctx, t, out.Counters)
 	case Retry:
 		next := out.Next
-		next.Stalls = t.Stalls + 1
 		after, _, afterErr := d.Ckpt.Load(ctx, t.LineageId, t.Seq)
-		if beforeErr == nil && afterErr == nil && advanced(before, after) {
-			next.Stalls = 0
-		}
+		next.Stalls = stallsAfter(t.Stalls, beforeErr == nil && afterErr == nil && advanced(before, after), out.Waiting)
 		if reason := w.exhausted(next); reason != "" {
 			metrics.Tasks.WithLabelValues(name, lane, "failed").Inc()
 			slog.Warn("task failed after retries", "stage", name, "job", t.JobId, "task", t.TaskId,
@@ -165,6 +162,18 @@ func costCounters(c map[string]int64) map[string]int64 {
 // whose checkpoint write failed is a stall.
 func advanced(before, after checkpoint.State) bool {
 	return after.Cursor != before.Cursor || after.Pages > before.Pages
+}
+
+// stallsAfter counts a retry without progress against the task, unless it
+// was only waiting for proxy exits to cool down; progress resets the count.
+func stallsAfter(prev uint32, progressed, waiting bool) uint32 {
+	switch {
+	case progressed:
+		return 0
+	case waiting:
+		return prev
+	}
+	return prev + 1
 }
 
 // exhausted returns the dead-letter reason for a task about to be retried,

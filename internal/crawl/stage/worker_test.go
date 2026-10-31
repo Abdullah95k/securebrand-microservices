@@ -1,6 +1,7 @@
 package stage
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	taskv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fbs/task/v1"
 	"github.com/abdullah95k/securebrand-microservices/internal/config"
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/checkpoint"
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/proxy"
 )
 
 // Only a saved checkpoint that moved counts as progress.
@@ -102,5 +104,29 @@ func TestProfileFresh(t *testing.T) {
 	cfg.Crawler.ProfileRefresh = 0
 	if d.profileFresh(&taskv1.PageScope{PageId: 7, ProfileSeenAt: at(time.Minute)}) {
 		t.Error("profile_refresh 0 reads the HTML on every run")
+	}
+}
+
+// A task that got no identity because every exit is cooling down waits 5
+// minutes, and the wait does not count toward its stalls; other failures to
+// get an identity retry soon and do count.
+func TestNoIdentityWaitsForExits(t *testing.T) {
+	tk := &taskv1.Task{TaskId: "t", Attempt: 2, Stalls: 3}
+	o := noIdentity(tk, proxy.ErrTierOpen, map[string]int64{})
+	if o.Result != Retry || o.Delay != "5m" || !o.Waiting || o.Next.Attempt != 3 {
+		t.Fatalf("every exit cooling down: %+v", o)
+	}
+	if got := stallsAfter(tk.Stalls, false, o.Waiting); got != 3 {
+		t.Fatalf("a wait counted as a stall: %d", got)
+	}
+	o = noIdentity(tk, errors.New("dial"), map[string]int64{})
+	if o.Delay != "30s" || o.Waiting {
+		t.Fatalf("other errors: %+v", o)
+	}
+	if got := stallsAfter(tk.Stalls, false, o.Waiting); got != 4 {
+		t.Fatalf("a stall not counted: %d", got)
+	}
+	if got := stallsAfter(tk.Stalls, true, false); got != 0 {
+		t.Fatalf("progress resets the stalls: %d", got)
 	}
 }

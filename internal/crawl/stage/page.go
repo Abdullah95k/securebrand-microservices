@@ -46,7 +46,7 @@ func (s *PageStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	}
 	id, err := d.identity(ctx, "timeline", t.Attempt)
 	if err != nil {
-		return retry(t, "", "30s", "no identity: "+err.Error(), c)
+		return noIdentity(t, err, c)
 	}
 	defer d.Pool.Release(id)
 

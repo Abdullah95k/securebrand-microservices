@@ -42,7 +42,7 @@ func (s *PostStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	}
 	id, err := d.identity(ctx, "comments", t.Attempt)
 	if err != nil {
-		return retry(t, "", "30s", "no identity: "+err.Error(), c)
+		return noIdentity(t, err, c)
 	}
 	defer d.Pool.Release(id)
 	if pl, err := d.ensureBootstrapped(ctx, id, sc.PageId, t.Lane); err != nil {
@@ -342,7 +342,7 @@ func (s *ThreadStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	}
 	id, err := d.identity(ctx, "replies", t.Attempt)
 	if err != nil {
-		return retry(t, "", "30s", "no identity: "+err.Error(), c)
+		return noIdentity(t, err, c)
 	}
 	defer d.Pool.Release(id)
 	if pl, err := d.ensureBootstrapped(ctx, id, sc.PageId, t.Lane); err != nil {

@@ -9,12 +9,15 @@ fb:
   base_url: "https://www.facebook.com"
   capture_raw: failures
   proxy:
-    # Every Facebook request through the Phase 0 tiers: ISP first,
-    # residential when ISP is blocked. Without this the default is direct,
-    # the machine's own IP. The names must match phase0/proxies.yaml (the
-    # services refuse to start on a tier it does not define).
+    # Every Facebook request through the ISP tier of phase0/proxies.yaml,
+    # retries included: a blocked task waits and retries on another ISP
+    # exit instead of moving to a per-GB tier. Without this the default is
+    # direct, the machine's own IP. The name must match phase0/proxies.yaml
+    # (the services refuse to start on a tier it does not define). To fall
+    # back to a residential tier when every ISP exit is cooling down, make
+    # this [isp, residential].
     routing:
-      default: [isp, residential]
+      default: [isp]
 limits:
   # Backfill a week of history only, so the steady state (every page every
   # 3 hours) starts within hours and the backfill costs little.

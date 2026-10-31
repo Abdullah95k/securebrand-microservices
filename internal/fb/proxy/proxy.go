@@ -159,13 +159,20 @@ func (p *Pool) Observe(ep Endpoint, c detect.Class) {
 	p.breakers.Observe(ep.Bucket, c.Blocking() || c == detect.Transport)
 }
 
-// staticBucket is the /24 of an IPv4 endpoint, else its host.
+// staticBucket is the /24 of an IPv4 endpoint (/48 for IPv6). An endpoint
+// named by hostname is its host and port: providers that sell static IPs
+// behind one hostname give each IP its own port, so one breaker per host
+// would stop every IP when one of them is blocked.
 func staticBucket(tier, raw string) string {
-	host := raw
+	host, port := raw, ""
 	if u, err := url.Parse(raw); err == nil && u.Hostname() != "" {
-		host = u.Hostname()
+		host, port = u.Hostname(), u.Port()
 	}
-	if ip := net.ParseIP(host); ip != nil {
+	ip := net.ParseIP(host)
+	if ip == nil && port != "" {
+		return tier + "|" + net.JoinHostPort(host, port)
+	}
+	if ip != nil {
 		if v4 := ip.To4(); v4 != nil {
 			host = fmt.Sprintf("%d.%d.%d.0/24", v4[0], v4[1], v4[2])
 		} else {
