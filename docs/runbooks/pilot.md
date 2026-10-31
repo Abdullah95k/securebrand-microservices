@@ -31,14 +31,26 @@ apt-get update && apt-get install -y docker.io docker-compose-v2 docker-buildx
 
 ```bash
 cd ~/securebrand-microservices && git pull --ff-only origin main
-make pilot-up
+make pilot-up PILOT_RPS=0.5
 ```
+
+`PILOT_RPS` is the requests per second each IP sends (`fb.identity_rps`,
+above 0 and at most 2; left out, the production default of
+`configs/default.yaml` applies). Phase 0's rate test passed 0.5 and 1.0 over
+a few minutes; the pilot shows whether a rate holds for two days.
 
 It builds the image (a few minutes), starts the stack with every port bound
 to 127.0.0.1, imports the Phase 0 registry as the active doc_ids, and points
 registry-sync at the first three pages of `pages.csv` so it follows doc_id
-rotations. The import replaces only the built-in placeholders, so running
-`make pilot-up` again never undoes a rotation registry-sync promoted. To load
+rotations. The rate and those pages are written to
+`phase0/out/pilot-run.yaml`, which every service and the report read.
+Running `make pilot-up` again with another `PILOT_RPS` restarts the services
+at the new rate (the database is kept). The report sizes the IPs at the
+current rate, so after a change, measure only the time since
+(`PILOT_SINCE`).
+
+The import replaces only the built-in placeholders, so running `make
+pilot-up` again never undoes a rotation registry-sync promoted. To load
 a newer `phase0/out/registry.yaml` on purpose (after a new HAR, say), run
 `make pilot-registry`: it makes every query in the file active.
 
@@ -65,7 +77,7 @@ It prints one row per job kind and page tier (backfills apart from the
 scheduled crawls), then:
 - **steady state**: requests and bytes per page per day over the scheduled jobs, and the block rate;
 - **comment completeness**: over the posts first seen in the window, and over those seen a day or more ago (whose refreshes have run);
-- **projection**: requests and GB per day for `PILOT_PROJECT` pages, the IPs needed at `fb.identity_rps` with 50% headroom, and what that traffic would cost on a per-GB tier at `PILOT_COST_PER_GB`.
+- **projection**: requests and GB per day for `PILOT_PROJECT` pages, the IPs needed at the pilot's requests/s per IP with 50% headroom, and what that traffic would cost on a per-GB tier at `PILOT_COST_PER_GB`.
 
 Use the projection to size the proxy purchase: ISP IPs for the IP count, and
 the per-GB figure for how much residential fallback could cost at worst.

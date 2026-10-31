@@ -1,7 +1,8 @@
 # Pilot configuration: the real pipeline against real Facebook on one
 # machine (docs/runbooks/pilot.md). Loaded after phase0/proxies.yaml and
 # INSTEAD of local.yaml, whose fakefb pacing must never reach Facebook: the
-# production pacing of configs/default.yaml applies (fb.identity_rps 0.33).
+# production pacing of configs/default.yaml applies, unless
+# phase0/out/pilot-run.yaml sets fb.identity_rps (make pilot-up PILOT_RPS=...).
 service: {env: pilot}
 log: {level: info, format: json}
 fb:
@@ -29,5 +30,5 @@ crawler:
   lane_min: 4
 registry_sync:
   # Discovers rotated doc_ids on these pages; set by `make pilot-up` from the
-  # first pages of phase0/pages.csv (pilot-canary.yaml).
+  # first pages of phase0/pages.csv (pilot-run.yaml).
   interval: 30m
