@@ -23,6 +23,11 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/topics"
 )
 
+// confirmUnavailable is how many attempts a page load that names nothing
+// takes before the page is marked unavailable: on a later attempt the task
+// usually runs on another identity and exit.
+const confirmUnavailable = 3
+
 // PageStage loads the page profile and paginates the timeline. It emits
 // posts, metrics and media, and spawns one comments task per post whose
 // comments need (re)collecting.
@@ -82,6 +87,11 @@ func (s *PageStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 		switch pl.Class {
 		case detect.OK:
 		case detect.ContentUnavailable:
+			if pl.NamesNothing && t.Attempt+1 < confirmUnavailable {
+				// One load that names nothing may be this exit's country or a
+				// degraded response: confirm it on later attempts first.
+				return retry(t, st.Cursor, "30s", pl.Reason, c)
+			}
 			if t.Seq == 0 {
 				_ = d.emitUnavailable(ctx, t, sc)
 			}
@@ -101,7 +111,8 @@ func (s *PageStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 			}
 			metrics.ParseTotal.WithLabelValues("page_html", "1", "ok").Inc()
 			if d.Suppression.PageSuppressed(page.PageId) {
-				return done(map[string]int64{"pages_suppressed": 1})
+				c["pages_suppressed"]++
+				return done(c)
 			}
 			sc.PageId = page.PageId
 			page.RequestedRef = sc.PageRef
@@ -119,7 +130,8 @@ func (s *PageStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 		return Outcome{Result: Fail, Reason: "page id unresolved", Counters: c}
 	}
 	if d.Suppression.PageSuppressed(sc.PageId) {
-		return done(map[string]int64{"pages_suppressed": 1})
+		c["pages_suppressed"]++
+		return done(c)
 	}
 
 	now := d.now()

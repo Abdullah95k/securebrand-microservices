@@ -256,12 +256,6 @@ func summarize(tier string, recs []Record, opt ReportOptions) Summary {
 	// Pages that are deleted or restricted to logged-in viewers say nothing
 	// about sessions or timelines: their loads count as traffic only.
 	unavailable := map[string]bool{}
-	for _, r := range recs {
-		if r.Type == "timeline" && r.EndReason == "unavailable" {
-			unavailable[r.Page] = true
-		}
-	}
-	s.Unavailable = len(unavailable)
 	pages := map[string]*pageAgg{}
 	agg := func(p string) *pageAgg {
 		a := pages[p]
@@ -331,6 +325,7 @@ func summarize(tier string, recs []Record, opt ReportOptions) Summary {
 		case "timeline":
 			s.TimelineEnd[r.EndReason]++
 			if r.EndReason == "unavailable" {
+				unavailable[r.Page] = true
 				break
 			}
 			posts = append(posts, float64(r.Posts))
@@ -367,6 +362,7 @@ func summarize(tier string, recs []Record, opt ReportOptions) Summary {
 		}
 	}
 	s.Pages = len(pages)
+	s.Unavailable = len(unavailable)
 	if boots > 0 {
 		s.BootstrapSuccess = float64(bootOK) / float64(boots)
 		for k, v := range tokens {
