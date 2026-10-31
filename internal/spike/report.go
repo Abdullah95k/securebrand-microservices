@@ -8,6 +8,8 @@ import (
 	"math"
 	"sort"
 	"strings"
+
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/detect"
 )
 
 // Thresholds are the Phase 0 go/no-go criteria.
@@ -57,9 +59,13 @@ type Summary struct {
 	RPS          float64 `json:"rps,omitempty"`
 	CostPerGBUSD float64 `json:"cost_per_gb_usd,omitempty"`
 
-	Pages              int                        `json:"pages"`
-	BootstrapSuccess   float64                    `json:"bootstrap_success"`
-	ConsentWalls       int                        `json:"consent_walls"`
+	Pages            int     `json:"pages"`
+	BootstrapSuccess float64 `json:"bootstrap_success"`
+	ConsentWalls     int     `json:"consent_walls"`
+	// Unavailable counts pages that are deleted or restricted to logged-in
+	// viewers. Their page loads count as traffic only: they are left out of
+	// BootstrapSuccess and timeline depth.
+	Unavailable        int                        `json:"unavailable_pages,omitempty"`
 	TokensFoundRate    map[string]float64         `json:"tokens_found_rate"`
 	Requests           int                        `json:"requests"`
 	ClassRate          map[string]float64         `json:"class_rate"`
@@ -237,7 +243,7 @@ func summarize(tier string, recs []Record, opt ReportOptions) Summary {
 	s := Summary{Tier: tier, TokensFoundRate: map[string]float64{}, ClassRate: map[string]float64{}, TimelineEnd: map[string]int{},
 		Completeness: map[string]OrderingSummary{}, BytesByQuery: map[string]ByteStats{}, WireByQuery: map[string]ByteStats{},
 		RequestsPerDay: opt.RequestsPerDay}
-	var boots, bootOK, port, portOK, med, medOK int
+	var boots, bootOK, port, portOK, med, medOK, unavailableLoads int
 	tokens := map[string]int{}
 	classes := map[string]int{}
 	var posts, days, expiry []float64
@@ -247,6 +253,9 @@ func summarize(tier string, recs []Record, opt ReportOptions) Summary {
 	walls := map[string]int{}
 	bytes := map[string][]float64{}
 	wire := map[string][]float64{}
+	// Pages that are deleted or restricted to logged-in viewers say nothing
+	// about sessions or timelines: their loads count as traffic only.
+	unavailable := map[string]bool{}
 	pages := map[string]*pageAgg{}
 	agg := func(p string) *pageAgg {
 		a := pages[p]
@@ -276,6 +285,15 @@ func summarize(tier string, recs []Record, opt ReportOptions) Summary {
 				a.labels = r.Labels
 			}
 		case "bootstrap":
+			s.WireBytes += r.Wire
+			if r.Wire > 0 {
+				wire["page_html"] = append(wire["page_html"], float64(r.Wire))
+			}
+			if r.Class == detect.ContentUnavailable.String() {
+				// A deleted or restricted page: says nothing about sessions.
+				unavailableLoads++
+				break
+			}
 			boots++
 			a.boots++
 			if r.OK != nil && *r.OK {
@@ -289,10 +307,6 @@ func summarize(tier string, recs []Record, opt ReportOptions) Summary {
 				if v {
 					tokens[k]++
 				}
-			}
-			s.WireBytes += r.Wire
-			if r.Wire > 0 {
-				wire["page_html"] = append(wire["page_html"], float64(r.Wire))
 			}
 		case "request":
 			s.Requests++
@@ -310,6 +324,10 @@ func summarize(tier string, recs []Record, opt ReportOptions) Summary {
 			}
 		case "timeline":
 			s.TimelineEnd[r.EndReason]++
+			if r.EndReason == "unavailable" {
+				unavailable[r.Page] = true
+				break
+			}
 			posts = append(posts, float64(r.Posts))
 			days = append(days, r.DaysCovered)
 			a.days = append(a.days, r.DaysCovered)
@@ -344,6 +362,7 @@ func summarize(tier string, recs []Record, opt ReportOptions) Summary {
 		}
 	}
 	s.Pages = len(pages)
+	s.Unavailable = len(unavailable)
 	if boots > 0 {
 		s.BootstrapSuccess = float64(bootOK) / float64(boots)
 		for k, v := range tokens {
@@ -385,7 +404,7 @@ func summarize(tier string, recs []Record, opt ReportOptions) Summary {
 	s.MedianMediaExpiryH = quantile(expiry, 0.5)
 
 	// Cost.
-	proxied := s.Requests + boots
+	proxied := s.Requests + boots + unavailableLoads
 	if proxied > 0 {
 		s.WirePerRequest = float64(s.WireBytes) / float64(proxied)
 	}
@@ -504,7 +523,11 @@ func Format(s Summary) string {
 	if s.RPS > 0 {
 		fmt.Fprintf(&b, "  rps/identity: %.2f", s.RPS)
 	}
-	fmt.Fprintf(&b, "\npages: %d  requests: %d\n", s.Pages, s.Requests)
+	fmt.Fprintf(&b, "\npages: %d  requests: %d", s.Pages, s.Requests)
+	if s.Unavailable > 0 {
+		fmt.Fprintf(&b, "  unavailable: %d (deleted, or restricted to logged-in viewers; left out of bootstrap success and depth)", s.Unavailable)
+	}
+	b.WriteString("\n")
 	fmt.Fprintf(&b, "bootstrap success: %.1f%%  consent walls: %d  tokens:", 100*s.BootstrapSuccess, s.ConsentWalls)
 	for _, k := range sortedKeys(s.TokensFoundRate) {
 		fmt.Fprintf(&b, " %s=%.0f%%", k, 100*s.TokensFoundRate[k])

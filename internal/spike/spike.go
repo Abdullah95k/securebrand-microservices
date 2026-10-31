@@ -248,6 +248,11 @@ func (r *Runner) page(ctx context.Context, p PageRef) error {
 	brec.Consent = tok.ConsentWall
 	brec.TokensFound = tokensFound(tok)
 	r.emit(brec)
+	// Deleted, or restricted to logged-in viewers: nothing to measure.
+	if pl.Class == detect.ContentUnavailable {
+		r.emit(Record{Type: "timeline", Page: ref, EndReason: "unavailable"})
+		return nil
+	}
 	if !*brec.OK {
 		return nil
 	}

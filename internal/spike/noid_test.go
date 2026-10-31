@@ -228,3 +228,30 @@ func TestTrimRetriesAPageLoadOnAFreshIdentity(t *testing.T) {
 		}
 	}
 }
+
+// A page restricted to logged-in viewers (Facebook serves a page that names
+// nothing) and a deleted page both end unavailable: their traffic counts,
+// but not toward bootstrap success or timeline depth.
+func TestSpikeUnavailablePages(t *testing.T) {
+	for name, c := range map[string]struct {
+		faults fakefb.Faults
+		page   func(*fakefb.World) string
+	}{
+		"restricted": {fakefb.Faults{Restricted: true}, func(w *fakefb.World) string { return w.Pages()[0].Vanity }},
+		"deleted":    {fakefb.Faults{}, func(*fakefb.World) string { return "id:1" }},
+	} {
+		r, env, out := runner(t, c.faults)
+		r.Run(context.Background(), []PageRef{{Ref: c.page(env.World)}})
+		s, err := Report(bytes.NewReader(out.Bytes()), DefaultThresholds)
+		if err != nil || s.TimelineEnd["unavailable"] != 1 || s.Unavailable != 1 || s.BootstrapSuccess != 0 ||
+			s.MedianDays != 0 || s.WireBytes == 0 || !strings.Contains(Format(s), "unavailable: 1") {
+			t.Fatalf("%s: summary %+v, err %v", name, s, err)
+		}
+	}
+	// Capture keeps the restricted page and says why.
+	r, env, _ := runner(t, fakefb.Faults{Restricted: true})
+	r.FailDir = t.TempDir()
+	if dirs, err := r.Capture(context.Background(), env.World.Pages()[0].Vanity, t.TempDir(), "x"); !errors.Is(err, session.ErrBootstrap) || !strings.Contains(err.Error(), "names nothing") || len(dirs) != 1 {
+		t.Fatalf("capture: dirs %v, err %v", dirs, err)
+	}
+}

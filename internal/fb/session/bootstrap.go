@@ -21,6 +21,10 @@ type PageLoad struct {
 	Class  detect.Class
 	Reason string
 	Bytes  int64
+	// NamesNothing marks a ContentUnavailable page that loaded with session
+	// tokens but names nothing: probably restricted to logged-in viewers or
+	// removed, but one load from one exit does not prove it.
+	NamesNothing bool
 }
 
 // ErrBootstrap means no usable tokens could be obtained.
@@ -144,6 +148,14 @@ func (l *Loader) Load(ctx context.Context, id *Identity, rawURL string) (*PageLo
 		}
 		id.SetTokens(tok)
 		Outcome(id, detect.OK)
+		if !tok.ConsentWall && htmlx.NamesNothing(resp.Body) {
+			// Not the page: what logged-out viewers get for a page
+			// restricted to logged-in ones (age, country) or removed. The
+			// session's tokens are still good.
+			pl.Class, pl.Reason, pl.NamesNothing = detect.ContentUnavailable, "the page names nothing: restricted to logged-in viewers, or removed", true
+			metrics.Bootstraps.WithLabelValues("http", "names_nothing").Inc()
+			return pl, nil
+		}
 		metrics.Bootstraps.WithLabelValues("http", "ok").Inc()
 		return pl, nil
 	}

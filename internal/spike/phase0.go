@@ -430,6 +430,9 @@ func EstimateRun(smoke []Record, full Options, pages int, costPerGB float64) Est
 			proxied++
 			wire += float64(r.Wire)
 		case "timeline":
+			if r.EndReason == "unavailable" {
+				break // deleted or restricted: no timeline requests
+			}
 			timelines++
 			if r.EndReason == "max_pages" {
 				capped++
@@ -502,6 +505,8 @@ func (k *Kit) smoke(ctx context.Context) error {
 		k.logf("%s: bootstrap %.0f%%, block rate %.1f%%, median %.0f posts, timeline ends %v, %.0f requests/page at smoke limits",
 			tier, 100*s.BootstrapSuccess, 100*s.BlockRate, s.MedianPosts, s.TimelineEnd, s.RequestsPerPage)
 		switch {
+		case s.Unavailable > 0 && s.Unavailable == s.Pages:
+			problems = append(problems, tier+": every smoke page is unavailable (deleted, or restricted to logged-in viewers): put other pages first in the pages file")
 		case s.BootstrapSuccess == 0:
 			problems = append(problems, tier+": no page bootstrapped (see the bootstrap records in "+path+")")
 		case s.BlockRate >= 0.5:
