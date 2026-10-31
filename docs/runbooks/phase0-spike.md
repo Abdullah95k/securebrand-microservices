@@ -200,15 +200,29 @@ OVERALL: GO (recommended tier: residential)
 
 | Line | Meaning |
 |---|---|
-| `bootstrap success`, `tokens` | Share of page loads that yielded a usable session, and which tokens were found. `consent walls` counts EU cookie walls that were handled. |
+| `bootstrap success`, `tokens` | Share of page loads that yielded a usable session, and which tokens were found. `consent walls` counts EU cookie walls that were handled. A load that gets no response (a dead or stalled proxy endpoint) retires that identity and is tried once more on a fresh one; the failed attempt still counts as a failed bootstrap. |
 | `block rate`, `classes` | Share of GraphQL requests that were rate limited, hit a login wall or a checkpoint. `classes` shows every outcome. |
-| `timeline` | Posts and days reached per page, and why timelines ended: `end` (no older posts), `wall` (login wall), `max_pages` (the `--timeline-pages` limit), `blocked:*`, `drift` |
+| `timeline` | Posts and days reached per page, and why timelines ended: `end` (no older posts), `wall` (login wall), `max_pages` (the `--timeline-pages` limit), `blocked:*`, `drift`, `no_page_id` (the page's HTML named no id it could use; see below) |
 | `comments [<ordering>]` | Collected ÷ reported comments per post. The median and p10 leave out measurements cut short by the spike's own limits; when there are any, the line also gives their count and the median including them, which is a lower bound. `walls` counts measurements that hit a login wall. |
 | `bytes [<query>]` | Response sizes: on the wire (compressed, what proxies bill) and decoded |
 | `cursor portability` | Whether a timeline cursor still works on a fresh identity. Low values mean cursors are tied to the session, so tasks need session affinity (`SessionSnapshot` in the task envelope). |
 | `media success`, `median media expiry` | CDN downloads over direct egress, and how long signed media URLs stay valid. Expiry sets how fast the media downloader must work. |
 | `traffic`, `cost` | Traffic of this run, and a projection to `--req-per-day` at the tier's `cost_per_gb_usd` |
 | `by <label>` | The same numbers for each value of each pages-file column |
+
+A page that ends `no_page_id` loaded fine, but its HTML named none of the
+ids the extractor reads. A page asked for by its numeric id uses that id. For
+one asked for by its vanity, capture it (a single page load) and
+send the result:
+
+```bash
+go run ./cmd/fbs-spike capture --config phase0/proxies.yaml --registry phase0/out/registry.yaml --tier isp \
+  --page <vanity> --name <vanity> --dir phase0/out/diag --fail-dir phase0/out/diag-failures
+```
+
+`phase0/out/diag-failures/page_html/<date>_<vanity>/meta.json` gives the path
+the page ended on and the id counts; the HTML next to it shows what to read
+instead. Like every fixture, it holds Facebook content: keep it off git.
 
 The verdict: a tier is GO when all four checks pass. Phase 0 is GO when at
 least one tier is. The recommended tier is the cheapest passing one.
@@ -228,7 +242,7 @@ least one tier is. The recommended tier is the cheapest passing one.
 - the discovered registry;
 - the run records: per request the query, outcome class, sizes and timing, with no content;
 - the scrubbed fixtures;
-- `failures/`: the responses capture could not use, scrubbed like the fixtures, each with its HTTP status, content type, outcome class, and which page tokens and cookies the identity held (names only, never values);
+- `failures/`: the responses capture could not use, scrubbed like the fixtures, each with its HTTP status, content type, outcome class, and which page tokens and cookies the identity held (names only, never values). A page whose id capture could not find is kept too, with the path it ended on and how many ids its HTML holds under each key the extractor knows (counts only);
 - `meta.json` (versions and flags).
 
 It never holds `proxies.yaml`. Before writing it, the tool checks that no
@@ -320,7 +334,7 @@ fbs-spike har --in session.har --write-registry my-seed.yaml --fixtures-dir test
 ```
 
 ```bash
-fbs-spike capture --tier residential --registry my-seed.yaml --page <page> --name brand_a --dir testdata/fb
+fbs-spike capture --tier residential --registry my-seed.yaml --page <page> --name brand_a --dir testdata/fb [--fail-dir failures]
 ```
 
 ```bash

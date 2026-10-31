@@ -7,7 +7,7 @@
 //	fbs-spike docids         --page <page>[,<page>...] [--write-registry my-seed.yaml]
 //	fbs-spike har            --in session.har --write-registry my-seed.yaml [--fixtures-dir DIR --name brand_x]
 //	fbs-spike render         --page <page> [--tier T] [--write-registry my-seed.yaml]   (needs Chromium)
-//	fbs-spike capture        --registry my-seed.yaml --page <page> --name brand_x [--dir testdata/fb]
+//	fbs-spike capture        --registry my-seed.yaml --page <page> --name brand_x [--dir testdata/fb] [--fail-dir DIR]
 //	fbs-spike check-fixtures --dir testdata/fb
 //	fbs-spike run            --registry my-seed.yaml --pages pages.csv --tier residential --out results.jsonl
 //	fbs-spike report         --in a.jsonl[,b.jsonl] [--json]
@@ -63,7 +63,7 @@ const (
 
 type flags struct {
 	cfgPath, registryFile, tier, tiers, pagesFile, out, outDir, in, page, name, dir, fixturesDir string
-	writeRegistry, orderings, from, ipEcho, timelineCounts, commentCounts                        string
+	writeRegistry, orderings, from, ipEcho, timelineCounts, commentCounts, failDir               string
 	asJSON, resume, each                                                                         bool
 	rps, reqPerDay, minDays                                                                      float64
 	timelinePages, postsPerPage, commentPages, threads, mediaSamples, conc, maxBundles, compare  int
@@ -98,6 +98,7 @@ func main() {
 	fs.StringVar(&f.name, "name", "sample", "fixture case name (capture, har)")
 	fs.StringVar(&f.dir, "dir", "testdata/fb", "fixture root (capture, check-fixtures)")
 	fs.StringVar(&f.fixturesDir, "fixtures-dir", "", "write HAR response bodies as fixtures under this root (har)")
+	fs.StringVar(&f.failDir, "fail-dir", "", "keep responses that were not ok, and a page whose id was not found, under this root (capture)")
 	fs.StringVar(&f.writeRegistry, "write-registry", "", "write the registry with the discovered doc_ids to this file (docids, har)")
 	fs.StringVar(&f.from, "from", spike.StepPreflight, "first step: "+strings.Join(spike.Steps, ", ")+" (phase0)")
 	fs.StringVar(&f.ipEcho, "ip-echo-url", spike.DefaultIPEchoURL, "service returning the caller's IP, used to check proxy exits; empty skips (preflight, phase0)")
@@ -241,7 +242,9 @@ func main() {
 		if err := spike.CheckRegistry(seed, cfg.FB.BaseURL); err != nil {
 			fail(err)
 		}
-		dirs, err := runner(io.Discard).Capture(ctx, firstPage(f), f.dir, f.name)
+		r := runner(io.Discard)
+		r.FailDir = f.failDir
+		dirs, err := r.Capture(ctx, firstPage(f), f.dir, f.name)
 		for _, d := range dirs {
 			fmt.Println("wrote", d)
 		}

@@ -90,7 +90,7 @@ func (s *PageStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 			return classOutcome(t, pl.Class, pl.Reason, st.Cursor, c)
 		}
 		if t.Seq == 0 {
-			page, rep := parse.Page(pl.HTML, sc.PageId)
+			page, rep := parse.Page(pl.HTML, sc.PageId, 0)
 			for _, f := range rep.Optional {
 				metrics.ParseMissingField.WithLabelValues("page_html", f).Inc()
 			}

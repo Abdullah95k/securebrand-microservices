@@ -31,6 +31,7 @@ type renderer struct {
 	drift      bool   // schema drift: rename message -> msg_v2
 	driftReq   bool   // schema drift: rename creation_time -> created_v2
 	jsOnly     bool   // tokens are inserted by a script, not in the markup
+	noID       bool   // the page HTML names no page id
 	timeline   string // timeline doc_id the page script requests ("" = no script)
 	bundle     string // relay bundle path; it changes when doc_ids rotate
 	clock      func() time.Time
@@ -327,7 +328,9 @@ func (r *renderer) pageHTML(p *Page, lsd, datr string, consent bool) []byte {
 	fmt.Fprintf(&b, "<title>%s | Facebook</title>", html.EscapeString(p.Name))
 	fmt.Fprintf(&b, `<meta property="og:title" content="%s"/>`, html.EscapeString(p.Name))
 	fmt.Fprintf(&b, `<meta property="og:url" content="%s"/>`, r.pageURL(p))
-	fmt.Fprintf(&b, `<meta property="al:android:url" content="fb://page/%d"/>`, p.delegate())
+	if !r.noID {
+		fmt.Fprintf(&b, `<meta property="al:android:url" content="fb://page/%d"/>`, p.delegate())
+	}
 	bundle := r.bundle
 	if bundle == "" {
 		bundle = "/rsrc.php/v3/relay.js"
@@ -346,10 +349,12 @@ func (r *renderer) pageHTML(p *Page, lsd, datr string, consent bool) []byte {
 	} else {
 		fmt.Fprintf(&b, `<script type="application/json" data-sjs>%s</script>`, site)
 	}
-	fmt.Fprintf(&b, `<script type="application/json" data-sjs>%s</script>`, hb)
-	fmt.Fprintf(&b, `<script>window.requireLazy&&requireLazy(["pageID"],function(){});var x={"pageID":"%d"};</script>`, p.delegate())
-	// The profile route's props name the profile, the id with a timeline.
-	fmt.Fprintf(&b, `<script type="application/json" data-sjs>{"require":[["CometProfileRoot","props",null,[{"userID":"%d"}]]]}</script>`, p.ID)
+	if !r.noID {
+		fmt.Fprintf(&b, `<script type="application/json" data-sjs>%s</script>`, hb)
+		fmt.Fprintf(&b, `<script>window.requireLazy&&requireLazy(["pageID"],function(){});var x={"pageID":"%d"};</script>`, p.delegate())
+		// The profile route's props name the profile, the id with a timeline.
+		fmt.Fprintf(&b, `<script type="application/json" data-sjs>{"require":[["CometProfileRoot","props",null,[{"userID":"%d"}]]]}</script>`, p.ID)
+	}
 	if r.timeline != "" {
 		// The page's own first timeline request, as Facebook's client makes
 		// it: what a render-and-intercept captures.

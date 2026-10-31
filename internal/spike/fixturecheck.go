@@ -80,7 +80,7 @@ func checkFixture(query, dir string) FixtureCheck {
 		if res.Err != "" {
 			return res
 		}
-		pg, r := parse.Page(html, 0)
+		pg, r := parse.Page(html, 0, m.PageID)
 		if rep = r; pg != nil {
 			res.Items = 1
 		}

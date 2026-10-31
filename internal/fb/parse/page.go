@@ -21,11 +21,17 @@ var (
 )
 
 // Page parses the page profile from its HTML. pageID may be 0, in which case
-// it is extracted from the HTML.
-func Page(html []byte, pageID int64) (*fbv1.Page, Report) {
+// it is extracted from the HTML, and failing that is requested: the numeric
+// id the page was loaded by (0 when it was loaded by its vanity). The HTML
+// comes first because an old-style id redirects to the page's profile, whose
+// id is the one with the timeline.
+func Page(html []byte, pageID, requested int64) (*fbv1.Page, Report) {
 	var rep Report
 	if pageID == 0 {
 		pageID = htmlx.PageID(html)
+	}
+	if pageID == 0 {
+		pageID = requested
 	}
 	if pageID == 0 {
 		rep.missing("page.id")

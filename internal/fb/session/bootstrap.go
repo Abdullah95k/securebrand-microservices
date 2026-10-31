@@ -26,6 +26,10 @@ type PageLoad struct {
 // ErrBootstrap means no usable tokens could be obtained.
 var ErrBootstrap = errors.New("session: bootstrap failed")
 
+// ErrTransport marks a page load that got no response at all (a timeout, a
+// refused or reset connection): the exit failed, not Facebook.
+var ErrTransport = errors.New("transport")
+
 // BrowserFallback renders a page in a real browser for an identity whose
 // HTML load carried no tokens (a page that needs JavaScript first), and
 // installs the cookies and tokens it found. Observe counts the HTTP loads
@@ -81,9 +85,11 @@ func (l *Loader) Load(ctx context.Context, id *Identity, rawURL string) (*PageLo
 		resp, err := id.Doer.Do(ctx, &transport.Request{Method: "GET", URL: target,
 			Header: NavHeaders(id.FP, l.AcceptLanguage, site)})
 		if err != nil {
-			Outcome(id, detect.Transport)
+			if ctx.Err() == nil { // a cancelled load says nothing about the exit
+				Outcome(id, detect.Transport)
+			}
 			metrics.FBRequests.WithLabelValues("page_html", detect.Transport.String(), id.Endpoint.Tier).Inc()
-			return nil, fmt.Errorf("session: load %s: %w", target, err)
+			return nil, fmt.Errorf("session: load %s: %w: %w", target, ErrTransport, err)
 		}
 		total += resp.BytesIn + resp.BytesOut
 		metrics.ProxyBytes.WithLabelValues(id.Endpoint.Tier, "in").Add(float64(resp.BytesIn))

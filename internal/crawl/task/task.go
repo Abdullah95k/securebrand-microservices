@@ -217,6 +217,19 @@ func validVanityRune(r rune) bool {
 	return r == '.' || r == '-' || r == '_' || (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
 }
 
+// RefID returns the numeric id of an "id:<n>" reference, and 0 for any other.
+func RefID(ref string) int64 {
+	s, ok := strings.CutPrefix(ref, "id:")
+	if !ok {
+		return 0
+	}
+	id, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || id <= 0 {
+		return 0
+	}
+	return id
+}
+
 // RefPath returns the URL path for a normalised reference.
 func RefPath(ref string) string {
 	switch {

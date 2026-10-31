@@ -39,7 +39,7 @@ Only the leader scheduler publishes AIMD, budget, schedule-lag and consumer-lag 
 
 The fleet reacts on its own, at three levels:
 
-- **Identity:** a rate-limited identity cools down; one that keeps being blocked, walled or checkpointed is retired.
+- **Identity:** a rate-limited identity cools down; one that keeps being blocked, walled or checkpointed is retired, and so is one whose exit stops answering (3 transport failures in a row: `reason="transport"`).
 - **Exit bucket:** a static endpoint's /24, or a gateway and country, opens its breaker at `fb.proxy.breaker.open_rate` (15%) over `window` (1m). It gets no new identities, its idle identities are retired, and tasks move to the next tier in `fb.proxy.routing`. After `cooldown` (2m, doubling up to `max_cooldown`) one probe identity tests it.
 - **Fleet:** AIMD, on the leader scheduler, reads the block rate of the whole fleet every 10s. Above `fb.aimd.high_block_rate` (6%) the ceiling becomes 70% of the rate actually sent. Below `low_block_rate` (2%), while the fleet uses most of the ceiling, the ceiling grows by 2% (at least 1 rps) per window. Recovery from the floor is deliberately slow.
 

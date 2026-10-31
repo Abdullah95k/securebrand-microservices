@@ -86,7 +86,7 @@ func run(t *testing.T, query, dir string, m meta) any {
 	switch query {
 	case "page_html":
 		html, _ := os.ReadFile(filepath.Join(dir, "response.html"))
-		p, rep := parse.Page(html, 0)
+		p, rep := parse.Page(html, 0, m.PageID)
 		if !rep.OK() {
 			t.Fatalf("required fields missing: %v", rep.Missing)
 		}

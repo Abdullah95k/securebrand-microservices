@@ -140,9 +140,26 @@ func TestPageReadsItsPageObject(t *testing.T) {
 		`"website":"https://example.org"}}</script>` +
 		`<script type="application/json">{"other":{"__typename":"Page","id":"999","website":"https://wrong.example"}}</script>` +
 		`<script>{"props":{"userID":"100064000000777"}}</script>`
-	p, rep := Page([]byte(html), 0)
+	p, rep := Page([]byte(html), 0, 0)
 	if p == nil || p.PageId != 100064000000777 || p.Name != "News Iraq" || p.GetLikesCount() != 5000 ||
 		p.Contact["website"] != "https://example.org" || len(p.Categories) != 1 {
 		t.Fatalf("page %+v, report %+v", p, rep)
+	}
+}
+
+// A page loaded by its numeric id whose HTML names none (no userID, or
+// several) takes the id it was loaded by; the HTML's own id wins otherwise.
+func TestPageFallsBackToTheRequestedID(t *testing.T) {
+	bare := `<html><head><title>News Iraq | Facebook</title></head></html>`
+	if p, rep := Page([]byte(bare), 0, 0); p != nil || rep.OK() {
+		t.Fatalf("no id anywhere: %+v %+v", p, rep)
+	}
+	p, rep := Page([]byte(bare), 0, 100067000000001)
+	if p == nil || p.PageId != 100067000000001 || p.Name != "News Iraq" || !rep.OK() {
+		t.Fatalf("requested id: %+v %+v", p, rep)
+	}
+	named := bare + `<script>{"props":{"userID":"100064000000777"}}</script>`
+	if p, _ := Page([]byte(named), 0, 104000000000123); p == nil || p.PageId != 100064000000777 {
+		t.Fatalf("the HTML's id comes first: %+v", p)
 	}
 }

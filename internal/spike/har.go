@@ -425,7 +425,7 @@ func harFixtures(c HARCapture, seed registry.Seed, root, name string) ([]string,
 	// page parser recognises.
 	var pageHTML []byte
 	for _, p := range c.Pages {
-		if pg, _ := parse.Page(p.HTML, 0); pg != nil {
+		if pg, _ := parse.Page(p.HTML, 0, 0); pg != nil {
 			pageID, pageHTML = pg.PageId, p.HTML
 			break
 		}

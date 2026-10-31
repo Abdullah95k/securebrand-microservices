@@ -367,7 +367,11 @@ func (s *Sync) loadCanary(ctx context.Context, page string) (*canary, error) {
 		s.Pool.Release(id)
 		return nil, err
 	}
-	pg, _ := parse.Page(pl.HTML, 0)
+	if pl.Class != detect.OK {
+		s.Pool.Release(id)
+		return nil, fmt.Errorf("page load: %s %s", pl.Class, pl.Reason)
+	}
+	pg, _ := parse.Page(pl.HTML, 0, task.RefID(ref))
 	if pg == nil || pg.PageId == 0 {
 		s.Pool.Release(id)
 		return nil, errors.New("no page id in the page html")

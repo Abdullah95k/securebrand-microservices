@@ -16,6 +16,7 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/detect"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/docids"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/graphql"
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/htmlx"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/parse"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/session"
 	"github.com/abdullah95k/securebrand-microservices/internal/fixtures"
@@ -39,12 +40,15 @@ func (r *Runner) Capture(ctx context.Context, page, dir, name string) ([]string,
 	if err != nil {
 		return nil, err
 	}
-	pg, _ := parse.Page(pl.HTML, 0)
+	date := time.Now().UTC().Format("20060102")
+	if pl.Class != detect.OK {
+		return r.keepPage(id, date+"_"+name, pl, fmt.Errorf("spike: page load: %s %s", pl.Class, pl.Reason))
+	}
+	pg, _ := parse.Page(pl.HTML, 0, task.RefID(ref))
 	if pg == nil {
-		return nil, fmt.Errorf("spike: page id not found in html")
+		return r.keepPage(id, date+"_"+name, pl, errors.New("spike: page id not found in html"))
 	}
 	keep := []string{strconv.FormatInt(pg.PageId, 10)}
-	date := time.Now().UTC().Format("20060102")
 	var written []string
 	write := func(query, file string, body []byte, meta map[string]any) error {
 		meta["source"] = "capture"
@@ -138,6 +142,29 @@ func (r *Runner) keepFailure(id *session.Identity, query, caseName string, pageI
 		"class": resp.Class.String(), "reason": resp.Reason, "bytes": len(resp.Body),
 		"tokens_found": tokensFound(id.Tokens()), "cookies": slices.Sorted(maps.Keys(id.Doer.Cookies(id.Base)))}
 	return fixtures.Write(r.FailDir, query, caseName, file, resp.Body, meta, keep)
+}
+
+// keepPage writes a page capture could not use (not ok, or no id found),
+// scrubbed like a fixture, to FailDir/page_html/<case>/, with the path it
+// ended on (a redirect to a login or checkpoint page shows there) and which
+// id hints its HTML holds (counts only), so the bundle shows what the
+// extractor missed. It returns err, naming where the page is kept.
+func (r *Runner) keepPage(id *session.Identity, caseName string, pl *session.PageLoad, err error) ([]string, error) {
+	if r.FailDir == "" {
+		return nil, err
+	}
+	final := ""
+	if u, err := url.Parse(pl.URL); err == nil {
+		final = u.Path
+	}
+	meta := map[string]any{"source": "capture", "status": pl.Status, "class": pl.Class.String(), "reason": pl.Reason,
+		"bytes": len(pl.HTML), "final_path": final, "id_hints": htmlx.PageIDHints(pl.HTML),
+		"tokens_found": tokensFound(id.Tokens()), "cookies": slices.Sorted(maps.Keys(id.Doer.Cookies(id.Base)))}
+	d, kerr := fixtures.Write(r.FailDir, "page_html", caseName, "response.html", pl.HTML, meta, nil)
+	if d == "" {
+		return nil, errors.Join(err, kerr)
+	}
+	return []string{d}, errors.Join(fmt.Errorf("%w; the page is under %s", err, d), kerr)
 }
 
 // DocIDs loads pages and scans them and their JS bundles for Relay

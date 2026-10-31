@@ -152,7 +152,10 @@ func (r *Runner) trimPage(ctx context.Context, page string, opt TrimOptions) []T
 	if err != nil {
 		return fail("page", err)
 	}
-	pg, _ := parse.Page(pl.HTML, 0)
+	if pl.Class != detect.OK {
+		return fail("page", fmt.Errorf("spike: page load: %s %s", pl.Class, pl.Reason))
+	}
+	pg, _ := parse.Page(pl.HTML, 0, task.RefID(ref))
 	if pg == nil {
 		return fail("page", fmt.Errorf("spike: page id not found in html"))
 	}

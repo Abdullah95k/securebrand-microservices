@@ -177,7 +177,9 @@ func (c *Client) do(ctx context.Context, id *session.Identity, q registry.Query,
 	tier := id.Endpoint.Tier
 	metrics.FBRequestSecs.WithLabelValues(q.Name, tier).Observe(elapsed.Seconds())
 	if err != nil {
-		session.Outcome(id, detect.Transport)
+		if ctx.Err() == nil { // a cancelled request says nothing about the exit
+			session.Outcome(id, detect.Transport)
+		}
 		if c.Outcomes != nil {
 			c.Outcomes.Observe(detect.Transport, req.Lane, int64(len(body))) // the request went out
 		}

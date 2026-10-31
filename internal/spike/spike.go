@@ -181,6 +181,43 @@ func (r *Runner) do(ctx context.Context, page string, id *session.Identity, req 
 	return resp, nil
 }
 
+// loadAttempts is how many identities a page load is tried on.
+const loadAttempts = 2
+
+// loadPage loads ref's page on an identity of the tier, and returns the
+// identity (for the caller to release) with the page's bootstrap record. A
+// load that got no response, a dead or stalled exit, retires its identity so
+// that no other page lands on it, and is tried once more on a fresh one; the
+// failed attempt is recorded as a failed bootstrap, since the tier's exits
+// are part of what is measured. On an error there is no identity to release.
+func (r *Runner) loadPage(ctx context.Context, ref string) (*session.Identity, *session.PageLoad, Record, error) {
+	for attempt := 1; ; attempt++ {
+		rec := Record{Type: "bootstrap", Page: ref}
+		id, err := r.Pool.Acquire(ctx, r.Opt.Tier)
+		if err != nil {
+			return nil, nil, rec, err
+		}
+		u, _ := id.Base.Parse(task.RefPath(ref))
+		start := time.Now()
+		pl, err := r.Loader.Load(ctx, id, u.String())
+		rec.Identity, rec.MS = id.ID, time.Since(start).Milliseconds()
+		if err == nil {
+			return id, pl, rec, nil
+		}
+		if !errors.Is(err, session.ErrTransport) || ctx.Err() != nil {
+			r.Pool.Release(id)
+			return nil, nil, rec, err
+		}
+		r.Pool.Retire(id, "transport")
+		if attempt == loadAttempts {
+			return nil, nil, rec, err
+		}
+		rec.OK, rec.Reason = boolp(false), err.Error()
+		r.emit(rec)
+		slog.Warn("spike: page load failed; trying a fresh identity", "page", ref, "err", Redact(err.Error()))
+	}
+}
+
 func (r *Runner) page(ctx context.Context, p PageRef) error {
 	ref, err := task.NormalizeRef(p.Ref)
 	if err != nil {
@@ -194,20 +231,13 @@ func (r *Runner) page(ctx context.Context, p PageRef) error {
 			r.emit(Record{Type: "page_done", Page: ref})
 		}
 	}()
-	id, err := r.Pool.Acquire(ctx, r.Opt.Tier)
-	if err != nil {
-		return err
-	}
-	defer r.Pool.Release(id)
-	u, _ := id.Base.Parse(task.RefPath(ref))
-	start := time.Now()
-	pl, err := r.Loader.Load(ctx, id, u.String())
-	brec := Record{Type: "bootstrap", Page: ref, Identity: id.ID, MS: time.Since(start).Milliseconds()}
+	id, pl, brec, err := r.loadPage(ctx, ref)
 	if err != nil {
 		brec.OK, brec.Reason = boolp(false), err.Error()
 		r.emit(brec)
 		return err
 	}
+	defer r.Pool.Release(id)
 	tok := htmlx.ExtractTokens(pl.HTML)
 	brec.OK = boolp(pl.Class == detect.OK && id.Bootstrapped())
 	brec.Class, brec.Reason, brec.Status, brec.Bytes, brec.Wire = pl.Class.String(), pl.Reason, pl.Status, len(pl.HTML), pl.Bytes
@@ -217,7 +247,7 @@ func (r *Runner) page(ctx context.Context, p PageRef) error {
 	if !*brec.OK {
 		return nil
 	}
-	pg, rep := parse.Page(pl.HTML, 0)
+	pg, rep := parse.Page(pl.HTML, 0, task.RefID(ref))
 	if pg == nil {
 		r.emit(Record{Type: "timeline", Page: ref, EndReason: "no_page_id", MissingOpt: rep.Missing})
 		return nil
@@ -285,6 +315,7 @@ func (r *Runner) page(ctx context.Context, p PageRef) error {
 
 	// Cursor portability: replay a mid-stream cursor on a fresh identity.
 	if len(cursors) > 0 {
+		u, _ := id.Base.Parse(task.RefPath(ref))
 		r.portability(ctx, ref, pageID, u.String(), cursors[len(cursors)/2])
 	}
 
