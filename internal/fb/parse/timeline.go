@@ -146,11 +146,18 @@ func story(n *Node, all []*Node, pageID int64, baseURL string) (PostBundle, Repo
 		p.AuthorName = actor.Get("name").String()
 	}
 
-	// Feedback: merge every Feedback node owned by this story.
+	// Feedback: merge every Feedback node owned by this story, or by a copy
+	// of it nested inside (Facebook repeats the story under
+	// comet_sections.feedback, and puts the reaction counts there).
 	var fbs []gjson.Result
 	for _, x := range all {
-		if x.Typename == "Feedback" && x.Ancestor("Story", "Comment") == n {
+		if x.Typename == "Feedback" && ownedBy(x, n) {
 			fbs = append(fbs, x.V)
+		}
+	}
+	for _, path := range ufiFeedbackPaths {
+		if f := v.Get(path); f.IsObject() {
+			fbs = append(fbs, f)
 		}
 	}
 	if len(fbs) == 0 {
@@ -229,6 +236,32 @@ func story(n *Node, all []*Node, pageID int64, baseURL string) (PostBundle, Repo
 
 	p.Type = postType(v, p, photos, videos, reel)
 	return PostBundle{Post: p, Media: media}, rep
+}
+
+// ufiFeedbackPaths are where a story's own feedback (reactions, counts)
+// sits under its nested copies, whatever those copies are typed.
+var ufiFeedbackPaths = []string{
+	"comet_sections.feedback.story.story_ufi_container.story.feedback_context.feedback_target_with_context.comet_ufi_summary_and_actions_renderer.feedback",
+	"comet_sections.feedback.story.feedback_context.feedback_target_with_context.comet_ufi_summary_and_actions_renderer.feedback",
+	"comet_sections.feedback.story.story_ufi_container.story.feedback_context.feedback_target_with_context.ufi_renderer.feedback",
+}
+
+// ownedBy reports whether Feedback node x belongs to story n: its nearest
+// owner is n, or a Story nested in n with n's id (a copy of n, not a shared
+// post), with no Comment in between.
+func ownedBy(x, n *Node) bool {
+	id := n.V.Get("id").String()
+	for p := x.Parent; p != nil; p = p.Parent {
+		switch {
+		case p == n:
+			return true
+		case p.Typename == "Comment":
+			return false
+		case p.Typename == "Story" && (id == "" || p.V.Get("id").String() != id):
+			return false
+		}
+	}
+	return false
 }
 
 func applyFeedback(p *fbv1.Post, fbs []gjson.Result, rep *Report) {

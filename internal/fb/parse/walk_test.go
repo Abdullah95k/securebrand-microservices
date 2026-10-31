@@ -163,3 +163,55 @@ func TestPageFallsBackToTheRequestedID(t *testing.T) {
 		t.Fatalf("the HTML's id comes first: %+v", p)
 	}
 }
+
+// Facebook repeats a story under comet_sections.feedback and puts its
+// reaction counts on the copy's feedback (as real timelines do). They are
+// the story's own, unlike a shared post's.
+func TestTimelineReactionsOnANestedCopyOfTheStory(t *testing.T) {
+	ufi := `"feedback_context":{"feedback_target_with_context":{"comet_ufi_summary_and_actions_renderer":{"feedback":{` +
+		`"__typename":"Feedback","id":"F:1","reaction_count":{"count":57},"i18n_reaction_count":"57",` +
+		`"top_reactions":{"edges":[{"reaction_count":50,"node":{"id":"1635855486666999"}},{"reaction_count":7,"node":{"id":"115940658764963"}}]}}}}}`
+	shared := `"attached_story":{"__typename":"Story","id":"S:other","post_id":"99","url":"https://www.facebook.com/p/99",` +
+		`"feedback":{"__typename":"Feedback","id":"F:99","reaction_count":{"count":999}}}`
+	for name, copyType := range map[string]string{"typed copies": `"__typename":"Story","id":"S:1",`, "untyped copies": ``} {
+		t.Run(name, func(t *testing.T) {
+			story := `{"__typename":"Story","id":"S:1","post_id":"11","creation_time":1700000200,` + shared + `,` +
+				`"feedback":{"__typename":"Feedback","id":"F:1"},` +
+				`"comet_sections":{"feedback":{"story":{` + copyType + `"story_ufi_container":{"story":{` + copyType + ufi + `}}}}}}`
+			body := `{"data":{"node":{"__typename":"Page","timeline_list_feed_units":{"edges":[` + wrapEdges(story) +
+				`],"page_info":{"has_next_page":false,"end_cursor":""}}}}}`
+			res, rep := Timeline([]gjson.Result{gjson.Parse(body)}, 5, "https://www.facebook.com")
+			if !rep.OK() || len(res.Posts) != 1 {
+				t.Fatalf("posts %d, missing %v", len(res.Posts), rep.Missing)
+			}
+			r := res.Posts[0].Post.Reactions
+			if r == nil || r.Total != 57 || r.ByType["like"] != 50 || r.ByType["haha"] != 7 || !r.Complete {
+				t.Fatalf("reactions %+v", r)
+			}
+			for _, f := range rep.Optional {
+				if f == "story.reactions" {
+					t.Fatal("story.reactions reported missing")
+				}
+			}
+		})
+	}
+}
+
+// A reply can point at its parent with a Comment object that carries only
+// the parent's id. It is not a comment, and not a sign of drift; a comment
+// that lost its creation time is.
+func TestCommentReferencesAreNotComments(t *testing.T) {
+	reply := `{"__typename":"Comment","id":"Y29tbWVudDoxXzI=","legacy_fbid":"2","created_time":1700000300,` +
+		`"body":{"text":"r"},"author":{"__typename":"User","id":"7","name":"A"},"feedback":{"id":"F:2"},` +
+		`"comment_direct_parent":{"__typename":"Comment","id":"Y29tbWVudDoxXzE=","legacy_fbid":"1"}}`
+	body := `{"data":{"node":{"replies_connection":{"edges":[{"node":` + reply + `}],"page_info":{"has_next_page":false}}}}}`
+	res, rep := Comments([]gjson.Result{gjson.Parse(body)}, CommentContext{PostID: 5, PageID: 6, Replies: true, BaseDepth: 1, ParentCommentID: 1})
+	if !rep.OK() || len(res.Comments) != 1 || res.Comments[0].Comment.CommentId != 2 {
+		t.Fatalf("comments %d, missing %v", len(res.Comments), rep.Missing)
+	}
+	// A real comment without its time is still drift.
+	broken := `{"data":{"node":{"replies_connection":{"edges":[{"node":{"__typename":"Comment","legacy_fbid":"3","body":{"text":"x"}}}]}}}}`
+	if _, rep := Comments([]gjson.Result{gjson.Parse(broken)}, CommentContext{PostID: 5, PageID: 6, Replies: true}); rep.OK() {
+		t.Fatal("a comment without created_time must be drift")
+	}
+}

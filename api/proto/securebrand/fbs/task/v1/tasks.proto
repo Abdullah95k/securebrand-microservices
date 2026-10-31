@@ -55,6 +55,11 @@ message PageScope {
   int64 posts_seen = 5;
   int32 consecutive_old = 6;
   google.protobuf.Timestamp newest_seen_at = 7;
+  // When the page's profile (its HTML) was last read, set on scheduled
+  // runs. The page stage skips the HTML within crawler.profile_refresh of it
+  // when its identity already has tokens: page loads are what Facebook
+  // walls, GraphQL is not.
+  google.protobuf.Timestamp profile_seen_at = 8;
 }
 
 message PostScope {

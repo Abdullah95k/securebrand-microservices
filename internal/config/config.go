@@ -235,6 +235,10 @@ type Crawler struct {
 	FreshnessP0             time.Duration  `koanf:"freshness_p0"`
 	FreshnessP1             time.Duration  `koanf:"freshness_p1"`
 	SuppressionRefresh      time.Duration  `koanf:"suppression_refresh"`
+	// ProfileRefresh is how often a scheduled run reads the page's HTML for
+	// its profile; in between it goes straight to GraphQL when its identity
+	// already has tokens. 0 reads the HTML on every run.
+	ProfileRefresh time.Duration `koanf:"profile_refresh"`
 }
 
 type Limits struct {
@@ -258,6 +262,7 @@ type Scheduler struct {
 	FinalizerInterval    time.Duration `koanf:"finalizer_interval"`
 	FinalizeTimeout      time.Duration `koanf:"finalize_timeout"`
 	ReaperAfter          time.Duration `koanf:"reaper_after"`
+	ReaperMaxAge         time.Duration `koanf:"reaper_max_age"`
 	PartitionMonthsAhead int           `koanf:"partition_months_ahead"`
 	IncrementalOverlap   time.Duration `koanf:"incremental_overlap"`
 	// Adaptive tiers: pages registered without an explicit interval move

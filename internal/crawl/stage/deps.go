@@ -48,6 +48,15 @@ type Deps struct {
 	Now    func() time.Time
 }
 
+// profileFresh reports a page whose profile was read within
+// crawler.profile_refresh (set on scheduled runs by the dispatcher).
+func (d *Deps) profileFresh(sc *taskv1.PageScope) bool {
+	if sc.PageId == 0 || sc.ProfileSeenAt == nil || d.Cfg == nil || d.Cfg.Crawler.ProfileRefresh <= 0 {
+		return false
+	}
+	return d.now().Sub(sc.ProfileSeenAt.AsTime()) < d.Cfg.Crawler.ProfileRefresh
+}
+
 func (d *Deps) now() time.Time {
 	if d.Now != nil {
 		return d.Now()

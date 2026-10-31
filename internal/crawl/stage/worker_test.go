@@ -2,8 +2,12 @@ package stage
 
 import (
 	"testing"
+	"time"
+
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	taskv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fbs/task/v1"
+	"github.com/abdullah95k/securebrand-microservices/internal/config"
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/checkpoint"
 )
 
@@ -73,5 +77,30 @@ func TestUnsaved(t *testing.T) {
 	}
 	if len(unsaved(map[string]int64{"requests": 6}, map[string]int64{"requests": 6})) != 0 {
 		t.Fatal("nothing new")
+	}
+}
+
+func TestProfileFresh(t *testing.T) {
+	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	cfg := &config.Config{}
+	cfg.Crawler.ProfileRefresh = 24 * time.Hour
+	d := &Deps{Cfg: cfg, Now: func() time.Time { return now }}
+	at := func(ago time.Duration) *timestamppb.Timestamp { return timestamppb.New(now.Add(-ago)) }
+	for name, c := range map[string]struct {
+		sc   *taskv1.PageScope
+		want bool
+	}{
+		"read an hour ago":  {&taskv1.PageScope{PageId: 7, ProfileSeenAt: at(time.Hour)}, true},
+		"read two days ago": {&taskv1.PageScope{PageId: 7, ProfileSeenAt: at(48 * time.Hour)}, false},
+		"never read":        {&taskv1.PageScope{PageId: 7}, false},
+		"page id not known": {&taskv1.PageScope{ProfileSeenAt: at(time.Hour)}, false},
+	} {
+		if got := d.profileFresh(c.sc); got != c.want {
+			t.Errorf("%s: %v", name, got)
+		}
+	}
+	cfg.Crawler.ProfileRefresh = 0
+	if d.profileFresh(&taskv1.PageScope{PageId: 7, ProfileSeenAt: at(time.Minute)}) {
+		t.Error("profile_refresh 0 reads the HTML on every run")
 	}
 }

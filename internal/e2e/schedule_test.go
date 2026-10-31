@@ -135,6 +135,11 @@ func TestAdaptiveScheduleAndPostRefresh(t *testing.T) {
 	}
 	t.Logf("scheduled job %s %s: %d refreshes of the target, comments %d -> %d (truth %d), counters %v",
 		j.ID, j.Status, refreshes, before, after, wantTarget, j.Counters)
+	// The page's profile was read by the backfill: the scheduled run skips
+	// its HTML (a bootstrapped identity goes straight to the timeline).
+	if bf.Counters["pages"] != 1 || j.Counters["pages"] != 0 || j.Counters["profile_skips"] != 1 {
+		t.Fatalf("profile reads: backfill %v, scheduled %v", bf.Counters, j.Counters)
+	}
 	if j.Status != "completed" || refreshes < 1 || after != wantTarget || after <= before {
 		t.Fatalf("the refresh did not collect the new comments: status=%s refreshes=%d comments %d -> %d, truth %d",
 			j.Status, refreshes, before, after, wantTarget)
