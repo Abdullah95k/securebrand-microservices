@@ -65,3 +65,25 @@ func itoa(i int) string {
 	}
 	return string(b)
 }
+
+func TestPageIDHints(t *testing.T) {
+	html := `<meta property="al:android:url" content="fb://profile/100064000000777"/>` +
+		`<script>{"userID":"100012345678901"},{"userID":"100064000000777"},{"userID":"100064000000777"},{"userID":"0"}</script>` +
+		`<script>{"profile_owner":{"id":"100064000000777"},"actorID":"0"}</script>`
+	got := PageIDHints([]byte(html))
+	want := map[string]int{"userID": 2, "fb://profile/": 1, "al:android:url": 1, "profile_owner": 1, "actorID": 0, "pageID": 0, "delegate_page": 0}
+	for k, n := range want {
+		if got[k] != n {
+			t.Errorf("%s: %d, want %d (all: %v)", k, got[k], n, got)
+		}
+	}
+	// Counts only: no id leaves.
+	for k := range got {
+		if len(k) > 20 {
+			t.Errorf("unexpected key %q", k)
+		}
+	}
+	if n := len(PageIDHints([]byte(`<html></html>`))); n != len(pageIDPatterns)+len(hintPatterns)+1 {
+		t.Fatalf("an empty page reports %d keys", n)
+	}
+}

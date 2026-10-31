@@ -31,6 +31,9 @@ type fixtureMeta struct {
 	PageID          int64 `json:"page_id"`
 	PostID          int64 `json:"post_id"`
 	ParentCommentID int64 `json:"parent_comment_id"`
+	// IDFromRef marks a page whose HTML names no id: it was captured by
+	// its numeric id, which stands in for it (as the crawler's does).
+	IDFromRef bool `json:"id_from_ref"`
 }
 
 // CheckFixtures runs the parsers over every fixture under root
@@ -80,7 +83,11 @@ func checkFixture(query, dir string) FixtureCheck {
 		if res.Err != "" {
 			return res
 		}
-		pg, r := parse.Page(html, 0)
+		var requested int64
+		if m.IDFromRef {
+			requested = m.PageID
+		}
+		pg, r := parse.Page(html, 0, requested)
 		if rep = r; pg != nil {
 			res.Items = 1
 		}

@@ -35,11 +35,14 @@ type Identity struct {
 	bootstrapped time.Time
 	health       float64
 	consecBlocks int
-	requests     int
-	maxRequests  int
-	born         time.Time
-	cooldown     time.Time
-	retired      string
+	// consecFails counts transport failures in a row: an exit that
+	// stopped answering.
+	consecFails int
+	requests    int
+	maxRequests int
+	born        time.Time
+	cooldown    time.Time
+	retired     string
 
 	req       atomic.Uint64
 	limiter   *rate.Limiter
@@ -106,6 +109,11 @@ func (id *Identity) Wait(ctx context.Context) error {
 	}
 }
 
+// MaxTransportFailures is how many transport failures in a row (timeouts,
+// refused or reset connections) retire an identity: its exit has stopped
+// answering, and a fresh identity gets another.
+const MaxTransportFailures = 3
+
 // Record updates health with one request outcome and returns whether the
 // identity must be retired.
 func (id *Identity) Record(c detect.Class) (retire bool, reason string) {
@@ -123,6 +131,11 @@ func (id *Identity) Record(c detect.Class) (retire bool, reason string) {
 		id.consecBlocks = 0
 	}
 	id.health = 0.9*id.health + 0.1*score
+	if c == detect.Transport {
+		id.consecFails++
+	} else {
+		id.consecFails = 0 // the exit answered
+	}
 	switch {
 	case c == detect.Checkpoint:
 		id.retired = "checkpoint"
@@ -130,6 +143,10 @@ func (id *Identity) Record(c detect.Class) (retire bool, reason string) {
 		id.retired = "login_wall"
 	case id.consecBlocks >= 2:
 		id.retired = "blocked"
+	case id.consecFails >= MaxTransportFailures:
+		// Health alone never retires a dead exit: transport failures
+		// score 0.5, which health approaches but never falls below.
+		id.retired = "transport"
 	case c == detect.RateLimited:
 		backoff := time.Duration(30<<min(id.consecBlocks, 5)) * time.Second
 		if backoff > 15*time.Minute {

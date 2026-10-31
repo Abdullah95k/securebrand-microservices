@@ -36,6 +36,9 @@ type Faults struct {
 	// FieldErrors streams a partial "field_exception" error part after each
 	// timeline page, as real Facebook does beside the posts.
 	FieldErrors bool `json:"field_errors"`
+	// NoPageID serves page HTML that names no page id (no userID, no
+	// pageID, no fb:// link), as a few real pages do.
+	NoPageID bool `json:"no_page_id"`
 }
 
 // Options configures a Server.
@@ -132,7 +135,7 @@ func (s *Server) renderer(r *http.Request) *renderer {
 	}
 	return &renderer{base: scheme + "://" + r.Host, mediaKey: s.mediaKey, mediaTTL: s.opts.Faults.MediaTTL,
 		topN: s.opts.TopReactions, inlineRepl: s.opts.InlineReply, drift: s.opts.Faults.Drift, driftReq: s.opts.Faults.DriftRequired,
-		jsOnly: s.opts.Faults.JSOnlyTokens, timeline: first(s.opts.Docs["ProfileCometTimelineFeedRefetchQuery"]),
+		jsOnly: s.opts.Faults.JSOnlyTokens, noID: s.opts.Faults.NoPageID, timeline: first(s.opts.Docs["ProfileCometTimelineFeedRefetchQuery"]),
 		bundle: s.bundlePath()}
 }
 

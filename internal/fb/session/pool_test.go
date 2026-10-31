@@ -2,6 +2,8 @@ package session
 
 import (
 	"context"
+	"errors"
+	"net/url"
 	"testing"
 	"time"
 
@@ -58,5 +60,65 @@ func TestBreakerRetiresIdleIdentitiesAndFeedsOutcomes(t *testing.T) {
 	}
 	if pool.live["isp"] != 1 {
 		t.Fatalf("the identity on the open bucket must be retired: live=%d", pool.live["isp"])
+	}
+}
+
+// An exit that stopped answering retires its identity; failures broken up
+// by answers do not.
+func TestTransportFailuresRetireAnIdentity(t *testing.T) {
+	id := newIdentity("x", proxy.Endpoint{Tier: "isp"}, Fingerprint{}, nil, nil, 1, 1, 0)
+	for range 20 {
+		for range MaxTransportFailures - 1 {
+			if retire, _ := id.Record(detect.Transport); retire {
+				t.Fatal("retired on failures broken up by answers")
+			}
+		}
+		id.Record(detect.OK)
+	}
+	for i := 1; i <= MaxTransportFailures; i++ {
+		retire, reason := id.Record(detect.Transport)
+		if retire != (i == MaxTransportFailures) || (retire && reason != "transport") {
+			t.Fatalf("failure %d: retire=%v reason=%q", i, retire, reason)
+		}
+	}
+	if id.RetireReason() != "transport" {
+		t.Fatalf("reason %q", id.RetireReason())
+	}
+}
+
+// doer fails every request with the error fail returns.
+type doer struct {
+	transport.Doer
+	fail func() error
+}
+
+func (d doer) Do(context.Context, *transport.Request) (*transport.Response, error) {
+	return nil, d.fail()
+}
+
+// A load that got no response is marked ErrTransport and counts against the
+// exit; one cancelled by its caller does not.
+func TestCancelledLoadsDoNotRetireAnIdentity(t *testing.T) {
+	base, _ := url.Parse("https://www.facebook.com")
+	l := &Loader{Rules: detect.DefaultRules()}
+	cancelled := newIdentity("c", proxy.Endpoint{Tier: "isp"}, Fingerprint{}, nil, base, 1000, 10, 0)
+	dead := newIdentity("d", proxy.Endpoint{Tier: "isp"}, Fingerprint{}, nil, base, 1000, 10, 0)
+	std := transport.NewStd(time.Second)
+	for range MaxTransportFailures {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancelled.Doer = doer{Doer: std, fail: func() error { cancel(); return ctx.Err() }}
+		if _, err := l.Load(ctx, cancelled, "https://www.facebook.com/x"); !errors.Is(err, ErrTransport) {
+			t.Fatalf("cancelled load: %v", err)
+		}
+		dead.Doer = doer{Doer: std, fail: func() error { return errors.New("awaiting headers") }}
+		if _, err := l.Load(context.Background(), dead, "https://www.facebook.com/x"); !errors.Is(err, ErrTransport) {
+			t.Fatalf("dead load: %v", err)
+		}
+	}
+	if r := cancelled.RetireReason(); r != "" {
+		t.Fatalf("cancelled loads retired the identity: %q", r)
+	}
+	if r := dead.RetireReason(); r != "transport" {
+		t.Fatalf("dead exit: %q", r)
 	}
 }

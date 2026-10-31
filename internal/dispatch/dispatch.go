@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -95,8 +94,8 @@ var ErrLaneFull = errors.New("dispatch: the fleet is running its maximum of jobs
 // ResolvePageID returns the page id for a normalised ref if known.
 func (d *Dispatcher) ResolvePageID(ctx context.Context, ref string) (int64, bool) {
 	if strings.HasPrefix(ref, "id:") {
-		id, err := strconv.ParseInt(strings.TrimPrefix(ref, "id:"), 10, 64)
-		return id, err == nil
+		id := task.RefID(ref)
+		return id, id != 0
 	}
 	var id int64
 	err := d.DB.QueryRow(ctx, `SELECT page_id FROM pages WHERE lower(vanity) = $1`, strings.TrimPrefix(ref, "v:")).Scan(&id)

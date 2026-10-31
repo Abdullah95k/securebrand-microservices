@@ -38,6 +38,8 @@ type Options struct {
 	// RotateDocIDs makes fakefb accept only rotated doc_ids, so the seed
 	// registry is stale until the ids are rediscovered.
 	RotateDocIDs bool
+	// Doers, when set, builds every identity's transport (UseTLS aside).
+	Doers session.DoerFactory
 }
 
 // New starts fakefb and builds the client stack. It is closed via t.Cleanup.
@@ -79,7 +81,10 @@ func New(t testing.TB, o Options) *Env {
 		t.Fatal(err)
 	}
 	var factory session.DoerFactory
-	if !o.UseTLS {
+	switch {
+	case o.Doers != nil:
+		factory = o.Doers
+	case !o.UseTLS:
 		factory = func(transport.Options) (transport.Doer, error) { return transport.NewStd(10 * time.Second), nil }
 	}
 	pool, err := session.NewPool(session.PoolConfig{

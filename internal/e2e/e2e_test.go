@@ -379,3 +379,21 @@ func (s *Stack) runJobWithin(t *testing.T, key, page string, d time.Duration) jo
 	t.Fatalf("job %s did not finish within %s", j.ID, d)
 	return jobView{}
 }
+
+// A page whose HTML names no id (as a few real ones do) is still crawled
+// when it was registered by its numeric id: the dispatcher resolves the id
+// from the reference.
+func TestPageWithoutAnIDInItsHTML(t *testing.T) {
+	s := Start(t, Options{
+		Spec:   fakefb.Spec{Seed: 11, Pages: 1, PostsPerPage: 3, PostSpacing: 20 * time.Hour, MaxComments: 5},
+		Faults: fakefb.Faults{NoPageID: true},
+	})
+	key := s.Key(t, api.ScopeJobsWrite, api.ScopeDataRead)
+	page := s.Fake.World.Pages()[0]
+	j := s.runJobWithin(t, key, strconv.FormatInt(page.ID, 10), 2*time.Minute)
+	posts := count(t, s, `SELECT count(*) FROM posts WHERE page_id = $1`, page.ID)
+	t.Logf("job %s %s: posts %d counters=%v", j.ID, j.Status, posts, j.Counters)
+	if j.Status != "completed" || posts != 3 {
+		t.Fatalf("page registered by id: status=%s posts=%d/3", j.Status, posts)
+	}
+}

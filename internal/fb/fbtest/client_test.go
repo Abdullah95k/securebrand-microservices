@@ -24,7 +24,7 @@ func crawlPage(t *testing.T, env *Env, id *session.Identity, p *fakefb.Page) (ma
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	page, rep := parse.Page(pl.HTML, 0)
+	page, rep := parse.Page(pl.HTML, 0, 0)
 	if !rep.OK() || page.PageId != p.ID || page.Name != p.Name {
 		t.Fatalf("page parse: %+v %+v", page, rep)
 	}

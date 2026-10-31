@@ -63,3 +63,11 @@ func TestRetryAndContinuationCounters(t *testing.T) {
 		t.Fatalf("continuation: %+v", c)
 	}
 }
+
+func TestRefID(t *testing.T) {
+	for ref, want := range map[string]int64{"id:100067000000001": 100067000000001, "v:news.iraq": 0, "id:": 0, "id:x1": 0, "id:-5": 0, "100067000000001": 0} {
+		if got := RefID(ref); got != want {
+			t.Errorf("RefID(%q) = %d, want %d", ref, got, want)
+		}
+	}
+}
