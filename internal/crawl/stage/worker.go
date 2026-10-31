@@ -45,17 +45,22 @@ func (w *Worker) Handle(ctx context.Context, rec *kgo.Record) error {
 	if err := proto.Unmarshal(rec.Value, &t); err != nil {
 		return w.deadLetterRaw(ctx, rec, "undecodable", err.Error())
 	}
-	return w.Run(ctx, &t)
+	return w.run(ctx, &t, rec.Topic)
 }
 
 // Run processes one decoded task (exported for tests and tools).
 func (w *Worker) Run(ctx context.Context, t *taskv1.Task) error {
+	return w.run(ctx, t, "")
+}
+
+// run processes t, read from topic from ("" when not read off a topic).
+func (w *Worker) run(ctx context.Context, t *taskv1.Task, from string) error {
 	d := w.D
 	name := stageNames[t.Kind]
 	lane := topics.LaneName(t.Lane)
 	st, ok := w.Stages[t.Kind]
 	if !ok {
-		return w.deadLetter(ctx, t, "no_stage", "no stage for kind "+t.Kind.String(), nil)
+		return w.deadLetter(ctx, t, from, "no_stage", "no stage for kind "+t.Kind.String(), nil)
 	}
 	if d.Jobs.Cancelled(ctx, t.JobId) {
 		metrics.Tasks.WithLabelValues(name, lane, "cancelled").Inc()
@@ -111,7 +116,7 @@ func (w *Worker) Run(ctx context.Context, t *taskv1.Task) error {
 			metrics.Tasks.WithLabelValues(name, lane, "failed").Inc()
 			slog.Warn("task failed after retries", "stage", name, "job", t.JobId, "task", t.TaskId,
 				"attempts", next.Attempt, "stalls", next.Stalls, "reason", out.Reason)
-			return w.deadLetter(ctx, t, reason, out.Reason, out.Counters)
+			return w.deadLetter(ctx, t, from, reason, out.Reason, out.Counters)
 		}
 		// What the attempt spent after its last saved checkpoint: the saved
 		// part resumes into the retry's counters and is reported when the
@@ -130,7 +135,7 @@ func (w *Worker) Run(ctx context.Context, t *taskv1.Task) error {
 		return w.toRetry(ctx, next, out.Delay)
 	default:
 		metrics.Tasks.WithLabelValues(name, lane, "failed").Inc()
-		return w.deadLetter(ctx, t, "permanent", out.Reason, out.Counters)
+		return w.deadLetter(ctx, t, from, "permanent", out.Reason, out.Counters)
 	}
 }
 
@@ -210,10 +215,25 @@ func (w *Worker) toRetry(ctx context.Context, t *taskv1.Task, delay string) erro
 	return w.D.Producer.ProduceSync(ctx, rec)
 }
 
-func (w *Worker) deadLetter(ctx context.Context, t *taskv1.Task, reason, detail string, c map[string]int64) error {
-	metrics.DLQ.WithLabelValues(stageNames[t.Kind], reason).Inc()
+// origTopic is the x-orig-topic of a dead-lettered task: its kind's work
+// topic, or for a kind without one (which must not panic the consumer) the
+// topic it was read from.
+func origTopic(t *taskv1.Task, from string) string {
+	if topic, ok := topics.LookupTask(t.Kind, t.Lane); ok {
+		return topic
+	}
+	return from
+}
+
+// deadLetter sends t, read from topic from, to the DLQ and finishes it.
+func (w *Worker) deadLetter(ctx context.Context, t *taskv1.Task, from, reason, detail string, c map[string]int64) error {
+	stage, ok := stageNames[t.Kind]
+	if !ok {
+		stage = "unknown"
+	}
+	metrics.DLQ.WithLabelValues(stage, reason).Inc()
 	rec, err := w.D.Producer.Record(topics.DLQ, task.ScopeKey(t), t,
-		kgo.RecordHeader{Key: kafka.HeaderOrigTopic, Value: []byte(topics.Task(t.Kind, t.Lane))},
+		kgo.RecordHeader{Key: kafka.HeaderOrigTopic, Value: []byte(origTopic(t, from))},
 		kgo.RecordHeader{Key: kafka.HeaderReason, Value: []byte(reason)},
 		kgo.RecordHeader{Key: kafka.HeaderError, Value: []byte(truncate(detail, 1000))})
 	if err != nil {

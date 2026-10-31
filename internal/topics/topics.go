@@ -33,13 +33,25 @@ var Entity = []string{Page, Post, Comment, Media}
 // RetryTopics are consumed by the retry relay.
 var RetryTopics = []string{Retry30s, Retry5m, Retry1h}
 
-// Task returns the work topic for a task kind and lane.
+// Task returns the work topic for a task kind and lane. It panics for a kind
+// without one, so use it only for tasks fbs built itself; LookupTask reports
+// that case for tasks read off a topic.
 func Task(kind taskv1.Kind, lane taskv1.Lane) string {
-	if kind == taskv1.Kind_KIND_MEDIA {
-		return TaskMedia
+	topic, ok := LookupTask(kind, lane)
+	if !ok {
+		panic(fmt.Sprintf("topics: unknown kind %v", kind))
 	}
+	return topic
+}
+
+// LookupTask returns the work topic for a task kind and lane, or ok=false
+// for a kind that has none: KIND_UNSPECIFIED, or a value fbs does not know
+// (a newer schema, or a record another service produced onto an fbs topic).
+func LookupTask(kind taskv1.Kind, lane taskv1.Lane) (string, bool) {
 	var stage string
 	switch kind {
+	case taskv1.Kind_KIND_MEDIA:
+		return TaskMedia, true
 	case taskv1.Kind_KIND_PAGE:
 		stage = "page"
 	case taskv1.Kind_KIND_POST:
@@ -47,9 +59,9 @@ func Task(kind taskv1.Kind, lane taskv1.Lane) string {
 	case taskv1.Kind_KIND_THREAD:
 		stage = "thread"
 	default:
-		panic(fmt.Sprintf("topics: unknown kind %v", kind))
+		return "", false
 	}
-	return fmt.Sprintf("fbs.task.%s.%s", stage, LaneName(lane))
+	return fmt.Sprintf("fbs.task.%s.%s", stage, LaneName(lane)), true
 }
 
 // LaneName returns p0/p1/p2.
