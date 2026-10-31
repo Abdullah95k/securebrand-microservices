@@ -181,10 +181,6 @@ func (r *Runner) do(ctx context.Context, page string, id *session.Identity, req 
 	return resp, nil
 }
 
-// errNamesNothing is a page that loaded but names nothing: what Facebook
-// serves logged-out viewers of a page restricted to logged-in ones, or removed.
-var errNamesNothing = errors.New("spike: the page names nothing: restricted to logged-in viewers, or removed")
-
 // loadAttempts is how many identities a page load is tried on.
 const loadAttempts = 2
 
@@ -252,9 +248,8 @@ func (r *Runner) page(ctx context.Context, p PageRef) error {
 	brec.Consent = tok.ConsentWall
 	brec.TokensFound = tokensFound(tok)
 	r.emit(brec)
-	// Deleted, or restricted to logged-in viewers (Facebook serves a page that
-	// names nothing): nothing to measure.
-	if pl.Class == detect.ContentUnavailable || (*brec.OK && htmlx.NamesNothing(pl.HTML)) {
+	// Deleted, or restricted to logged-in viewers: nothing to measure.
+	if pl.Class == detect.ContentUnavailable {
 		r.emit(Record{Type: "timeline", Page: ref, EndReason: "unavailable"})
 		return nil
 	}

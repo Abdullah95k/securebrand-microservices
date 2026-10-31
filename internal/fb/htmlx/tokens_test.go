@@ -100,6 +100,7 @@ func TestNamesNothing(t *testing.T) {
 		"a profile id":  shell + `<script>{"props":{"userID":"100064000000777"}}</script>`,
 		"an app link":   shell + `<meta property="al:android:url" content="fb://profile/100064000000777"/>`,
 		"a page_id key": shell + `<script>{"page_id":"104000000000123"}</script>`,
+		"escaped json":  shell + `<script>require("x","{\"id\":\"123456789012\"}")</script>`,
 	} {
 		if NamesNothing([]byte(page)) {
 			t.Errorf("%s: names something", name)

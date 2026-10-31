@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"net/http"
 	"net/url"
 	"testing"
 	"time"
@@ -120,5 +121,40 @@ func TestCancelledLoadsDoNotRetireAnIdentity(t *testing.T) {
 	}
 	if r := dead.RetireReason(); r != "transport" {
 		t.Fatalf("dead exit: %q", r)
+	}
+}
+
+// serves answers every request with a 200 and body.
+type serves struct {
+	transport.Doer
+	body string
+}
+
+func (s serves) Do(context.Context, *transport.Request) (*transport.Response, error) {
+	return &transport.Response{Status: 200, Header: http.Header{"Content-Type": {"text/html"}}, Body: []byte(s.body)}, nil
+}
+
+// A page that names nothing is unavailable (restricted to logged-in viewers,
+// or removed) and its session tokens are kept; with a login form it is a
+// login wall; a public page and a consent wall are left as they were.
+func TestLoadPagesThatNameNothing(t *testing.T) {
+	const tokens = `<script>{"define":[["LSD",[],{"token":"AVq"},323],["SiteData",[],{"hsi":"7431000000000000001"},317]]}</script>`
+	base, _ := url.Parse("https://www.facebook.com")
+	l := &Loader{Rules: detect.DefaultRules()}
+	for name, c := range map[string]struct {
+		body         string
+		want         detect.Class
+		bootstrapped bool
+	}{
+		"restricted":  {`<html><title>Facebook</title>` + tokens + `</html>`, detect.ContentUnavailable, true},
+		"escaped ids": {tokens + `<script>require("x","{\"id\":\"100064000000777\"}")</script>`, detect.OK, true},
+		"public page": {tokens + `<script>{"user":{"id":"100064000000777"}}</script>`, detect.OK, true},
+		"login page":  {`<form id="login_form"></form>` + tokens, detect.LoginWall, false},
+	} {
+		id := newIdentity(name, proxy.Endpoint{Tier: "isp"}, Fingerprint{}, serves{Doer: transport.NewStd(time.Second), body: c.body}, base, 1000, 10, 0)
+		pl, err := l.Load(context.Background(), id, "https://www.facebook.com/x")
+		if err != nil || pl.Class != c.want || id.Bootstrapped() != c.bootstrapped {
+			t.Errorf("%s: class %v (%v), bootstrapped %v, err %v", name, pl.Class, pl.Reason, id.Bootstrapped(), err)
+		}
 	}
 }

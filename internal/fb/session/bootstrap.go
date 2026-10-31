@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -142,12 +143,32 @@ func (l *Loader) Load(ctx context.Context, id *Identity, rawURL string) (*PageLo
 			}
 			return pl, nil
 		}
+		if !tok.ConsentWall && htmlx.NamesNothing(resp.Body) {
+			// Not the page: either a login page, or what logged-out viewers
+			// get for a page restricted to logged-in ones (age, country) or
+			// removed, whose session tokens are still good.
+			if l.loginPage(resp.Body) {
+				Outcome(id, detect.LoginWall)
+				pl.Class, pl.Reason = detect.LoginWall, "login page"
+				return pl, nil
+			}
+			pl.Class, pl.Reason = detect.ContentUnavailable, "the page names nothing: restricted to logged-in viewers, or removed"
+		}
 		id.SetTokens(tok)
 		Outcome(id, detect.OK)
 		metrics.Bootstraps.WithLabelValues("http", "ok").Inc()
 		return pl, nil
 	}
 	return nil, fmt.Errorf("%w: too many redirects for %s", ErrBootstrap, rawURL)
+}
+
+func (l *Loader) loginPage(body []byte) bool {
+	for _, m := range l.Rules.LoginMarkers {
+		if bytes.Contains(body, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // Bootstrap loads url (usually the target page) with retries on fresh

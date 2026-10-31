@@ -153,7 +153,8 @@ func PageID(html []byte) int64 {
 
 // entityID is the id of something a page's HTML is about (a profile, a
 // post); a public page's HTML is full of them.
-var entityID = regexp.MustCompile(`"(?:id|userID|pageID)"\s*:\s*"\d{5,}"`)
+// It matches inside escaped JSON strings too.
+var entityID = regexp.MustCompile(`\\?"(?:id|userID|pageID)\\?"\s*:\s*\\?"\d{5,}`)
 
 // NamesNothing reports a page HTML that names no profile, page or post at
 // all: what Facebook serves logged-out viewers in place of a page restricted

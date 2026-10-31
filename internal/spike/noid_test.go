@@ -251,7 +251,7 @@ func TestSpikeUnavailablePages(t *testing.T) {
 	// Capture keeps the restricted page and says why.
 	r, env, _ := runner(t, fakefb.Faults{Restricted: true})
 	r.FailDir = t.TempDir()
-	if dirs, err := r.Capture(context.Background(), env.World.Pages()[0].Vanity, t.TempDir(), "x"); !errors.Is(err, errNamesNothing) || len(dirs) != 1 {
+	if dirs, err := r.Capture(context.Background(), env.World.Pages()[0].Vanity, t.TempDir(), "x"); !errors.Is(err, session.ErrBootstrap) || !strings.Contains(err.Error(), "names nothing") || len(dirs) != 1 {
 		t.Fatalf("capture: dirs %v, err %v", dirs, err)
 	}
 }

@@ -8,6 +8,8 @@ import (
 	"math"
 	"sort"
 	"strings"
+
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/detect"
 )
 
 // Thresholds are the Phase 0 go/no-go criteria.
@@ -241,7 +243,7 @@ func summarize(tier string, recs []Record, opt ReportOptions) Summary {
 	s := Summary{Tier: tier, TokensFoundRate: map[string]float64{}, ClassRate: map[string]float64{}, TimelineEnd: map[string]int{},
 		Completeness: map[string]OrderingSummary{}, BytesByQuery: map[string]ByteStats{}, WireByQuery: map[string]ByteStats{},
 		RequestsPerDay: opt.RequestsPerDay}
-	var boots, bootOK, port, portOK, med, medOK int
+	var boots, bootOK, port, portOK, med, medOK, unavailableLoads int
 	tokens := map[string]int{}
 	classes := map[string]int{}
 	var posts, days, expiry []float64
@@ -293,7 +295,9 @@ func summarize(tier string, recs []Record, opt ReportOptions) Summary {
 			if r.Wire > 0 {
 				wire["page_html"] = append(wire["page_html"], float64(r.Wire))
 			}
-			if unavailable[r.Page] {
+			if r.Class == detect.ContentUnavailable.String() {
+				// A deleted or restricted page: says nothing about sessions.
+				unavailableLoads++
 				break
 			}
 			boots++
@@ -404,7 +408,7 @@ func summarize(tier string, recs []Record, opt ReportOptions) Summary {
 	s.MedianMediaExpiryH = quantile(expiry, 0.5)
 
 	// Cost.
-	proxied := s.Requests + boots
+	proxied := s.Requests + boots + unavailableLoads
 	if proxied > 0 {
 		s.WirePerRequest = float64(s.WireBytes) / float64(proxied)
 	}
