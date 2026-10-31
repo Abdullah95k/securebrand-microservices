@@ -8,8 +8,6 @@ import (
 	"math"
 	"sort"
 	"strings"
-
-	"github.com/abdullah95k/securebrand-microservices/internal/fb/detect"
 )
 
 // Thresholds are the Phase 0 go/no-go criteria.
@@ -63,7 +61,8 @@ type Summary struct {
 	BootstrapSuccess float64 `json:"bootstrap_success"`
 	ConsentWalls     int     `json:"consent_walls"`
 	// Unavailable counts pages that are deleted or restricted to logged-in
-	// viewers; they are left out of BootstrapSuccess.
+	// viewers. Their page loads count as traffic only: they are left out of
+	// BootstrapSuccess and timeline depth.
 	Unavailable        int                        `json:"unavailable_pages,omitempty"`
 	TokensFoundRate    map[string]float64         `json:"tokens_found_rate"`
 	Requests           int                        `json:"requests"`
@@ -252,6 +251,15 @@ func summarize(tier string, recs []Record, opt ReportOptions) Summary {
 	walls := map[string]int{}
 	bytes := map[string][]float64{}
 	wire := map[string][]float64{}
+	// Pages that are deleted or restricted to logged-in viewers say nothing
+	// about sessions or timelines: their loads count as traffic only.
+	unavailable := map[string]bool{}
+	for _, r := range recs {
+		if r.Type == "timeline" && r.EndReason == "unavailable" {
+			unavailable[r.Page] = true
+		}
+	}
+	s.Unavailable = len(unavailable)
 	pages := map[string]*pageAgg{}
 	agg := func(p string) *pageAgg {
 		a := pages[p]
@@ -281,10 +289,11 @@ func summarize(tier string, recs []Record, opt ReportOptions) Summary {
 				a.labels = r.Labels
 			}
 		case "bootstrap":
-			if r.Class == detect.ContentUnavailable.String() {
-				// The page is deleted or restricted to logged-in viewers:
-				// it says nothing about whether sessions work.
-				s.Unavailable++
+			s.WireBytes += r.Wire
+			if r.Wire > 0 {
+				wire["page_html"] = append(wire["page_html"], float64(r.Wire))
+			}
+			if unavailable[r.Page] {
 				break
 			}
 			boots++
@@ -300,10 +309,6 @@ func summarize(tier string, recs []Record, opt ReportOptions) Summary {
 				if v {
 					tokens[k]++
 				}
-			}
-			s.WireBytes += r.Wire
-			if r.Wire > 0 {
-				wire["page_html"] = append(wire["page_html"], float64(r.Wire))
 			}
 		case "request":
 			s.Requests++
@@ -321,6 +326,9 @@ func summarize(tier string, recs []Record, opt ReportOptions) Summary {
 			}
 		case "timeline":
 			s.TimelineEnd[r.EndReason]++
+			if r.EndReason == "unavailable" {
+				break
+			}
 			posts = append(posts, float64(r.Posts))
 			days = append(days, r.DaysCovered)
 			a.days = append(a.days, r.DaysCovered)
@@ -517,7 +525,7 @@ func Format(s Summary) string {
 	}
 	fmt.Fprintf(&b, "\npages: %d  requests: %d", s.Pages, s.Requests)
 	if s.Unavailable > 0 {
-		fmt.Fprintf(&b, "  unavailable: %d (deleted, or restricted to logged-in viewers; not counted in bootstrap success)", s.Unavailable)
+		fmt.Fprintf(&b, "  unavailable: %d (deleted, or restricted to logged-in viewers; left out of bootstrap success and depth)", s.Unavailable)
 	}
 	b.WriteString("\n")
 	fmt.Fprintf(&b, "bootstrap success: %.1f%%  consent walls: %d  tokens:", 100*s.BootstrapSuccess, s.ConsentWalls)

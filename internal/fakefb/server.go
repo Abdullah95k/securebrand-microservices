@@ -265,12 +265,14 @@ func (s *Server) page(w http.ResponseWriter, r *http.Request) {
 		consent = false
 	}
 	rd := s.renderer(r)
-	s.World.mu.RLock()
-	body := rd.pageHTML(p, lsd, datr, consent)
-	if s.opts.Faults.Restricted {
+	var body []byte
+	if s.opts.Faults.Restricted && !consent {
 		body = rd.restrictedHTML(lsd)
+	} else {
+		s.World.mu.RLock()
+		body = rd.pageHTML(p, lsd, datr, consent)
+		s.World.mu.RUnlock()
 	}
-	s.World.mu.RUnlock()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(body)
 }

@@ -39,6 +39,9 @@ func (r *Runner) Capture(ctx context.Context, page, dir, name string) ([]string,
 	if pl.Class != detect.OK || !id.Bootstrapped() {
 		return r.keepPage(id, date+"_"+name, pl, fmt.Errorf("%w: %s (%s)", session.ErrBootstrap, pl.Class, pl.Reason))
 	}
+	if htmlx.NamesNothing(pl.HTML) {
+		return r.keepPage(id, date+"_"+name, pl, errNamesNothing)
+	}
 	pg, _ := parse.Page(pl.HTML, 0, task.RefID(ref))
 	if pg == nil {
 		return r.keepPage(id, date+"_"+name, pl, errors.New("spike: page id not found in html"))

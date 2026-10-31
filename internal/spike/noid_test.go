@@ -229,29 +229,29 @@ func TestTrimRetriesAPageLoadOnAFreshIdentity(t *testing.T) {
 	}
 }
 
-// A page restricted to logged-in viewers (Facebook serves its login page)
-// ends unavailable, and is left out of bootstrap success.
-func TestSpikeRestrictedPage(t *testing.T) {
-	r, env, out := runner(t, fakefb.Faults{Restricted: true})
-	p := env.World.Pages()[0]
-	r.Run(context.Background(), []PageRef{{Ref: p.Vanity}})
-	var end string
-	for _, line := range bytes.Split(bytes.TrimSpace(out.Bytes()), []byte("\n")) {
-		var rec Record
-		if err := json.Unmarshal(line, &rec); err != nil {
-			t.Fatal(err)
-		}
-		switch rec.Type {
-		case "bootstrap":
-			if rec.Class != "content_unavailable" {
-				t.Fatalf("bootstrap %+v", rec)
-			}
-		case "timeline":
-			end = rec.EndReason
+// A page restricted to logged-in viewers (Facebook serves a page that names
+// nothing) and a deleted page both end unavailable: their traffic counts,
+// but not toward bootstrap success or timeline depth.
+func TestSpikeUnavailablePages(t *testing.T) {
+	for name, c := range map[string]struct {
+		faults fakefb.Faults
+		page   func(*fakefb.World) string
+	}{
+		"restricted": {fakefb.Faults{Restricted: true}, func(w *fakefb.World) string { return w.Pages()[0].Vanity }},
+		"deleted":    {fakefb.Faults{}, func(*fakefb.World) string { return "id:1" }},
+	} {
+		r, env, out := runner(t, c.faults)
+		r.Run(context.Background(), []PageRef{{Ref: c.page(env.World)}})
+		s, err := Report(bytes.NewReader(out.Bytes()), DefaultThresholds)
+		if err != nil || s.TimelineEnd["unavailable"] != 1 || s.Unavailable != 1 || s.BootstrapSuccess != 0 ||
+			s.MedianDays != 0 || s.WireBytes == 0 || !strings.Contains(Format(s), "unavailable: 1") {
+			t.Fatalf("%s: summary %+v, err %v", name, s, err)
 		}
 	}
-	s, err := Report(bytes.NewReader(out.Bytes()), DefaultThresholds)
-	if err != nil || end != "unavailable" || s.Unavailable != 1 || s.BootstrapSuccess != 0 || !strings.Contains(Format(s), "unavailable: 1") {
-		t.Fatalf("end %q, summary %+v, err %v", end, s, err)
+	// Capture keeps the restricted page and says why.
+	r, env, _ := runner(t, fakefb.Faults{Restricted: true})
+	r.FailDir = t.TempDir()
+	if dirs, err := r.Capture(context.Background(), env.World.Pages()[0].Vanity, t.TempDir(), "x"); !errors.Is(err, errNamesNothing) || len(dirs) != 1 {
+		t.Fatalf("capture: dirs %v, err %v", dirs, err)
 	}
 }

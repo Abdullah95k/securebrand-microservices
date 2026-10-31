@@ -6,8 +6,6 @@ import (
 	"bytes"
 	"regexp"
 	"strings"
-
-	"github.com/abdullah95k/securebrand-microservices/internal/fb/htmlx"
 )
 
 // Class is the outcome category of one request.
@@ -85,30 +83,6 @@ func DefaultRules() Rules {
 		LoginMarkers: [][]byte{[]byte(`id="login_form"`), []byte(`"loginForm"`), []byte(`/login/?next=`), []byte(`login_required`)},
 		BlockMarkers: []([]byte){[]byte(`temporarily blocked`), []byte(`Temporarily Blocked`), []byte(`rate limit`)},
 	}
-}
-
-var (
-	// entityID is the id of something a page's HTML is about (a profile, a
-	// post); a public page's HTML is full of them.
-	entityID = regexp.MustCompile(`"(?:id|userID|pageID)"\s*:\s*"\d{5,}"`)
-)
-
-// empty classifies a page that came back with session tokens but no id of
-// anything it is about: what logged-out viewers get for a page restricted to
-// logged-in ones (age, country) or removed. A public page's HTML is full of
-// profile and post ids. With a login form it is a login wall. A cookie-consent
-// wall, and a page whose tokens only a browser sees, are neither: the loader
-// handles them.
-func (r Rules) empty(body []byte) (Class, string, bool) {
-	if entityID.Match(body) || htmlx.ConsentWall(body) || !htmlx.ExtractTokens(body).Valid() {
-		return OK, "", false
-	}
-	for _, m := range r.LoginMarkers {
-		if bytes.Contains(body, m) {
-			return LoginWall, "login page", true
-		}
-	}
-	return ContentUnavailable, "page names nothing: restricted to logged-in viewers, or removed", true
 }
 
 // Input is everything the classifier looks at.
@@ -194,11 +168,6 @@ func (r Rules) Classify(in Input) (Class, string) {
 		for _, m := range r.BlockMarkers {
 			if bytes.Contains(head, m) {
 				return RateLimited, "block page"
-			}
-		}
-		if in.Status == 200 {
-			if c, reason, ok := r.empty(in.Body); ok {
-				return c, reason
 			}
 		}
 	}

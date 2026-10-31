@@ -17,6 +17,7 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/task"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/detect"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/graphql"
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/htmlx"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/parse"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/kafka"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/metrics"
@@ -85,11 +86,20 @@ func (s *PageStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 			if t.Seq == 0 {
 				_ = d.emitUnavailable(ctx, t, sc)
 			}
-			return done(map[string]int64{"pages_unavailable": 1})
+			c["pages_unavailable"]++
+			return done(c)
 		default:
 			return classOutcome(t, pl.Class, pl.Reason, st.Cursor, c)
 		}
 		if t.Seq == 0 {
+			if htmlx.NamesNothing(pl.HTML) {
+				// Restricted to logged-in viewers (age, country) or removed:
+				// Facebook serves a page that names nothing, not drift.
+				metrics.ParseTotal.WithLabelValues("page_html", "1", "unavailable").Inc()
+				_ = d.emitUnavailable(ctx, t, sc)
+				c["pages_unavailable"]++
+				return done(c)
+			}
 			page, rep := parse.Page(pl.HTML, sc.PageId, 0)
 			for _, f := range rep.Optional {
 				metrics.ParseMissingField.WithLabelValues("page_html", f).Inc()
@@ -199,14 +209,16 @@ func (s *PageStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 		metrics.ParseTotal.WithLabelValues("timeline", "1", "ok").Inc()
 		if tl.NodeNull && st.Pages == 0 && st.Cursor == "" {
 			_ = d.emitUnavailable(ctx, t, sc)
-			return done(map[string]int64{"pages_unavailable": 1})
+			c["pages_unavailable"]++
+			return done(c)
 		}
 		if tl.NoFeed {
 			// The page id names something without a timeline (a new-style
 			// page's older Page object): this page's problem, so not drift,
 			// which would count against the query's breaker.
 			metrics.ParseTotal.WithLabelValues("timeline", "1", "no_feed").Inc()
-			return done(map[string]int64{"pages_no_feed": 1})
+			c["pages_no_feed"]++
+			return done(c)
 		}
 
 		b := d.Producer.NewBatch()

@@ -16,6 +16,7 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/task"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/detect"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/graphql"
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/htmlx"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/parse"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/registry"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/session"
@@ -149,6 +150,9 @@ func (r *Runner) trimPage(ctx context.Context, page string, opt TrimOptions) []T
 	defer r.Pool.Release(id)
 	if pl.Class != detect.OK || !id.Bootstrapped() {
 		return fail("page", fmt.Errorf("%w: %s (%s)", session.ErrBootstrap, pl.Class, pl.Reason))
+	}
+	if htmlx.NamesNothing(pl.HTML) {
+		return fail("page", errNamesNothing)
 	}
 	pg, _ := parse.Page(pl.HTML, 0, task.RefID(ref))
 	if pg == nil {

@@ -2,12 +2,6 @@ package detect
 
 import "testing"
 
-// restrictedShell is the shape of what Facebook served logged-out viewers
-// for three restricted pages in Phase 0: session tokens, no ids.
-const restrictedShell = `<html><title>Facebook</title><script type="application/json">{"require":[["ScheduledServerJS","handle",null,` +
-	`[{"__bbox":{"define":[["LSD",[],{"token":"AVqbxe3J"},323],["SiteData",[],{"hsi":"7431000000000000001","__spin_r":1017000000},317],` +
-	`["CurrentUserInitialData",[],{"USER_ID":"0"},270]]}}]]]}</script></html>`
-
 func TestClassify(t *testing.T) {
 	r := DefaultRules()
 	cases := []struct {
@@ -32,16 +26,6 @@ func TestClassify(t *testing.T) {
 			Body: []byte(`for (;;);{"error":1675004}`), Errors: []GQLError{{Code: 1675004}}, Expect: "graphql"}, RateLimited},
 		{"proxy auth", Input{Status: 407, Expect: "graphql"}, Transport},
 		{"404 page", Input{Status: 404, Expect: "html"}, ContentUnavailable},
-		// A restricted page: session tokens, and no id of anything.
-		{"restricted page", Input{Status: 200, Body: []byte(restrictedShell), Expect: "html"}, ContentUnavailable},
-		{"login page at 200", Input{Status: 200, Body: []byte(`<form id="login_form"></form>` + restrictedShell), Expect: "html"}, LoginWall},
-		// A public page names what it shows (bare "login_form" strings are in
-		// Facebook's page code too).
-		{"public page", Input{Status: 200, Body: []byte(restrictedShell + `<script>{"login_form":1,"user":{"__typename":"User","id":"100064000000777"}}</script>`),
-			Expect: "html"}, OK},
-		{"consent wall", Input{Status: 200, Body: []byte(`<div data-cookiebanner="banner"></div>` + restrictedShell), Expect: "html"}, OK},
-		// Tokens only a browser sees: the loader's browser fallback takes it.
-		{"javascript challenge", Input{Status: 200, Body: []byte(`<html><script>challenge()</script></html>`), Expect: "html"}, OK},
 		{"unknown error", Input{Status: 200, Errors: []GQLError{{Code: 99}}, Expect: "graphql"}, SoftError},
 		// A real timeline page streams field errors beside its posts.
 		{"partial field error", Input{Status: 200, HasData: true, Expect: "graphql",

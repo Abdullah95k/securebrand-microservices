@@ -82,18 +82,13 @@ func ExtractTokens(html []byte) Tokens {
 			p.set(&t, string(m[1]))
 		}
 	}
-	t.ConsentWall = ConsentWall(html)
-	return t
-}
-
-// ConsentWall reports whether html is behind Facebook's cookie-consent wall.
-func ConsentWall(html []byte) bool {
 	for _, m := range consentMarkers {
 		if bytes.Contains(html, m) {
-			return true
+			t.ConsentWall = true
+			break
 		}
 	}
-	return false
+	return t
 }
 
 // The page's id, the profile's first. A page made in the new Pages
@@ -154,6 +149,18 @@ func PageID(html []byte) int64 {
 		}
 	}
 	return 0
+}
+
+// entityID is the id of something a page's HTML is about (a profile, a
+// post); a public page's HTML is full of them.
+var entityID = regexp.MustCompile(`"(?:id|userID|pageID)"\s*:\s*"\d{5,}"`)
+
+// NamesNothing reports a page HTML that names no profile, page or post at
+// all: what Facebook serves logged-out viewers in place of a page restricted
+// to logged-in ones (age, country) or removed, with session tokens and
+// nothing else. A public page's HTML holds dozens of ids.
+func NamesNothing(html []byte) bool {
+	return !entityID.Match(html) && PageID(html) == 0
 }
 
 // PageIDHints counts, for each key PageID reads and a few it does not, the
