@@ -220,12 +220,33 @@ type Reaper struct {
 	DB       *pgxpool.Pool
 	Jobs     *jobs.Tracker
 	Producer *kafka.Producer
-	After    time.Duration
+	// After is how long a job may go without progress. While other jobs of
+	// its lane progress, its tasks are taken to be queued behind theirs, not
+	// lost, and it is left alone until MaxAge.
+	After  time.Duration
+	MaxAge time.Duration
+}
+
+// stalled decides what becomes of a job without progress: failed when its
+// accounting state is gone, partial when its tasks look lost (no progress
+// for after while its lane made none either, or older than maxAge).
+func stalled(st jobs.Status, laneActive, overdue bool, after time.Duration, now time.Time) (final, reason string) {
+	switch {
+	case st.Spawned == 0:
+		return "failed", "job state lost"
+	case st.Pending > 0 && now.Sub(st.LastActivity) > after && (!laneActive || overdue):
+		return "partial", "stalled with pending tasks"
+	}
+	return "", ""
 }
 
 func (r *Reaper) Tick(ctx context.Context) error {
-	rows, err := r.DB.Query(ctx, `SELECT job_id, kind, page_ref, created_at FROM jobs
-		WHERE status IN ('running','cancelling') AND created_at < now() - $1::interval LIMIT 500`, r.After.String())
+	maxAge := r.MaxAge
+	if maxAge < r.After {
+		maxAge = r.After
+	}
+	rows, err := r.DB.Query(ctx, `SELECT job_id, kind, page_ref, created_at, lane, created_at < now() - $2::interval FROM jobs
+		WHERE status IN ('running','cancelling') AND created_at < now() - $1::interval LIMIT 500`, r.After.String(), maxAge.String())
 	if err != nil {
 		return err
 	}
@@ -234,26 +255,47 @@ func (r *Reaper) Tick(ctx context.Context) error {
 		kind    string
 		ref     string
 		created time.Time
+		lane    int16
+		overdue bool
+		st      jobs.Status
 	}
 	list, err := pgx.CollectRows(rows, func(c pgx.CollectableRow) (row, error) {
 		var x row
-		return x, c.Scan(&x.id, &x.kind, &x.ref, &x.created)
+		return x, c.Scan(&x.id, &x.kind, &x.ref, &x.created, &x.lane, &x.overdue)
 	})
 	if err != nil {
 		return err
 	}
+	// A lane progresses while its jobs finish, or their tasks do.
+	active := map[int16]bool{}
+	lrows, err := r.DB.Query(ctx, `SELECT DISTINCT lane FROM jobs WHERE finished_at > now() - $1::interval`, r.After.String())
+	if err != nil {
+		return err
+	}
+	lanes, err := pgx.CollectRows(lrows, pgx.RowTo[int16])
+	if err != nil {
+		return err
+	}
+	for _, l := range lanes {
+		active[l] = true
+	}
+	now := time.Now()
+	var known []row
 	for _, j := range list {
 		st, err := r.Jobs.Status(ctx, j.id.String())
 		if err != nil {
 			continue
 		}
-		var final, reason string
-		switch {
-		case st.Spawned == 0:
-			final, reason = "failed", "job state lost"
-		case st.Pending > 0 && time.Since(st.LastActivity) > r.After:
-			final, reason = "partial", "stalled with pending tasks"
-		default:
+		j.st = st
+		known = append(known, j)
+		if st.Spawned > 0 && now.Sub(st.LastActivity) <= r.After {
+			active[j.lane] = true
+		}
+	}
+	for _, j := range known {
+		st := j.st
+		final, reason := stalled(st, active[j.lane], j.overdue, r.After, now)
+		if final == "" {
 			continue
 		}
 		eb, _ := json.Marshal(map[string]any{"message": reason, "pending_tasks": st.Pending})

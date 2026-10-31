@@ -76,8 +76,12 @@ fb:
   # Cap applied to every identity (requests per second) and burst.
   identity_rps: 0.33
   identity_burst: 2
-  identity_max_requests_min: 150
-  identity_max_requests_max: 400
+  # Requests an identity serves before it is replaced. Each replacement
+  # starts with a page load, the request Facebook walls (the pilot retired
+  # 580 identities for this in 7 hours, more than for any block); GraphQL
+  # was not rate limited more on long-lived ones.
+  identity_max_requests_min: 400
+  identity_max_requests_max: 800
   # Per page, fleet wide (Redis GCRA).
   page_rps: 3
   page_rps_p0: 6
@@ -183,6 +187,12 @@ crawler:
   freshness_p0: 15m
   freshness_p1: 6h
   suppression_refresh: 60s
+  # A scheduled run reads the page's HTML (its profile: name, followers)
+  # once per profile_refresh; in between it goes straight to the timeline.
+  # Page loads are what Facebook walls when a logged-out session views many
+  # pages (the pilot: 48% of ISP page loads walled, ~0% of GraphQL). 0 reads
+  # the HTML on every run.
+  profile_refresh: 24h
 
 limits:            # defaults applied to jobs that do not override them
   max_age_days: 365
@@ -203,7 +213,11 @@ scheduler:
   jitter: 0.1
   finalizer_interval: 2s
   finalize_timeout: 10m
+  # A job without progress for reaper_after is closed as partial, unless
+  # other jobs of its lane are progressing (its tasks are queued behind
+  # theirs, as in a burst of backfills); then only past reaper_max_age.
   reaper_after: 30m
+  reaper_max_age: 24h
   partition_months_ahead: 3
   incremental_overlap: 24h
   # Adaptive tiers for pages registered without schedule.interval_hours:

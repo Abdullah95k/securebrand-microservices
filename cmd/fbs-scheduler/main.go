@@ -69,7 +69,7 @@ func runScheduler(ctx context.Context, cfg *config.Config) error {
 	fin := &scheduler.Finalizer{DB: db, Jobs: tracker, Producer: producer, Timeout: cfg.Scheduler.FinalizeTimeout, Adaptive: adaptive,
 		Deletions: scheduler.DeletionsFrom(cfg)}
 	planner := &scheduler.Planner{DB: db, Dispatch: disp, Cfg: cfg, Adaptive: adaptive}
-	reaper := &scheduler.Reaper{DB: db, Jobs: tracker, Producer: producer, After: cfg.Scheduler.ReaperAfter}
+	reaper := &scheduler.Reaper{DB: db, Jobs: tracker, Producer: producer, After: cfg.Scheduler.ReaperAfter, MaxAge: cfg.Scheduler.ReaperMaxAge}
 	maint := &scheduler.Maintenance{DB: db, Cfg: cfg}
 	eraser := &gdpr.Eraser{DB: db, S3: s3, Producer: producer}
 
