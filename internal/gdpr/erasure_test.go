@@ -216,7 +216,7 @@ func TestErasureReachesEverything(t *testing.T) {
 	for q, want := range map[string]int{
 		`SELECT count(*) FROM erasure_requests WHERE status = 'done'`:     2,
 		`SELECT count(*) FROM erasure_requests WHERE input ? 'author_id'`: 0,
-		`SELECT count(*) FROM media WHERE status = 'deleted'`:             1,
+		`SELECT count(*) FROM media`:                                      0,
 		`SELECT count(*) FROM comments WHERE comment_id = 10 AND text_ranges->0->>'entity_id' IS NULL
 			AND text_ranges->0->>'name' IS NULL AND text_ranges->1->>'entity_id' = '100002' AND text = 'Erased: thanks'`: 1,
 		`SELECT count(*) FROM posts WHERE post_id = 1 AND text_ranges->0->>'entity_id' IS NULL AND text_ranges->0->>'offset' = '0'`: 1,
@@ -224,8 +224,9 @@ func TestErasureReachesEverything(t *testing.T) {
 		`SELECT count(*) FROM post_metrics WHERE page_id = 8`:                              0,
 		`SELECT count(*) FROM post_metrics WHERE page_id = 9`:                              1,
 		`SELECT count(*) FROM comments WHERE page_id = 9`:                                  2,
-		`SELECT count(*) FROM media WHERE alt_text IS NOT NULL`:                            0,
 		`SELECT count(*) FROM page_schedule WHERE enabled`:                                 0,
+		`SELECT count(*) FROM page_schedule WHERE page_ref LIKE 'v:%'`:                     0,
+		`SELECT count(*) FROM page_schedule WHERE page_ref = 'id:8'`:                       1,
 		`SELECT count(*) FROM jobs WHERE page_ref = 'id:8'`:                                1,
 		`SELECT count(*) FROM pages WHERE page_id = 8 AND vanity IS NULL AND name IS NULL`: 1,
 	} {
@@ -237,7 +238,8 @@ func TestErasureReachesEverything(t *testing.T) {
 }
 
 // An erasure that couldn't send a media's deletion event leaves the row as
-// it was, so the retried erasure finds the media again and sends it.
+// it was, so the retried erasure finds the media again, sends it, and
+// deletes the row.
 func TestErasureMediaEventsAreNotLost(t *testing.T) {
 	db := testenv.Postgres(t)
 	ctx := context.Background()
@@ -277,7 +279,7 @@ func TestErasureMediaEventsAreNotLost(t *testing.T) {
 	if err := (&Eraser{DB: db, Producer: up}).Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if m, r := status(); m != "deleted" || r != "done" {
+	if m, r := status(); m != "" || r != "done" {
 		t.Fatalf("after the retry: media %q, request %q", m, r)
 	}
 }

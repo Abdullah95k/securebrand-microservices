@@ -119,11 +119,7 @@ func (e *Emitter) scrubMentions(rs []*fbv1.TextRange) {
 		gdpr.ScrubMentions(rs)
 		return
 	}
-	for _, r := range rs {
-		if r.EntityId != "" && gdpr.PersonEntity(r.EntityType) && e.Suppression.AuthorSuppressed(gdpr.AuthorKey(e.HMACKey, r.EntityId)) {
-			gdpr.ScrubMentions([]*fbv1.TextRange{r})
-		}
-	}
+	gdpr.ScrubSuppressedMentions(e.Suppression, rs, gdpr.MentionedKeys(e.HMACKey, rs))
 }
 
 // Privatize sets the author key, applies pseudonymisation and redacts

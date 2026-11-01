@@ -34,30 +34,13 @@ type Writer struct {
 	HMACKey []byte
 }
 
-// mentioned returns the author keys of the people rs mention.
+// mentioned returns the author keys of the people rs mention (none
+// without HMACKey).
 func (w *Writer) mentioned(rs []*fbv1.TextRange) [][]byte {
 	if len(w.HMACKey) == 0 {
 		return nil
 	}
-	var out [][]byte
-	for _, r := range rs {
-		if r.EntityId != "" && gdpr.PersonEntity(r.EntityType) {
-			out = append(out, gdpr.AuthorKey(w.HMACKey, r.EntityId))
-		}
-	}
-	return out
-}
-
-// scrubErased clears the mentions in rs of the authors sup holds.
-func (w *Writer) scrubErased(sup *gdpr.Suppression, rs []*fbv1.TextRange) {
-	if len(w.HMACKey) == 0 {
-		return
-	}
-	for _, r := range rs {
-		if r.EntityId != "" && gdpr.PersonEntity(r.EntityType) && sup.AuthorSuppressed(gdpr.AuthorKey(w.HMACKey, r.EntityId)) {
-			gdpr.ScrubMentions([]*fbv1.TextRange{r})
-		}
-	}
+	return gdpr.MentionedKeys(w.HMACKey, rs)
 }
 
 // latest keeps the most recently observed message per key.
@@ -120,10 +103,12 @@ func (w *Writer) Posts(ctx context.Context, posts []*fbv1.Post) error {
 	start := time.Now()
 	pageIDs := make([]int64, len(posts))
 	months := make([]time.Time, len(posts))
+	mentions := make([][][]byte, len(posts))
 	var mentioned [][]byte
 	for i, p := range posts {
 		pageIDs[i], months[i] = p.PageId, p.CreatedAt.AsTime()
-		mentioned = append(mentioned, w.mentioned(p.TextRanges)...)
+		mentions[i] = w.mentioned(p.TextRanges)
+		mentioned = append(mentioned, mentions[i]...)
 	}
 	var written int64
 	err := w.withPartitions(ctx, "posts", months, func() error {
@@ -136,9 +121,9 @@ func (w *Writer) Posts(ctx context.Context, posts []*fbv1.Post) error {
 				return err
 			}
 			rows := make([][]any, 0, len(posts))
-			for _, p := range posts {
+			for i, p := range posts {
 				if !sup.PageSuppressed(p.PageId) {
-					w.scrubErased(sup, p.TextRanges)
+					gdpr.ScrubSuppressedMentions(sup, p.TextRanges, mentions[i])
 					rows = append(rows, postRow(p))
 				}
 			}
@@ -273,9 +258,11 @@ func (w *Writer) Comments(ctx context.Context, cs []*fbv1.Comment) error {
 	keys := make([][]byte, 0, len(cs))
 	pageIDs := make([]int64, 0, len(cs))
 	var months []time.Time
+	mentions := make(map[*fbv1.Comment][][]byte, len(cs))
 	for _, c := range cs {
 		keys = append(keys, c.GetAuthor().GetAuthorKey())
-		keys = append(keys, w.mentioned(c.TextRanges)...)
+		mentions[c] = w.mentioned(c.TextRanges)
+		keys = append(keys, mentions[c]...)
 		pageIDs = append(pageIDs, c.PageId)
 		if c.PostCreatedAt != nil {
 			months = append(months, c.PostCreatedAt.AsTime())
@@ -302,7 +289,7 @@ func (w *Writer) Comments(ctx context.Context, cs []*fbv1.Comment) error {
 				if !c.Redacted && sup.AuthorSuppressed(c.GetAuthor().GetAuthorKey()) {
 					gdpr.Redact(c)
 				}
-				w.scrubErased(sup, c.TextRanges)
+				gdpr.ScrubSuppressedMentions(sup, c.TextRanges, mentions[c])
 				if c.Status == fbv1.CommentStatus_COMMENT_STATUS_DELETED {
 					dels = append(dels, c)
 					continue
@@ -506,10 +493,19 @@ func (w *Writer) Pages(ctx context.Context, ps []*fbv1.Page) error {
 				hash = p.Obs.ContentHash
 			}
 			// A vanity belongs to one page at a time: one another page held
-			// (it gave it up and this one took it) moves to this page, the
-			// newest observation, instead of failing the unique index.
+			// (it gave it up and this one took it) moves to this page,
+			// instead of failing the unique index. Unless that page was seen
+			// with it later: then this observation is the stale one (a
+			// redelivery, a lagging crawler) and leaves the vanity alone.
 			if vanity != "" {
-				if _, err := tx.Exec(ctx, `UPDATE pages SET vanity = NULL WHERE lower(vanity) = lower($1) AND page_id <> $2`,
+				var newer bool
+				if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pages WHERE lower(vanity) = lower($1) AND page_id <> $2
+					AND last_scraped_at > $3)`, vanity, p.PageId, seen).Scan(&newer); err != nil {
+					return err
+				}
+				if newer {
+					vanity = ""
+				} else if _, err := tx.Exec(ctx, `UPDATE pages SET vanity = NULL WHERE lower(vanity) = lower($1) AND page_id <> $2`,
 					vanity, p.PageId); err != nil {
 					return err
 				}

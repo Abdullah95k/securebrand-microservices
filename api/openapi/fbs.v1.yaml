@@ -478,7 +478,7 @@ components:
         fb_media_id: {type: string}
         kind: {type: string}
         variant: {type: string, enum: [original, sd, hd, thumbnail, link_preview]}
-        status: {type: string, enum: [discovered, ready, deleted, expired, failed, skipped]}
+        status: {type: string, enum: [discovered, stored, ready, deleted, expired, source_expired, failed, skipped]}
         s3_key: {type: string}
         size_bytes: {type: integer, format: int64}
         sha256: {type: string}

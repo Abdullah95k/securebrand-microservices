@@ -113,8 +113,8 @@ func TestMaintenancePurgesAndGauges(t *testing.T) {
 	// Media handed over and deleted stays as a tombstone, without what ties
 	// it to a person: a later scrape must not download it again.
 	if _, err := db.Exec(ctx, `INSERT INTO media (media_id, fb_media_id, variant, kind, owner_type, comment_id, source_url, alt_text,
-		author_key, status, discovered_at) VALUES ('00000000-0000-0000-0000-000000000003', 'c', 'orig', 'photo', 'comment', 7,
-		'https://cdn/c.jpg', 'a person', '\x01', 'deleted', now() - interval '40 days')`); err != nil {
+		author_key, sha256, s3_key, status, discovered_at) VALUES ('00000000-0000-0000-0000-000000000003', 'c', 'orig', 'photo',
+		'comment', 7, 'https://cdn/c.jpg', 'a person', '\x01', '\x02', 'media/00/c.jpg', 'deleted', now() - interval '40 days')`); err != nil {
 		t.Fatal(err)
 	}
 	if err := (&Maintenance{DB: db, Cfg: cfg}).Tick(ctx); err != nil {
@@ -134,7 +134,8 @@ func TestMaintenancePurgesAndGauges(t *testing.T) {
 	var status string
 	var identified bool
 	if err := db.QueryRow(ctx, `SELECT status, fb_media_id <> '' OR source_url IS NOT NULL OR alt_text IS NOT NULL
-		OR comment_id IS NOT NULL OR author_key IS NOT NULL FROM media WHERE media_id = '00000000-0000-0000-0000-000000000003'`).
+		OR comment_id IS NOT NULL OR author_key IS NOT NULL OR sha256 IS NOT NULL OR s3_key IS NOT NULL
+		FROM media WHERE media_id = '00000000-0000-0000-0000-000000000003'`).
 		Scan(&status, &identified); err != nil || status != "deleted" || identified {
 		t.Fatalf("tombstone: %q, still identifying: %v (%v)", status, identified, err)
 	}

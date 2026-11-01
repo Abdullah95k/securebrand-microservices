@@ -113,14 +113,16 @@ func (c *Consumer) Run(ctx context.Context) error {
 
 // isDataError reports Postgres refusing a record for what it holds:
 // writing the same record again can never succeed. That is a data exception
-// (SQLSTATE class 22), a constraint the record breaks (class 23: a NOT NULL
-// field it lacks, say), or a value too large for its index (54000).
+// (SQLSTATE class 22), a NOT NULL field it lacks (23502), or a value too
+// large for its index (54000). Other integrity errors can pass: a unique
+// violation between two writers racing, the check violation of a partition
+// not created yet (withPartitions).
 func isDataError(err error) bool {
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) {
 		return false
 	}
-	return strings.HasPrefix(pgErr.Code, "22") || strings.HasPrefix(pgErr.Code, "23") || pgErr.Code == "54000"
+	return strings.HasPrefix(pgErr.Code, "22") || pgErr.Code == "23502" || pgErr.Code == "54000"
 }
 
 // flushSkipping writes recs. A record Postgres refuses for what it holds

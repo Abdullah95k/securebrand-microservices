@@ -174,7 +174,8 @@ Symptom: `fbs_parse_total{outcome="drift"}` (alert `FbsSchemaDrift`), or a field
   are purged after `privacy.retention.media_rows_days`. Rows of media handed
   over (`deleted`, `expired`) stay then, as the record that it was, so a later
   scrape doesn't download and announce it again; they lose the URL, the alt
-  text, the comment and the author key.
+  text, the comment, the author key, the hash and the object key. An erasure
+  deletes its subject's media rows outright.
 
 ## Erasure requests
 

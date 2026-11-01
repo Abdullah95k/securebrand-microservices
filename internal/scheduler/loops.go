@@ -414,13 +414,13 @@ func (m *Maintenance) Tick(ctx context.Context) error {
 			AND discovered_at < now() - make_interval(days => $1) LIMIT 5000)`, ret.MediaRowsDays},
 		// Rows of media handed over stay, as the record that it was (a later
 		// scrape would download and announce it again under the same event
-		// id), but without what ties them to a person.
+		// id), but without what ties them to a person or its content. An
+		// empty fb_media_id marks a row done (media_unscrubbed_idx); the
+		// persister leaves these rows alone.
 		{`UPDATE media SET fb_media_id = '', source_url = NULL, alt_text = NULL, comment_id = NULL, owner_id = NULL,
-			author_key = NULL, last_error = NULL
-			WHERE media_id IN (SELECT media_id FROM media WHERE status IN ('deleted','expired')
-				AND discovered_at < now() - make_interval(days => $1)
-				AND (fb_media_id <> '' OR source_url IS NOT NULL OR alt_text IS NOT NULL OR comment_id IS NOT NULL
-					OR owner_id IS NOT NULL OR author_key IS NOT NULL) LIMIT 5000)`, ret.MediaRowsDays},
+			author_key = NULL, sha256 = NULL, s3_key = NULL, last_error = NULL
+			WHERE media_id IN (SELECT media_id FROM media WHERE status IN ('deleted','expired') AND fb_media_id <> ''
+				AND discovered_at < now() - make_interval(days => $1) LIMIT 5000)`, ret.MediaRowsDays},
 		{`DELETE FROM comment_authors WHERE author_key IN (SELECT author_key FROM comment_authors
 			WHERE last_seen_at < now() - make_interval(days => $1) LIMIT 5000)`, ret.AuthorsInactiveDays},
 		{`DELETE FROM registry_sync_runs WHERE started_at < now() - make_interval(days => $1)`, ret.JobsDays},

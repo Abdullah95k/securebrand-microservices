@@ -141,7 +141,7 @@ func (d *Downloader) Handle(ctx context.Context, rec *kgo.Record) error {
 	}
 	now := time.Now().UTC()
 	deleteAfter := now.Add(d.TTL)
-	var suppressed, taken bool
+	var suppressed, taken, shared bool
 	err = pgx.BeginFunc(ctx, d.DB, func(tx pgx.Tx) error {
 		sup, err := gdpr.Guard(ctx, tx, [][]byte{m.AuthorKey}, []int64{m.PageId})
 		if err != nil {
@@ -166,13 +166,30 @@ func (d *Downloader) Handle(ctx context.Context, rec *kgo.Record) error {
 			m.MediaId, m.FbMediaId, m.Variant, kind, m.OwnerType, nz(m.OwnerId), nz(m.PostId), nz(m.PageId), m.CommentId, m.SourceUrl,
 			m.Width, m.Height, m.DurationMs, obj.ContentType, m.AltText, obj.Bucket, obj.Key, obj.Size, obj.Sha256, deleteAfter, now,
 			m.AuthorKey)
-		taken = err == nil && tag.RowsAffected() == 0
-		return err
+		if err != nil || tag.RowsAffected() > 0 {
+			return err
+		}
+		// Taken: the object this copy uploaded is the row's own only if
+		// the row is stored or ready under the same key (same media id and
+		// type); otherwise it is left over.
+		taken = true
+		var status, key string
+		if err := tx.QueryRow(ctx, `SELECT status, coalesce(s3_key, '') FROM media WHERE media_id = $1`, m.MediaId).
+			Scan(&status, &key); err != nil {
+			return err
+		}
+		shared = (status == "stored" || status == "ready") && key == obj.Key
+		return nil
 	})
 	if err != nil {
 		return err
 	}
 	if taken {
+		if !shared {
+			if err := d.S3.RemoveObject(ctx, obj.Bucket, obj.Key, minio.RemoveObjectOptions{}); err != nil {
+				return err
+			}
+		}
 		metrics.MediaOutcome.WithLabelValues(kind, "skipped").Inc()
 		return nil
 	}

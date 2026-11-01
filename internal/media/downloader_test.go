@@ -356,7 +356,8 @@ func TestDownloadErrorsHideTheSignature(t *testing.T) {
 }
 
 // Another copy of the task that handed the media over while this one
-// downloaded: its row stands, and this copy announces nothing.
+// downloaded: its row stands, this copy announces nothing, and the object
+// it uploaded is removed unless it is that row's own (same key).
 func TestSecondDownloadDoesNotTakeOverTheRow(t *testing.T) {
 	db := testenv.Postgres(t)
 	ctx := context.Background()
@@ -365,23 +366,36 @@ func TestSecondDownloadDoesNotTakeOverTheRow(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer down.Close()
-	const id = "00000000-0000-0000-0000-0000000000e4"
-	cdn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// The other copy finishes meanwhile.
-		if _, err := db.Exec(r.Context(), `INSERT INTO media (media_id, fb_media_id, variant, kind, owner_type, status, s3_bucket, s3_key)
-			VALUES ($1, 'fe4', 'orig', 'photo', 'comment', 'ready', 'media', 'media/00/x.jpg')`, id); err != nil {
-			t.Error(err)
+	s3 := fakeS3(t)
+	for _, c := range []struct {
+		id, otherKey string
+		kept         bool
+	}{
+		{"00000000-0000-0000-0000-0000000000e4", "media/00/00000000-0000-0000-0000-0000000000e4.jpg", true},
+		{"00000000-0000-0000-0000-0000000000e6", "media/00/00000000-0000-0000-0000-0000000000e6.png", false},
+	} {
+		cdn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// The other copy finishes meanwhile.
+			if _, err := db.Exec(r.Context(), `INSERT INTO media (media_id, fb_media_id, variant, kind, owner_type, status, s3_bucket, s3_key)
+				VALUES ($1, 'f', 'orig', 'photo', 'comment', 'ready', 'media', $2)`, c.id, c.otherKey); err != nil {
+				t.Error(err)
+			}
+			w.Header().Set("Content-Type", "image/jpeg")
+			_, _ = w.Write([]byte("jpeg bytes"))
+		}))
+		d := &Downloader{DB: db, S3: s3, Bucket: "media", Producer: down, HTTP: cdn.Client(), TTL: time.Hour, MaxBytes: 1 << 20}
+		err := d.Handle(ctx, mediaTask(t, c.id, cdn.URL+"/p.jpg", nil))
+		cdn.Close()
+		if err != nil {
+			t.Fatalf("the second copy tried to announce: %v", err)
 		}
-		w.Header().Set("Content-Type", "image/jpeg")
-		_, _ = w.Write([]byte("jpeg bytes"))
-	}))
-	defer cdn.Close()
-	d := &Downloader{DB: db, S3: fakeS3(t), Bucket: "media", Producer: down, HTTP: cdn.Client(), TTL: time.Hour, MaxBytes: 1 << 20}
-	if err := d.Handle(ctx, mediaTask(t, id, cdn.URL+"/p.jpg", nil)); err != nil {
-		t.Fatalf("the second copy tried to announce: %v", err)
-	}
-	if s := mediaStatus(t, db, id); s != "ready" {
-		t.Fatalf("the handed-over row became %q", s)
+		if s := mediaStatus(t, db, c.id); s != "ready" {
+			t.Fatalf("the handed-over row became %q", s)
+		}
+		_, statErr := s3.StatObject(ctx, "media", "media/00/"+c.id+".jpg", minio.StatObjectOptions{})
+		if kept := statErr == nil; kept != c.kept {
+			t.Errorf("%s: this copy's object kept %v, want %v", c.id, kept, c.kept)
+		}
 	}
 }
 

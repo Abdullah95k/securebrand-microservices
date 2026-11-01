@@ -516,6 +516,11 @@ func TestRecordsThatBreakConstraints(t *testing.T) {
 	if err := w.Pages(ctx, []*fbv1.Page{{Obs: obs(now, "b"), PageId: 2, Vanity: "Acme", Name: "B"}}); err != nil {
 		t.Fatalf("a page taking another page's vanity: %v", err)
 	}
+	// A stale record of page 1 with the vanity (a redelivery) doesn't take
+	// it back.
+	if err := w.Pages(ctx, []*fbv1.Page{{Obs: obs(now.Add(-2*time.Hour), "a0"), PageId: 1, Vanity: "acme", Name: "A"}}); err != nil {
+		t.Fatalf("a stale record: %v", err)
+	}
 	var holder int64
 	if err := db.QueryRow(ctx, `SELECT page_id FROM pages WHERE lower(vanity) = 'acme'`).Scan(&holder); err != nil || holder != 2 {
 		t.Fatalf("vanity held by %d (%v), want page 2", holder, err)
