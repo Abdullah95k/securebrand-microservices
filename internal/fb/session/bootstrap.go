@@ -90,7 +90,7 @@ func (l *Loader) Load(ctx context.Context, id *Identity, rawURL string) (*PageLo
 			Header: NavHeaders(id.FP, l.AcceptLanguage, site)})
 		if err != nil {
 			if ctx.Err() == nil { // a cancelled load says nothing about the exit
-				Outcome(id, detect.Transport)
+				PageOutcome(id, detect.Transport)
 			}
 			metrics.FBRequests.WithLabelValues("page_html", detect.Transport.String(), id.Endpoint.Tier).Inc()
 			return nil, fmt.Errorf("session: load %s: %w: %w", target, ErrTransport, err)
@@ -114,7 +114,7 @@ func (l *Loader) Load(ctx context.Context, id *Identity, rawURL string) (*PageLo
 		}
 		pl := &PageLoad{URL: target, Status: resp.Status, HTML: resp.Body, Class: cls, Reason: reason, Bytes: total}
 		if cls != detect.OK {
-			Outcome(id, cls)
+			PageOutcome(id, cls)
 			return pl, nil
 		}
 		tok := htmlx.ExtractTokens(resp.Body)
@@ -139,7 +139,7 @@ func (l *Loader) Load(ctx context.Context, id *Identity, rawURL string) (*PageLo
 					pl.Reason = "no tokens in html; browser: " + err.Error()
 				}
 			}
-			Outcome(id, detect.SoftError)
+			PageOutcome(id, detect.SoftError)
 			pl.Class = detect.SoftError
 			if pl.Reason == "" {
 				pl.Reason = "no tokens in html"
@@ -147,7 +147,7 @@ func (l *Loader) Load(ctx context.Context, id *Identity, rawURL string) (*PageLo
 			return pl, nil
 		}
 		id.SetTokens(tok)
-		Outcome(id, detect.OK)
+		PageOutcome(id, detect.OK)
 		if !tok.ConsentWall && htmlx.NamesNothing(resp.Body) {
 			// Not the page: what logged-out viewers get for a page
 			// restricted to logged-in ones (age, country) or removed. The

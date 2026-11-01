@@ -57,6 +57,25 @@ func (d *Deps) profileFresh(sc *taskv1.PageScope) bool {
 	return d.now().Sub(sc.ProfileSeenAt.AsTime()) < d.Cfg.Crawler.ProfileRefresh
 }
 
+// readProfile reports whether the page task t reads the page's HTML for
+// its profile, counting why not: the profile is fresh (profile_skips), or
+// the identity already has tokens and its exit can't load a page now
+// (profile_deferred: it paces page loads, or backs off after a walled one;
+// a walled profile read would retire an identity that serves GraphQL).
+func (d *Deps) readProfile(t *taskv1.Task, sc *taskv1.PageScope, id *session.Identity, c map[string]int64) bool {
+	switch {
+	case t.Seq != 0:
+		return false
+	case d.profileFresh(sc):
+		c["profile_skips"]++
+		return false
+	case id.Bootstrapped() && d.Proxies != nil && !d.Proxies.TakePageLoad(id.Endpoint):
+		c["profile_deferred"]++
+		return false
+	}
+	return true
+}
+
 func (d *Deps) now() time.Time {
 	if d.Now != nil {
 		return d.Now()
@@ -101,15 +120,21 @@ func retry(t *taskv1.Task, cursor, delay, reason string, c map[string]int64) Out
 
 // noIdentity retries a task that got no identity. When every exit of its
 // tiers is cooling down behind its breaker (2m, doubling up to 30m), the
-// task waits 5 minutes and the wait is not held against it: 30s retries
-// would dead-letter it before the exits come back.
+// task waits 5 minutes; when the exits only pace their page loads (a new
+// identity starts with one), 30 seconds. Neither wait is held against the
+// task: short retries would dead-letter it before the exits come back.
 func noIdentity(t *taskv1.Task, err error, c map[string]int64) Outcome {
-	if errors.Is(err, proxy.ErrTierOpen) {
-		o := retry(t, "", "5m", "no identity: "+err.Error(), c)
-		o.Waiting = true
-		return o
+	var o Outcome
+	switch {
+	case errors.Is(err, proxy.ErrTierOpen):
+		o = retry(t, "", "5m", "no identity: "+err.Error(), c)
+	case errors.Is(err, proxy.ErrExitsPaced):
+		o = retry(t, "", "30s", "no identity: "+err.Error(), c)
+	default:
+		return retry(t, "", "30s", "no identity: "+err.Error(), c)
 	}
-	return retry(t, "", "30s", "no identity: "+err.Error(), c)
+	o.Waiting = true
+	return o
 }
 
 // Stage runs one task kind.

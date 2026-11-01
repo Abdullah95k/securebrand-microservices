@@ -158,3 +158,46 @@ func TestLoadPagesThatNameNothing(t *testing.T) {
 		}
 	}
 }
+
+// Walls on page loads pause the exit's page loads but leave its breaker
+// alone, so identities that already have tokens keep serving GraphQL there;
+// GraphQL blocks still open it.
+func TestPageLoadWallsLeaveTheExitServing(t *testing.T) {
+	proxies, err := proxy.New(config.Proxy{
+		Tiers:     []config.ProxyTier{{Name: "isp", Kind: "static_list", Endpoints: []string{"http://isp.proxy.example:10001"}}},
+		Breaker:   breaker.Config{MinEvents: 2, OpenRate: 0.5, Cooldown: time.Hour},
+		PageLoads: config.PageLoads{Interval: time.Minute, Backoff: time.Hour, MaxBackoff: time.Hour},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fpBytes, _ := configs.FS.ReadFile("fingerprints.yaml")
+	fps, err := LoadFingerprints(fpBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool, err := NewPool(PoolConfig{BaseURL: "https://www.facebook.com", Profile: "chrome_146", IdentityRPS: 1, IdentityBurst: 1,
+		MaxRequestsMin: 1000, MaxRequestsMax: 1001, MaxPerTier: 4}, proxies,
+		fps, func(transport.Options) (transport.Doer, error) { return transport.NewStd(time.Second), nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := pool.Acquire(context.Background(), "isp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 5 {
+		PageOutcome(id, detect.LoginWall)
+	}
+	if proxies.IsOpen(id.Endpoint) {
+		t.Fatal("page-load walls opened the exit")
+	}
+	if proxies.TakePageLoad(id.Endpoint) {
+		t.Fatal("a walled exit must back off its page loads")
+	}
+	Outcome(id, detect.RateLimited)
+	Outcome(id, detect.RateLimited)
+	if !proxies.IsOpen(id.Endpoint) {
+		t.Fatal("GraphQL blocks must open the exit")
+	}
+}

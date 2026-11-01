@@ -148,6 +148,17 @@ fb:
       cooldown: 2m
       max_cooldown: 30m
       probe_successes: 3
+    # Page loads (HTML) are what Facebook walls for logged-out sessions that
+    # view many pages; GraphQL is rarely limited (the pilot: ~80% of ISP page
+    # loads walled after a day, almost no GraphQL). Each static exit loads at
+    # most one page per interval. After a walled or failed page load it loads
+    # none for backoff, doubling up to max_backoff; a page that loads resets
+    # it. Page-load walls don't count against the exit's breaker, so its
+    # sessions keep serving GraphQL. Per crawler process. Zeros turn it off.
+    page_loads:
+      interval: 2m
+      backoff: 15m
+      max_backoff: 2h
   # Circuit breaker per (query, doc_id): when responses keep failing to parse
   # (schema drift) or the doc_id is rejected, stop sending that query (tasks
   # retry later) instead of spending requests until a registry or parser
