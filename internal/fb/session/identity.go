@@ -238,6 +238,21 @@ func (id *Identity) coolingDown() bool {
 	return time.Now().Before(id.cooldown)
 }
 
+// saved returns id's session to keep across a restart: false when it is
+// retired, has no tokens, or is on a gateway (whose sticky session expires).
+func (id *Identity) saved() (Saved, bool) {
+	id.mu.Lock()
+	defer id.mu.Unlock()
+	if id.retired != "" || !id.tokens.Valid() || (id.Endpoint.Exit == "" && id.Endpoint.URL != "") {
+		return Saved{}, false
+	}
+	return Saved{
+		ID: id.ID, Tier: id.Endpoint.Tier, Exit: id.Endpoint.Exit, Profile: id.FP.Profile,
+		SessionID: id.sessionID, Req: id.req.Load(), Requests: id.requests, MaxRequests: id.maxRequests,
+		Tokens: id.tokens, Bootstrapped: id.bootstrapped, Cookies: id.Doer.Cookies(id.Base), SavedAt: time.Now(),
+	}, true
+}
+
 // Snapshot serialises the identity so another pod can rebuild it on the
 // same sticky exit (used if cursors turn out to be session-bound).
 type Snapshot struct {

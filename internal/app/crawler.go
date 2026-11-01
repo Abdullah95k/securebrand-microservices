@@ -102,9 +102,17 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 		IdentityRPS: cfg.FB.IdentityRPS, IdentityBurst: cfg.FB.IdentityBurst,
 		MaxRequestsMin: cfg.FB.IdentityMaxRequestsMin, MaxRequestsMax: cfg.FB.IdentityMaxRequestsMax,
 		MaxPerTier: max(16, slots*len(cfg.Crawler.Stages)*13/10),
+		Store:      &session.RedisStore{R: rdb, NS: cfg.Kafka.TopicPrefix},
 	}, proxies, fps, o.DoerFactory)
 	if err != nil {
 		return nil, err
+	}
+	// The sessions the last crawler saved when it stopped (SaveSessions):
+	// resuming them spares a page load on every exit at once.
+	if n, err := pool.Resume(ctx); err != nil {
+		slog.Warn("saved sessions not resumed", "resumed", n, "err", err)
+	} else {
+		slog.Info("saved sessions resumed", "sessions", n)
 	}
 	rules := detect.DefaultRules()
 	gql := &graphql.Client{
@@ -144,6 +152,8 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 	c.Components = []run.Func{
 		func(ctx context.Context) error { return reg.Run(ctx, cfg.FB.RegistryRefresh) },
 		func(ctx context.Context) error { return supp.Run(ctx, cfg.Crawler.SuppressionRefresh) },
+		// Sessions of crawlers that stop after this one started.
+		func(ctx context.Context) error { return pool.RunResume(ctx, time.Minute) },
 	}
 	// The reporter feeds both AIMD (block rate) and the traffic budget.
 	if cfg.FB.AIMD.Enabled || cfg.Scheduler.Budget.Enabled {
@@ -244,6 +254,16 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 		c.Components = append(c.Components, gate.Run)
 	}
 	return c, nil
+}
+
+// SaveSessions keeps the crawler's idle sessions and its exits' page-load
+// pacing for the next crawler to resume. Call it once the crawler stopped.
+func (c *Crawler) SaveSessions(ctx context.Context) {
+	if n, err := c.Deps.Pool.Save(ctx); err != nil {
+		slog.Warn("sessions not saved", "err", err)
+	} else {
+		slog.Info("sessions saved for the next start", "sessions", n)
+	}
 }
 
 // laneScheduler shares a stage's slots between its lanes, or returns nil

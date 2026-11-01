@@ -257,6 +257,25 @@ func (p *Pool) ObservePageLoad(ep Endpoint, c detect.Class) {
 	}
 }
 
+// Resume returns the endpoint of exit on tier, to rebuild there a session
+// saved before a restart (session.Pool.Resume). It is false when tier no
+// longer has that exit, or its bucket is cooling down. Only static exits and
+// direct egress resume: a gateway's sticky sessions expire.
+func (p *Pool) Resume(tier, exit string) (Endpoint, bool) {
+	switch t := p.tiers[tier].(type) {
+	case *staticList:
+		for i, e := range t.exits {
+			if e == exit {
+				ep := t.endpoint(i)
+				return ep, !p.IsOpen(ep)
+			}
+		}
+	case direct:
+		return Endpoint{Tier: t.name}, exit == ""
+	}
+	return Endpoint{}, false
+}
+
 // staticBucket is the /24 of an IPv4 endpoint (/48 for IPv6). An endpoint
 // named by hostname is its host and port: providers that sell static IPs
 // behind one hostname give each IP its own port, so one breaker per host
@@ -317,13 +336,16 @@ func (s *staticList) Next(allow func(Endpoint) bool) (Endpoint, error) {
 	n := uint64(len(s.endpoints))
 	start := s.next.Add(1) - 1
 	for k := uint64(0); k < n; k++ {
-		i := (start + k) % n
-		ep := Endpoint{Tier: s.name, URL: s.endpoints[i], Country: s.country, Bucket: s.buckets[i], Exit: s.exits[i]}
+		ep := s.endpoint(int((start + k) % n))
 		if allow(ep) {
 			return ep, nil
 		}
 	}
 	return Endpoint{}, ErrTierOpen
+}
+
+func (s *staticList) endpoint(i int) Endpoint {
+	return Endpoint{Tier: s.name, URL: s.endpoints[i], Country: s.country, Bucket: s.buckets[i], Exit: s.exits[i]}
 }
 
 // gateway is a rotating residential gateway: the exit IP is chosen by the

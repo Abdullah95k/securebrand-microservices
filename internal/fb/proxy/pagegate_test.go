@@ -209,3 +209,89 @@ func TestProxyConfigIsValidated(t *testing.T) {
 		t.Fatalf("a direct tier keeps its name: %+v %v", ep, err)
 	}
 }
+
+// The pacing a crawler leaves when it stops carries over to the next: an
+// exit backing off after a walled page load, or waiting out its interval,
+// still waits after a restart. A wait longer than the config allows (it
+// changed) is cut to it, and a restored wait never shortens one running.
+func TestPageGateStateCarriesOverARestart(t *testing.T) {
+	before, c := gatedPool(t, pilotGate)
+	walled, _ := before.Next("isp")
+	before.ObservePageLoad(walled, detect.LoginWall)
+	paced, _ := before.Next("isp")
+	state := before.PageGateState()
+	if len(state) != 2 || state[walled.Exit].Backoff != 15*time.Minute {
+		t.Fatalf("%+v", state)
+	}
+
+	after, c2 := gatedPool(t, pilotGate)
+	c2.t = c.t.Add(time.Minute)
+	after.RestorePageGate(state)
+	if ok, why := after.PageLoad(walled); ok || why != "backoff" {
+		t.Fatalf("walled exit: %v %q", ok, why)
+	}
+	if ok, why := after.PageLoad(paced); ok || why != "paced" {
+		t.Fatalf("paced exit: %v %q", ok, why)
+	}
+	c2.add(time.Minute)
+	if ok, _ := after.PageLoad(paced); !ok {
+		t.Fatal("the interval outlasts the restart")
+	}
+	// The backoff level carries over too: the next wall doubles it.
+	c2.add(15 * time.Minute)
+	if ok, _ := after.PageLoad(walled); !ok {
+		t.Fatal("the pause outlasts its backoff")
+	}
+	after.ObservePageLoad(walled, detect.LoginWall)
+	c2.add(29 * time.Minute)
+	if ok, _ := after.PageLoad(walled); ok {
+		t.Fatal("the backoff level is lost in the restart")
+	}
+
+	// A wait past what the config allows is cut to it; one that ends
+	// sooner than the wait running leaves it be.
+	shorter, c3 := gatedPool(t, pilotGate)
+	long := map[string]ExitState{walled.Exit: {PausedUntil: c3.t.Add(10 * time.Hour), Backoff: 10 * time.Hour},
+		paced.Exit: {Next: c3.t.Add(10 * time.Hour)}, "isp|gone:1": {PausedUntil: c3.t.Add(time.Hour)}}
+	shorter.RestorePageGate(long)
+	c3.add(pilotGate.Interval + time.Second)
+	if ok, _ := shorter.PageLoad(paced); !ok {
+		t.Fatal("a restored interval outlasts fb.proxy.page_loads.interval")
+	}
+	c3.add(pilotGate.MaxBackoff)
+	if ok, _ := shorter.PageLoad(walled); !ok {
+		t.Fatal("a restored pause outlasts max_backoff")
+	}
+	shorter.ObservePageLoad(walled, detect.LoginWall) // paused for max_backoff (the level was capped)
+	shorter.RestorePageGate(map[string]ExitState{walled.Exit: {PausedUntil: c3.t.Add(time.Minute)}})
+	c3.add(2 * time.Minute)
+	if ok, _ := shorter.PageLoad(walled); ok {
+		t.Fatal("a restored pause shortened the one running")
+	}
+}
+
+// A saved session's exit is found again by name, unless it is cooling down
+// or gone; a gateway's sessions do not resume, direct egress's do.
+func TestResumeFindsASavedSessionsExit(t *testing.T) {
+	p, _ := gatedPool(t, pilotGate)
+	ep, _ := p.Next("isp")
+	got, ok := p.Resume("isp", ep.Exit)
+	if !ok || got != ep {
+		t.Fatalf("%+v %v, want %+v", got, ok, ep)
+	}
+	if _, ok := p.Resume("isp", "isp|isp.proxy.example:10009"); ok {
+		t.Fatal("an exit no longer configured resumes")
+	}
+	if _, ok := p.Resume("res", ""); ok {
+		t.Fatal("a gateway session resumes")
+	}
+	if got, ok := p.Resume("direct", ""); !ok || got.Tier != "direct" {
+		t.Fatal("a direct session does not resume")
+	}
+	for range 4 {
+		p.Observe(ep, detect.LoginWall)
+	}
+	if _, ok := p.Resume("isp", ep.Exit); ok {
+		t.Fatal("a session resumes on an exit cooling down")
+	}
+}
