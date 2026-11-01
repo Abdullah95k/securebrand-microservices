@@ -21,6 +21,9 @@ type State struct {
 	ConsecutiveOld int32  `json:"consecutive_old,omitempty"`
 	NewestSeenUnix int64  `json:"newest_seen,omitempty"`
 	ItemsSeen      int64  `json:"items_seen,omitempty"`
+	// NewSeen counts the items newer than the newest one stored before the
+	// pass (all of them without one).
+	NewSeen int64 `json:"new_seen,omitempty"`
 	// Walls counts login walls hit at WallCursor on distinct identities.
 	Walls      int    `json:"walls,omitempty"`
 	WallCursor string `json:"wall_cursor,omitempty"`
@@ -104,6 +107,13 @@ type Lease struct {
 // Acquire claims scope for owner (the task lineage). The same lineage may
 // re-acquire its own lease (redelivery after a crash). The lease is kept
 // alive until Release.
+//
+// So a segment redelivered while its first run is still going (a partition
+// moved in a rebalance and the old owner overran its drain timeout) runs
+// twice for a while. That costs requests, not correctness: both resume from
+// the same checkpoint, the persister keeps one copy of what both emit, the
+// continuation and children have deterministic ids that job accounting
+// counts once, and IsDone skips the later of two finished runs.
 func (s *Store) Acquire(ctx context.Context, scope, owner string, ttl time.Duration) (*Lease, bool, error) {
 	k := "lease:" + scope
 	ok, err := s.r.SetNX(ctx, k, owner, ttl).Result()
@@ -169,6 +179,31 @@ func (s *Store) GetPost(ctx context.Context, postID int64) (PostCache, bool) {
 func (s *Store) SetPost(ctx context.Context, postID int64, pc PostCache) error {
 	b, _ := json.Marshal(pc)
 	return s.r.Set(ctx, "pc:"+strconv.FormatInt(postID, 10), b, cacheTTL).Err()
+}
+
+// MarkIncomplete records that some of a post's comments were not collected
+// after its pass ended: a reply thread was cut short or dead-lettered. The
+// post's next pass reads it whole (see Incomplete). Each mark is distinct,
+// so a pass clears only the mark it began with.
+func (s *Store) MarkIncomplete(ctx context.Context, postID int64) error {
+	return s.r.Set(ctx, "pi:"+strconv.FormatInt(postID, 10), strconv.FormatInt(time.Now().UnixNano(), 10), cacheTTL).Err()
+}
+
+// Incomplete returns the post's mark ("" for none).
+func (s *Store) Incomplete(ctx context.Context, postID int64) string {
+	v, _ := s.r.Get(ctx, "pi:"+strconv.FormatInt(postID, 10)).Result()
+	return v
+}
+
+var clearMarkScript = redis.NewScript(`
+if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end
+return 0
+`)
+
+// ClearIncomplete removes the mark if it is still the one a whole read of
+// the post began with: one set since (a thread of that read lost too) stays.
+func (s *Store) ClearIncomplete(ctx context.Context, postID int64, mark string) error {
+	return clearMarkScript.Run(ctx, s.r, []string{"pi:" + strconv.FormatInt(postID, 10)}, mark).Err()
 }
 
 // GetThread returns the reply count collected last time for a comment.

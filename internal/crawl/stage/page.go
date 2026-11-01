@@ -305,11 +305,7 @@ timeline:
 			state = "truncated"
 			c["timelines_truncated"]++
 		}
-		var newest time.Time
-		if st.NewestSeenUnix > 0 {
-			newest = time.Unix(st.NewestSeenUnix, 0).UTC()
-		}
-		if err := d.savePageWatermark(ctx, sc.PageId, newest, oldest, state, truncated, mode == fbv1.CrawlMode_CRAWL_MODE_FULL); err != nil {
+		if err := d.savePageWatermark(ctx, sc.PageId, passNewest(st, mode, truncated != ""), oldest, state, truncated, mode == fbv1.CrawlMode_CRAWL_MODE_FULL); err != nil {
 			return retry(t, st.Cursor, "30s", "watermark: "+err.Error(), c)
 		}
 		return done(c)
@@ -344,7 +340,9 @@ func (s *PageStage) commentsTask(ctx context.Context, t *taskv1.Task, mode fbv1.
 	cmode := fbv1.CrawlMode_CRAWL_MODE_FULL
 	if mode == fbv1.CrawlMode_CRAWL_MODE_INCREMENTAL {
 		if prev, ok := s.D.Ckpt.GetPost(ctx, p.PostId); ok {
-			if reported <= prev.Reported && prev.ThreadsComplete {
+			// A post one of whose reply threads was lost is never skipped;
+			// PostStage reads it whole.
+			if reported <= prev.Reported && prev.ThreadsComplete && s.D.Ckpt.Incomplete(ctx, p.PostId) == "" {
 				return nil, jobs.PostSkipped
 			}
 			cmode = fbv1.CrawlMode_CRAWL_MODE_INCREMENTAL
@@ -367,6 +365,19 @@ func (d *Deps) emitUnavailable(ctx context.Context, t *taskv1.Task, sc *taskv1.P
 		return err
 	}
 	return b.Wait(ctx)
+}
+
+// passNewest is the newest post time a finished timeline pass records as
+// the page's watermark (zero: leave it). An incremental pass cut short by
+// walls didn't reach its old watermark: the posts between where it stopped
+// and the watermark are still unread, so the watermark stays and the next
+// pass reads back to it again. (A pass stopped by the job's max_posts
+// advances it: the posts past the cap are left out on purpose.)
+func passNewest(st checkpoint.State, mode fbv1.CrawlMode, truncated bool) time.Time {
+	if st.NewestSeenUnix <= 0 || truncated && mode == fbv1.CrawlMode_CRAWL_MODE_INCREMENTAL {
+		return time.Time{}
+	}
+	return time.Unix(st.NewestSeenUnix, 0).UTC()
 }
 
 // wallTruncates records a login wall at cursor and reports whether it has

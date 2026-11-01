@@ -173,7 +173,7 @@ func (c *Consumer) Run(ctx context.Context) error {
 			if stop {
 				return
 			}
-			e, psem := c.tr.add(r)
+			e, psem, pctx := c.tr.add(r, handlerCtx)
 			if !acquire(ctx, c.global) {
 				stop = true
 				return
@@ -201,7 +201,7 @@ func (c *Consumer) Run(ctx context.Context) error {
 				}()
 				// A record abandoned at shutdown is not done: leaving its
 				// offset uncommitted hands it to the partition's next owner.
-				if c.process(handlerCtx, r) {
+				if c.process(pctx, r) {
 					c.tr.markDone(e)
 				}
 			}()

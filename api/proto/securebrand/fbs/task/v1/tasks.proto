@@ -72,6 +72,12 @@ message PostScope {
   // INCREMENTAL: newest comment time already stored.
   google.protobuf.Timestamp comments_watermark = 7;
   int64 comments_seen = 8;
+  // INCREMENTAL: comments newer than comments_watermark found by the
+  // pass's earlier segments.
+  int64 new_seen = 9;
+  // The post's incomplete mark (a lost reply thread) this pass found when
+  // it began; the pass clears it if it reads the post whole.
+  string incomplete_mark = 10;
 }
 
 message ThreadScope {

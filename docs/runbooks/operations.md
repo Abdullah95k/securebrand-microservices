@@ -230,6 +230,7 @@ The timeline scan re-reads posts younger than `scheduler.incremental_overlap` (2
 
 - **Backoff:** each refresh that finds nothing new doubles the post's interval, up to 2^`max_backoff`.
 - **Recrawls:** posts with at least `recrawl_min_comments` (20) comments get a full recrawl at 7 and 30 days, to pick up edits and deletions (next section).
+- **Missed replies:** an incremental read takes a post's newest comments and stops at older ones, so it can't see replies added to an old comment. When the post's count grew more than the new comments it found, it spawns a recrawl (`recrawls_spawned`). A post one of whose reply threads was cut short by walls or dead-lettered is read whole on its next pass.
 - **Signal:** `fbs_post_refreshes_total{kind="refresh"|"recrawl"}`.
 - **Cleanup:** rows of posts past every window, and of pages no longer scheduled, are deleted hourly.
 

@@ -177,13 +177,13 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 	for _, s := range stages {
 		s = strings.TrimSpace(s)
 		if s == "retry" {
-			relay := &stage.RetryRelay{Producer: producer}
-			cons, err := kafka.NewConsumer(kafka.ConsumerConfig{ClientConfig: kcfg, Group: "fbs-retry-relay",
-				Topics: topics.RetryTopics, MaxInflight: 64, MaxInflightPerPartition: 1, DrainTimeout: 5 * time.Second}, relay.Handle)
+			relays, err := stage.RetryRelays(kcfg, producer)
 			if err != nil {
 				return nil, err
 			}
-			c.Components = append(c.Components, cons.Run)
+			for _, r := range relays {
+				c.Components = append(c.Components, r.Run)
+			}
 			continue
 		}
 		kind, ok := kinds[s]

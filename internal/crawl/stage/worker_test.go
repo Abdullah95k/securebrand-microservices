@@ -2,14 +2,17 @@ package stage
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	fbv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fb/v1"
 	taskv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fbs/task/v1"
 	"github.com/abdullah95k/securebrand-microservices/internal/config"
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/checkpoint"
+	"github.com/abdullah95k/securebrand-microservices/internal/crawl/jobs"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/detect"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/htmlx"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/proxy"
@@ -232,5 +235,36 @@ func TestTierForEscalatesByStalls(t *testing.T) {
 	pool.Observe(ep, detect.RateLimited)
 	if got := d.tierFor("comments", 0); got != "res" {
 		t.Fatalf("isp cooling down: %s", got)
+	}
+}
+
+// Only a task the job never spawned is let through; any other failure to
+// record a task done is retried, or the job would hang.
+func TestIgnoreUnspawned(t *testing.T) {
+	if err := ignoreUnspawned(fmt.Errorf("%w: task x", jobs.ErrNeverSpawned)); err != nil {
+		t.Fatalf("never spawned: %v", err)
+	}
+	if err := ignoreUnspawned(errors.New("dial tcp: connection refused")); err == nil {
+		t.Fatal("a Redis error was swallowed")
+	}
+	if ignoreUnspawned(nil) != nil {
+		t.Fatal("nil")
+	}
+}
+
+func TestPassNewest(t *testing.T) {
+	st := checkpoint.State{NewestSeenUnix: 1700000000}
+	inc, full := fbv1.CrawlMode_CRAWL_MODE_INCREMENTAL, fbv1.CrawlMode_CRAWL_MODE_FULL
+	if got := passNewest(st, inc, false); got.Unix() != 1700000000 {
+		t.Errorf("a whole incremental pass: %v", got)
+	}
+	if got := passNewest(st, inc, true); !got.IsZero() {
+		t.Errorf("an incremental pass cut short must leave the watermark: %v", got)
+	}
+	if got := passNewest(st, full, true); got.Unix() != 1700000000 {
+		t.Errorf("a full pass cut short still records what it saw: %v", got)
+	}
+	if got := passNewest(checkpoint.State{}, full, false); !got.IsZero() {
+		t.Errorf("nothing seen: %v", got)
 	}
 }
