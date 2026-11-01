@@ -91,8 +91,12 @@ func (e *Emitter) Post(ctx context.Context, b *kafka.Batch, src Source, p *fbv1.
 }
 
 // Comment applies privacy rules and publishes a comment. It returns false
-// when the comment was redacted (its media must not be downloaded).
+// when the comment was redacted (its media must not be downloaded). A
+// comment of an erased page is not published at all, as its post isn't.
 func (e *Emitter) Comment(ctx context.Context, b *kafka.Batch, src Source, c *fbv1.Comment) (bool, error) {
+	if e.Suppression.PageSuppressed(c.PageId) {
+		return false, nil
+	}
 	keep := e.Privatize(c)
 	e.stamp(src, "comment:"+strconv.FormatInt(c.CommentId, 10), c, func(o *fbv1.Observation) { c.Obs = o })
 	return keep, b.AddProto(ctx, topics.Comment, strconv.FormatInt(c.PostId, 10), c)

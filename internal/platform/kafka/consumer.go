@@ -209,7 +209,7 @@ func (c *Consumer) Run(ctx context.Context) error {
 				// revoked while it waited for capacity, is not done: leaving
 				// its offset uncommitted hands it to the partition's next
 				// owner.
-				if pctx.Err() == nil && c.process(pctx, r) {
+				if pctx.Err() == nil && c.tr.start(e, r) && c.process(pctx, r) {
 					c.tr.markDone(e)
 				}
 			}()
@@ -286,6 +286,7 @@ func (c *Consumer) call(ctx context.Context, r *kgo.Record) (err error) {
 		if p := recover(); p != nil {
 			slog.Error("kafka: handler panicked", "group", c.cfg.Group, "topic", r.Topic, "partition", r.Partition,
 				"offset", r.Offset, "panic", fmt.Sprint(p), "stack", string(debug.Stack()))
+			metrics.KafkaHandlerPanics.WithLabelValues(c.cfg.Group).Inc()
 			err = fmt.Errorf("handler panic: %v", p)
 		}
 	}()
@@ -325,8 +326,10 @@ func (c *Consumer) onAssigned(_ context.Context, _ *kgo.Client, assigned map[str
 }
 
 func (c *Consumer) onRevoked(ctx context.Context, _ *kgo.Client, revoked map[string][]int32) {
-	// Give in-flight records of the revoked partitions a short window to
-	// finish so the new owner does not redo them, then commit what is done.
+	// No record of the revoked partitions starts any more; those running get
+	// a short window to finish so the new owner does not redo them, then
+	// what is done is committed.
+	c.tr.disown(revoked)
 	deadline := time.Now().Add(15 * time.Second)
 	for !c.drained.Load() && c.tr.pending(revoked) > 0 && time.Now().Before(deadline) {
 		time.Sleep(100 * time.Millisecond)

@@ -77,3 +77,29 @@ func TestTrackerRefusesRecordsOfRevokedPartitions(t *testing.T) {
 		t.Fatal("a record of a partition never assigned was accepted")
 	}
 }
+
+// A revoke waits only for records running, and a record accepted before
+// the revoke but still waiting for capacity doesn't start once its
+// partition is disowned.
+func TestRevokedRecordsWaitingForCapacityDoNotStart(t *testing.T) {
+	tr := newTracker(10)
+	tr.assign(map[string][]int32{"t": {0}})
+	running := &kgo.Record{Topic: "t", Partition: 0, Offset: 1}
+	waiting := &kgo.Record{Topic: "t", Partition: 0, Offset: 2}
+	e1, _, _ := tr.add(running, context.Background())
+	e2, _, _ := tr.add(waiting, context.Background())
+	if !tr.start(e1, running) {
+		t.Fatal("a record of an owned partition starts")
+	}
+	only := map[string][]int32{"t": {0}}
+	if n := tr.pending(only); n != 1 {
+		t.Fatalf("pending %d: only the running record counts", n)
+	}
+	tr.disown(only)
+	if tr.start(e2, waiting) {
+		t.Fatal("a record of a disowned partition started")
+	}
+	if n := tr.pending(only); n != 1 {
+		t.Fatalf("pending %d after the revoke began", n)
+	}
+}

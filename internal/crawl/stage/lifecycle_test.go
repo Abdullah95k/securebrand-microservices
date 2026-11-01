@@ -43,8 +43,9 @@ func postTask(job string, postID int64) *taskv1.Task {
 	return task.NewPost(page, fbv1.CrawlMode_CRAWL_MODE_INCREMENTAL, &taskv1.PostScope{PostId: postID, PageId: 9})
 }
 
-// A dead-lettered task that is replayed (fbctl dlq replay) runs again: it is
-// counted for its job, not marked done.
+// A dead-lettered task is done like a finished one (a redelivery or a
+// parked copy is skipped), but a replay of it (fbctl dlq replay, which
+// marks the record) runs again.
 func TestReplayedDeadLetterRuns(t *testing.T) {
 	d, _ := workerDeps(t)
 	ctx := context.Background()
@@ -60,13 +61,21 @@ func TestReplayedDeadLetterRuns(t *testing.T) {
 	if err := d.Jobs.Spawn(ctx, "job-replay", pt.TaskId); err != nil {
 		t.Fatal(err)
 	}
-	for range 2 {
-		if err := w.Run(ctx, proto.Clone(pt).(*taskv1.Task)); err != nil {
+	v, err := proto.Marshal(pt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rec := range []*kgo.Record{
+		{Value: v}, // dead-lettered
+		{Value: v}, // redelivered: skipped
+		{Value: v, Headers: []kgo.RecordHeader{{Key: kafka.HeaderReplay, Value: []byte("1")}}}, // replayed: runs
+	} {
+		if err := w.Handle(ctx, rec); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if runs != 2 {
-		t.Fatalf("the replayed dead letter ran %d time(s) in all, want 2", runs)
+		t.Fatalf("ran %d time(s), want 2: the dead letter and its replay", runs)
 	}
 	if st, err := d.Jobs.Status(ctx, "job-replay"); err != nil || st.Pending != 0 {
 		t.Fatalf("job accounting: %+v, %v", st, err)
@@ -148,9 +157,9 @@ func TestSecondCopyOfATaskWaitsForTheFirst(t *testing.T) {
 	}
 }
 
-// Reply threads and post continuations left unread by a cancel mark their
-// post, so its next pass reads it whole; a post whose pass never began
-// keeps its state.
+// Reply threads, post continuations and first segments that read something
+// mark their post when a cancel stops them, so its next pass reads it whole;
+// a post whose pass never began keeps its state.
 func TestCancelMarksPostsLeftUnread(t *testing.T) {
 	d, _ := workerDeps(t)
 	ctx := context.Background()
@@ -165,30 +174,50 @@ func TestCancelMarksPostsLeftUnread(t *testing.T) {
 	thread := task.NewThread(postTask("job-cancelled", 33), fbv1.CrawlMode_CRAWL_MODE_INCREMENTAL,
 		&taskv1.ThreadScope{PostId: 33, PageId: 9, CommentId: 1})
 	stopped := postTask("job-running", 34) // its job not cancelled: the stage stops on a cancel
-	for _, tk := range []*taskv1.Task{notBegun, continuation, thread, stopped} {
+	stopped.Cursor = "read a page"
+	retried := postTask("job-cancelled", 35) // a first segment retried after it read a page
+	if err := d.Ckpt.Save(ctx, retried.LineageId, 0, checkpoint.State{Pages: 1, Cursor: "c"}); err != nil {
+		t.Fatal(err)
+	}
+	stoppedEarly := postTask("job-running", 36) // stopped before reading anything
+	for _, tk := range []*taskv1.Task{notBegun, continuation, thread, stopped, retried, stoppedEarly} {
 		if err := w.Run(ctx, tk); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for post, want := range map[int64]bool{31: false, 32: true, 33: true, 34: true} {
+	for post, want := range map[int64]bool{31: false, 32: true, 33: true, 34: true, 35: true, 36: false} {
 		if got := d.Ckpt.Incomplete(ctx, post) != ""; got != want {
 			t.Errorf("post %d marked %v, want %v", post, got, want)
 		}
 	}
 }
 
-// Post and thread tasks of an erased page stop before anything is requested
-// (no identity here: reaching for one would panic).
-func TestErasedPageStopsPostAndThreadTasks(t *testing.T) {
-	s := gdpr.NewSuppression(nil)
-	s.Add(nil, 9)
-	d := &Deps{Suppression: s}
-	pt := postTask("job", 1)
+// Tasks of an erased page stop before their stage runs (backlog, retries,
+// continuations, threads queued before the erasure).
+func TestErasedPageTasksDoNotRun(t *testing.T) {
+	d, _ := workerDeps(t)
+	ctx := context.Background()
+	d.Suppression = gdpr.NewSuppression(nil)
+	d.Suppression.Add(nil, 9)
+	ran := stageFunc(func(context.Context, *taskv1.Task) Outcome {
+		t.Error("a task of an erased page ran")
+		return done(nil)
+	})
+	w := &Worker{D: d, LeaseTTL: time.Minute, Stages: map[taskv1.Kind]Stage{
+		taskv1.Kind_KIND_PAGE: ran, taskv1.Kind_KIND_POST: ran, taskv1.Kind_KIND_THREAD: ran}}
+	pt := postTask("job-erased", 1)
+	page := task.NewPage("job-erased", taskv1.Lane_LANE_P1, fbv1.CrawlMode_CRAWL_MODE_INCREMENTAL, "v:brand", 9, "", nil)
 	thread := task.NewThread(pt, fbv1.CrawlMode_CRAWL_MODE_INCREMENTAL, &taskv1.ThreadScope{PostId: 1, PageId: 9, CommentId: 2})
-	for _, out := range []Outcome{(&PostStage{D: d}).Run(context.Background(), pt), (&ThreadStage{D: d}).Run(context.Background(), thread)} {
-		if out.Result != Done || out.Counters["pages_suppressed"] != 1 {
-			t.Fatalf("outcome %+v", out)
+	for _, tk := range []*taskv1.Task{page, pt, task.Continuation(pt, "c"), thread} {
+		if err := d.Jobs.Spawn(ctx, "job-erased", tk.TaskId); err != nil {
+			t.Fatal(err)
 		}
+		if err := w.Run(ctx, tk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if st, err := d.Jobs.Status(ctx, "job-erased"); err != nil || st.Pending != 0 || st.Counters["pages_suppressed"] != 4 {
+		t.Fatalf("job accounting: %+v, %v", st, err)
 	}
 }
 
@@ -206,6 +235,12 @@ func TestRetryKeepsItsOwnPass(t *testing.T) {
 	d.adoptIncomplete(ctx, pt, pt.GetPost(), checkpoint.State{Pages: 1, Cursor: "newest-first cursor"})
 	if pt.Mode != fbv1.CrawlMode_CRAWL_MODE_INCREMENTAL || pt.GetPost().IncompleteMark != "" {
 		t.Fatalf("a retry under way took the mark: %v %q", pt.Mode, pt.GetPost().IncompleteMark)
+	}
+	carried := proto.Clone(pt).(*taskv1.Task) // the checkpoint gone, the cursor on the retried task
+	carried.Cursor = "newest-first cursor"
+	d.adoptIncomplete(ctx, carried, carried.GetPost(), checkpoint.State{})
+	if carried.Mode != fbv1.CrawlMode_CRAWL_MODE_INCREMENTAL || carried.GetPost().IncompleteMark != "" {
+		t.Fatalf("a retry carrying its cursor took the mark: %v %q", carried.Mode, carried.GetPost().IncompleteMark)
 	}
 	d.adoptIncomplete(ctx, pt, pt.GetPost(), checkpoint.State{})
 	if pt.Mode != fbv1.CrawlMode_CRAWL_MODE_FULL || pt.GetPost().IncompleteMark == "" || pt.GetPost().CommentsWatermark != nil {

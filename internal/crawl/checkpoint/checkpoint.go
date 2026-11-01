@@ -83,6 +83,12 @@ func (s *Store) MarkDone(ctx context.Context, taskID string) error {
 	return s.r.Set(ctx, "done:"+taskID, "1", 7*24*time.Hour).Err()
 }
 
+// ClearDone forgets a task's completion, for a dead-lettered task replayed
+// on purpose.
+func (s *Store) ClearDone(ctx context.Context, taskID string) error {
+	return s.r.Del(ctx, "done:"+taskID).Err()
+}
+
 var extendScript = redis.NewScript(`
 if redis.call('GET', KEYS[1]) == ARGV[1] then
   return redis.call('PEXPIRE', KEYS[1], ARGV[2])

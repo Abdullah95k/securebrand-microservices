@@ -112,7 +112,8 @@ func TestErasedAuthorMentionsAreScrubbed(t *testing.T) {
 }
 
 // What a task already running when its page was erased finds is not
-// published: comments are redacted (keys only), posts and media dropped.
+// published: comments, posts and media are dropped (a comment privatized on
+// its own is redacted).
 func TestErasedPageIsNotPublished(t *testing.T) {
 	prod, err := kafka.NewProducer(kafka.ClientConfig{Brokers: []string{"127.0.0.1:1"}})
 	if err != nil {
@@ -128,6 +129,10 @@ func TestErasedPageIsNotPublished(t *testing.T) {
 		TextRanges: []*fbv1.TextRange{{EntityType: "User", EntityId: "100002", Name: "B"}}}
 	if e.Privatize(c) || !c.Redacted || c.Text != "" || c.Author.Id != "" || c.TextRanges != nil {
 		t.Fatalf("comment of an erased page: %+v", c)
+	}
+	published := &fbv1.Comment{CommentId: 4, PageId: 9, Text: "hi"}
+	if keep, err := e.Comment(ctx, prod.NewBatch(), Source{}, published); keep || err != nil || published.Obs != nil {
+		t.Fatalf("comment of an erased page was stamped for publishing: %v", err)
 	}
 	p := &fbv1.Post{PostId: 2, PageId: 9}
 	if err := e.Post(ctx, prod.NewBatch(), Source{}, p); err != nil || p.Obs != nil {

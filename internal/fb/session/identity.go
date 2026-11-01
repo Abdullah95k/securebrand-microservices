@@ -149,9 +149,10 @@ const MaxTransportFailures = 3
 // Soft errors in a row (server errors, HTML instead of GraphQL, an error
 // payload without data): the second drops the identity's tokens, so its next
 // use loads a page for fresh ones (stale tokens fail every request alike),
-// and MaxSoftErrors retire it. A soft error scores as a success otherwise,
-// so health alone would let one identity fail hundreds of requests, and the
-// pool hands the identity released last out first.
+// and MaxSoftErrors retire it, fresh tokens or not: only a request that
+// works ends the run. A soft error scores as a success otherwise, so health
+// alone would let one identity fail hundreds of requests, and the pool hands
+// the identity released last out first.
 const (
 	softRefreshAfter = 2
 	MaxSoftErrors    = 4
@@ -160,6 +161,10 @@ const (
 // Record updates health with one request outcome and returns whether the
 // identity must be retired.
 func (id *Identity) Record(c detect.Class) (retire bool, reason string) {
+	return id.record(c, false)
+}
+
+func (id *Identity) record(c detect.Class, pageLoad bool) (retire bool, reason string) {
 	id.mu.Lock()
 	defer id.mu.Unlock()
 	id.requests++
@@ -179,12 +184,16 @@ func (id *Identity) Record(c detect.Class) (retire bool, reason string) {
 	} else {
 		id.consecFails = 0 // the exit answered
 	}
-	if c == detect.SoftError {
+	switch {
+	case c == detect.SoftError:
 		id.consecSoft++
-		if id.consecSoft >= softRefreshAfter {
+		if id.consecSoft == softRefreshAfter { // once per run of soft errors
 			id.tokens = htmlx.Tokens{}
 		}
-	} else if c != detect.Transport {
+	case c == detect.Transport, pageLoad && c == detect.OK:
+		// Neither says the requests work: a transport failure got no
+		// answer, and a page load only brings tokens yet untested.
+	default:
 		id.consecSoft = 0
 	}
 	switch {

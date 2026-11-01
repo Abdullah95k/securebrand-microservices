@@ -57,6 +57,14 @@ func (w *Worker) Handle(ctx context.Context, rec *kgo.Record) error {
 		// empty record, a newer producer) has no topic name of its own.
 		return w.deadLetterRaw(ctx, rec, "no_stage", "no stage for kind "+t.Kind.String())
 	}
+	if kafka.HeaderValue(rec, kafka.HeaderReplay) != "" {
+		// A dead letter replayed on purpose (fbctl dlq replay): it ended
+		// without finishing, so it runs again instead of being skipped as
+		// done.
+		if err := w.D.Ckpt.ClearDone(ctx, t.TaskId); err != nil {
+			return err
+		}
+	}
 	return w.Run(ctx, &t)
 }
 
@@ -69,11 +77,18 @@ func (w *Worker) Run(ctx context.Context, t *taskv1.Task) error {
 	if !ok {
 		return fmt.Errorf("stage: no stage for kind %v", t.Kind)
 	}
+	// Tasks queued before their page was erased (backlog, retries,
+	// continuations, threads) stop before anything is requested. A page task
+	// whose page id isn't known yet is checked by its stage once resolved.
+	if d.Suppression.PageSuppressed(scopePage(t)) {
+		metrics.Tasks.WithLabelValues(name, lane, "suppressed").Inc()
+		return w.finish(ctx, t, map[string]int64{"pages_suppressed": 1})
+	}
 	if d.Jobs.Cancelled(ctx, t.JobId) {
 		metrics.Tasks.WithLabelValues(name, lane, "cancelled").Inc()
-		// A continuation or thread left unread: the post's next pass reads
-		// it whole. A post whose pass never began keeps its last state.
-		if t.Seq > 0 || t.Kind == taskv1.Kind_KIND_THREAD {
+		// What the task left unread makes the post's next pass read it
+		// whole; a post whose pass never began keeps its last state.
+		if w.begun(ctx, t) {
 			w.markIncomplete(ctx, t)
 		}
 		return w.finish(ctx, t, map[string]int64{"cancelled": 1})
@@ -108,7 +123,7 @@ func (w *Worker) Run(ctx context.Context, t *taskv1.Task) error {
 	switch out.Result {
 	case Done:
 		metrics.Tasks.WithLabelValues(name, lane, "done").Inc()
-		if out.Counters["cancelled"] > 0 && t.Kind != taskv1.Kind_KIND_PAGE {
+		if out.Counters["cancelled"] > 0 && w.begun(ctx, t) {
 			w.markIncomplete(ctx, t) // cut short by a cancel
 		}
 		if err := d.spawn(ctx, out.FollowUps...); err != nil {
@@ -231,6 +246,30 @@ func (w *Worker) runStage(ctx context.Context, st Stage, t *taskv1.Task, lease *
 	return st.Run(ctx, t)
 }
 
+// scopePage is the page a task works on (0 when not known yet).
+func scopePage(t *taskv1.Task) int64 {
+	switch t.Kind {
+	case taskv1.Kind_KIND_PAGE:
+		return t.GetPage().GetPageId()
+	case taskv1.Kind_KIND_POST:
+		return t.GetPost().GetPageId()
+	case taskv1.Kind_KIND_THREAD:
+		return t.GetThread().GetPageId()
+	}
+	return 0
+}
+
+// begun reports whether t's stream has read anything: a reply thread (its
+// post's pass is done), a continuation, or a first segment retried after
+// progress (it carries a cursor, or its checkpoint has one).
+func (w *Worker) begun(ctx context.Context, t *taskv1.Task) bool {
+	if t.Kind == taskv1.Kind_KIND_THREAD || t.Seq > 0 || t.Cursor != "" {
+		return true
+	}
+	st, _, err := w.D.Ckpt.Load(ctx, t.LineageId, t.Seq)
+	return err != nil || st.Pages > 0 || st.Cursor != ""
+}
+
 // markIncomplete marks the post whose comments t was collecting: its next
 // pass reads it whole.
 func (w *Worker) markIncomplete(ctx context.Context, t *taskv1.Task) {
@@ -299,11 +338,10 @@ func (w *Worker) deadLetter(ctx context.Context, t *taskv1.Task, reason, detail 
 		_ = w.D.Jobs.UpdatePostState(ctx, t.JobId, t.GetThread().GetPostId(), jobs.PostTruncated)
 	}
 	w.markIncomplete(ctx, t)
-	// Counted for the job, but not marked done: a replay of the dead letter
-	// (fbctl dlq replay) must run, not be skipped as already finished. Job
-	// accounting counts the task once, however often it ends.
-	_, err = w.D.Jobs.Done(ctx, t.JobId, t.TaskId, c)
-	return ignoreUnspawned(err)
+	// Marked done like a finished task, so a redelivery or a parked copy is
+	// skipped; a replay of the dead letter (fbctl dlq replay) carries
+	// HeaderReplay, which clears the mark.
+	return w.finish(ctx, t, c)
 }
 
 func (w *Worker) deadLetterRaw(ctx context.Context, rec *kgo.Record, reason, detail string) error {

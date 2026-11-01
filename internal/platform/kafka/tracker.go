@@ -13,9 +13,10 @@ type tp struct {
 }
 
 type entry struct {
-	offset int64
-	epoch  int32
-	done   bool
+	offset  int64
+	epoch   int32
+	started bool // its handler runs (or ran)
+	done    bool
 }
 
 // partition tracks fetched-but-uncommitted offsets of one partition, in
@@ -89,6 +90,18 @@ func (t *tracker) add(r *kgo.Record, base context.Context) (*entry, chan struct{
 	return e, p.sem, p.ctx
 }
 
+// start marks e's handler as running, unless r's partition was revoked
+// while e waited for capacity: then it must not run here (false).
+func (t *tracker) start(e *entry, r *kgo.Record) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.owned[tp{r.Topic, r.Partition}] {
+		return false
+	}
+	e.started = true
+	return true
+}
+
 func (t *tracker) markDone(e *entry) {
 	t.mu.Lock()
 	e.done = true
@@ -151,7 +164,9 @@ func (t *tracker) markCommitted(offsets map[string]map[int32]kgo.EpochOffset) {
 	}
 }
 
-// pending reports how many records of the given partitions are not done.
+// pending reports how many records of the given partitions are running
+// (started, not done). Those not started never will be once their
+// partition goes, so a revoke doesn't wait for them.
 func (t *tracker) pending(only map[string][]int32) int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -160,7 +175,7 @@ func (t *tracker) pending(only map[string][]int32) int {
 		for _, part := range parts {
 			if p := t.parts[tp{topic, part}]; p != nil {
 				for _, e := range p.queue {
-					if !e.done {
+					if e.started && !e.done {
 						n++
 					}
 				}
@@ -168,6 +183,18 @@ func (t *tracker) pending(only map[string][]int32) int {
 		}
 	}
 	return n
+}
+
+// disown stops accepting records of partitions being revoked, while those
+// already running get a moment to finish (drop comes after).
+func (t *tracker) disown(only map[string][]int32) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for topic, parts := range only {
+		for _, part := range parts {
+			delete(t.owned, tp{topic, part})
+		}
+	}
 }
 
 // drop forgets partitions revoked or lost: their handlers are cancelled and

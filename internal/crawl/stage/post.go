@@ -42,12 +42,6 @@ func (s *PostStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	if sc == nil {
 		return Outcome{Result: Fail, Reason: "post task without post scope"}
 	}
-	// Tasks queued before the page was erased (backlog, retries,
-	// continuations) stop here, before anything is requested or published.
-	if d.Suppression.PageSuppressed(sc.PageId) {
-		c["pages_suppressed"]++
-		return done(c)
-	}
 	id, err := d.identity(ctx, "comments", t.Stalls)
 	if err != nil {
 		return noIdentity(t, err, c)
@@ -367,7 +361,9 @@ func threadTasks(ctx context.Context, d *Deps, t *taskv1.Task, refs []parse.Thre
 // meanwhile: its saved cursor belongs to its own read, and the threads it
 // spawned are done for this job, so the mark is left for the next pass.
 func (d *Deps) adoptIncomplete(ctx context.Context, t *taskv1.Task, sc *taskv1.PostScope, st checkpoint.State) {
-	if t.Seq != 0 || sc.IncompleteMark != "" || st.Pages != 0 || st.Cursor != "" {
+	// A retry carries its cursor on the task too (the checkpoint may be
+	// gone: a failed save, its TTL).
+	if t.Seq != 0 || sc.IncompleteMark != "" || st.Pages != 0 || st.Cursor != "" || t.Cursor != "" {
 		return
 	}
 	if mark := d.Ckpt.Incomplete(ctx, sc.PostId); mark != "" {
@@ -387,10 +383,6 @@ func (s *ThreadStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	c := map[string]int64{}
 	if sc == nil {
 		return Outcome{Result: Fail, Reason: "thread task without thread scope"}
-	}
-	if d.Suppression.PageSuppressed(sc.PageId) {
-		c["pages_suppressed"]++
-		return done(c)
 	}
 	id, err := d.identity(ctx, "replies", t.Stalls)
 	if err != nil {

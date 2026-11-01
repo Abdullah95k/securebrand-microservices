@@ -22,11 +22,13 @@ func TestHandlerPanicIsAnError(t *testing.T) {
 }
 
 // Once the drain is over, the revoke of leaving the group doesn't wait for
-// records that will never run (fetched but not started at shutdown).
+// records still marked running: the drain timeout abandoned them.
 func TestRevokeAfterDrainDoesNotWait(t *testing.T) {
 	c := &Consumer{tr: newTracker(1)}
 	c.tr.assign(map[string][]int32{"t": {0}})
-	c.tr.add(&kgo.Record{Topic: "t", Partition: 0, Offset: 5}, context.Background()) // never started
+	r := &kgo.Record{Topic: "t", Partition: 0, Offset: 5}
+	e, _, _ := c.tr.add(r, context.Background())
+	c.tr.start(e, r) // abandoned by the drain timeout: never done
 	c.tr.markCommitted(map[string]map[int32]kgo.EpochOffset{"t": {0: {Offset: 5}}})
 	c.drained.Store(true)
 	start := time.Now()
@@ -88,5 +90,32 @@ func TestShutdownDoesNotWaitForRecordsNeverStarted(t *testing.T) {
 	}
 	if d := time.Since(stopping); d > 10*time.Second {
 		t.Fatalf("shutdown took %v", d)
+	}
+}
+
+// While a revoke waits for the records running on its partitions, none of
+// their records waiting for capacity starts: they are the next owner's.
+func TestRevokeStopsWaitingRecordsFromStarting(t *testing.T) {
+	c := &Consumer{tr: newTracker(2)}
+	c.tr.assign(map[string][]int32{"t": {0}})
+	r1, r2 := &kgo.Record{Topic: "t", Partition: 0, Offset: 1}, &kgo.Record{Topic: "t", Partition: 0, Offset: 2}
+	e1, _, _ := c.tr.add(r1, context.Background())
+	e2, _, _ := c.tr.add(r2, context.Background())
+	c.tr.start(e1, r1)
+	c.tr.markCommitted(map[string]map[int32]kgo.EpochOffset{"t": {0: {Offset: 3}}}) // nothing left to commit
+	done := make(chan struct{})
+	go func() {
+		c.onRevoked(context.Background(), nil, map[string][]int32{"t": {0}})
+		close(done)
+	}()
+	time.Sleep(300 * time.Millisecond) // the revoke waits for r1
+	if c.tr.start(e2, r2) {
+		t.Error("a record of a partition being revoked started")
+	}
+	c.tr.markDone(e1)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the revoke did not end once the running record was done")
 	}
 }
