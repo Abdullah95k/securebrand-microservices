@@ -111,16 +111,24 @@ func (c *Consumer) Run(ctx context.Context) error {
 	}
 }
 
-// isDataError reports Postgres refusing a value (SQLSTATE class 22, data
-// exception): writing the same record again can never succeed.
+// isDataError reports Postgres refusing a record for what it holds:
+// writing the same record again can never succeed. That is a data exception
+// (SQLSTATE class 22), a NOT NULL field it lacks (23502), or a value too
+// large for its index (54000). Other integrity errors can pass: a unique
+// violation between two writers racing, the check violation of a partition
+// not created yet (withPartitions).
 func isDataError(err error) bool {
 	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && strings.HasPrefix(pgErr.Code, "22")
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	return strings.HasPrefix(pgErr.Code, "22") || pgErr.Code == "23502" || pgErr.Code == "54000"
 }
 
-// flushSkipping writes recs. A record Postgres refuses for its data, found
-// by halving the batch, is skipped (logged by position, never by content):
-// otherwise it would hold up every record after it for good. Rows are
+// flushSkipping writes recs. A record Postgres refuses for what it holds
+// (isDataError), found by halving the batch, is skipped (logged by
+// position, never by content): otherwise it would hold up every record
+// after it for good. Rows are
 // upserted by observation time, so writing the halves apart is the same as
 // writing them together.
 //
@@ -169,27 +177,31 @@ func (c *Consumer) flush(ctx context.Context, recs []*kgo.Record) error {
 		media    []*fbv1.Media
 	)
 	for _, r := range recs {
-		var err error
+		// A record that doesn't decode is skipped, not written as far as it
+		// decoded (Unmarshal leaves the fields it read).
+		undecodable := func(err error) bool {
+			if err != nil {
+				slog.Error("persist: undecodable record skipped", "topic", r.Topic, "offset", r.Offset, "err", err)
+			}
+			return err != nil
+		}
 		switch r.Topic {
 		case c.prefix + topics.Page:
-			m := &fbv1.Page{}
-			err = proto.Unmarshal(r.Value, m)
-			pages = append(pages, m)
+			if m := (&fbv1.Page{}); !undecodable(proto.Unmarshal(r.Value, m)) {
+				pages = append(pages, m)
+			}
 		case c.prefix + topics.Post:
-			m := &fbv1.Post{}
-			err = proto.Unmarshal(r.Value, m)
-			posts = append(posts, m)
+			if m := (&fbv1.Post{}); !undecodable(proto.Unmarshal(r.Value, m)) {
+				posts = append(posts, m)
+			}
 		case c.prefix + topics.Comment:
-			m := &fbv1.Comment{}
-			err = proto.Unmarshal(r.Value, m)
-			comments = append(comments, m)
+			if m := (&fbv1.Comment{}); !undecodable(proto.Unmarshal(r.Value, m)) {
+				comments = append(comments, m)
+			}
 		case c.prefix + topics.Media:
-			m := &fbv1.Media{}
-			err = proto.Unmarshal(r.Value, m)
-			media = append(media, m)
-		}
-		if err != nil {
-			slog.Error("persist: undecodable record skipped", "topic", r.Topic, "offset", r.Offset, "err", err)
+			if m := (&fbv1.Media{}); !undecodable(proto.Unmarshal(r.Value, m)) {
+				media = append(media, m)
+			}
 		}
 	}
 	// Order matters only for references the API joins on; posts before

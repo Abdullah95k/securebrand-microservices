@@ -110,19 +110,34 @@ func TestMaintenancePurgesAndGauges(t *testing.T) {
 		('00000000-0000-0000-0000-000000000002', 'b', 'hd', 'video', 'post', 'discovered', now() - interval '1 day')`); err != nil {
 		t.Fatal(err)
 	}
+	// Media handed over and deleted stays as a tombstone, without what ties
+	// it to a person: a later scrape must not download it again.
+	if _, err := db.Exec(ctx, `INSERT INTO media (media_id, fb_media_id, variant, kind, owner_type, comment_id, source_url, alt_text,
+		author_key, sha256, s3_key, status, discovered_at) VALUES ('00000000-0000-0000-0000-000000000003', 'c', 'orig', 'photo',
+		'comment', 7, 'https://cdn/c.jpg', 'a person', '\x01', '\x02', 'media/00/c.jpg', 'deleted', now() - interval '40 days')`); err != nil {
+		t.Fatal(err)
+	}
 	if err := (&Maintenance{DB: db, Cfg: cfg}).Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
 	var left []string
-	rows, _ := db.Query(ctx, `SELECT media_id::text FROM media`)
+	rows, _ := db.Query(ctx, `SELECT media_id::text FROM media ORDER BY 1`)
 	for rows.Next() {
 		var id string
 		_ = rows.Scan(&id)
 		left = append(left, id)
 	}
 	rows.Close()
-	if len(left) != 1 || left[0] != "00000000-0000-0000-0000-000000000002" {
+	if len(left) != 2 || left[0] != "00000000-0000-0000-0000-000000000002" || left[1] != "00000000-0000-0000-0000-000000000003" {
 		t.Fatalf("media left: %v", left)
+	}
+	var status string
+	var identified bool
+	if err := db.QueryRow(ctx, `SELECT status, fb_media_id <> '' OR source_url IS NOT NULL OR alt_text IS NOT NULL
+		OR comment_id IS NOT NULL OR author_key IS NOT NULL OR sha256 IS NOT NULL OR s3_key IS NOT NULL
+		FROM media WHERE media_id = '00000000-0000-0000-0000-000000000003'`).
+		Scan(&status, &identified); err != nil || status != "deleted" || identified {
+		t.Fatalf("tombstone: %q, still identifying: %v (%v)", status, identified, err)
 	}
 
 	p := &Planner{DB: db, Cfg: cfg}
@@ -266,5 +281,51 @@ func TestRetentionRunsWhenPartitionsWait(t *testing.T) {
 	var jobs int
 	if err := db.QueryRow(ctx, `SELECT count(*) FROM jobs`).Scan(&jobs); err != nil || jobs != 0 {
 		t.Fatalf("old jobs left: %d (%v)", jobs, err)
+	}
+}
+
+// More long-running jobs than one tick looks at can't hide a stuck one: the
+// next tick goes on from where the last stopped.
+func TestReaperPagesThroughRunningJobs(t *testing.T) {
+	db := testenv.Postgres(t)
+	rdb := testenv.Redis(t)
+	ctx := context.Background()
+	prod, err := kafka.NewProducer(kafka.ClientConfig{Brokers: testenv.Kafka(t), TopicPrefix: testenv.TopicPrefix()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prod.Close()
+	tr := jobs.New(rdb)
+	var busy []uuid.UUID
+	for i := range 2 { // backfills still progressing: never reaped
+		id := uuid.New()
+		busy = append(busy, id)
+		if _, err := db.Exec(ctx, `INSERT INTO jobs (job_id, kind, lane, mode, page_ref, params, status, created_at)
+			VALUES ($1, 'backfill', 2, 'full', 'v:a', '{}', 'running', now() - make_interval(hours => $2))`, id, 10-i); err != nil {
+			t.Fatal(err)
+		}
+		if err := tr.Spawn(ctx, id.String(), "t"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stuck := uuid.New() // newer, and its accounting state is gone
+	if _, err := db.Exec(ctx, `INSERT INTO jobs (job_id, kind, lane, mode, page_ref, params, status, created_at)
+		VALUES ($1, 'scheduled', 1, 'incremental', 'v:b', '{}', 'running', now() - interval '1 hour')`, stuck); err != nil {
+		t.Fatal(err)
+	}
+	r := &Reaper{DB: db, Jobs: tr, Producer: prod, After: time.Minute, MaxAge: 48 * time.Hour, PageSize: 2}
+	for range 2 {
+		if err := r.Tick(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var status string
+	if err := db.QueryRow(ctx, `SELECT status FROM jobs WHERE job_id = $1`, stuck).Scan(&status); err != nil || status != "failed" {
+		t.Fatalf("stuck job after two ticks: %q (%v)", status, err)
+	}
+	for _, id := range busy {
+		if err := db.QueryRow(ctx, `SELECT status FROM jobs WHERE job_id = $1`, id).Scan(&status); err != nil || status != "running" {
+			t.Fatalf("progressing job: %q (%v)", status, err)
+		}
 	}
 }

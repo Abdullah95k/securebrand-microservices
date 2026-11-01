@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -248,6 +249,14 @@ type Reaper struct {
 	// Backlog returns the tasks waiting per lane (TaskBacklog); nil takes
 	// every lane to be empty.
 	Backlog func(context.Context) (map[int16]int64, error)
+	// PageSize bounds the jobs one tick looks at (default 500).
+	PageSize int
+
+	// The tick after a full page goes on from its last job (by creation),
+	// so more than a page of long-running jobs can't keep a stuck one from
+	// ever being looked at.
+	afterCreated time.Time
+	afterID      uuid.UUID
 }
 
 // stalled decides what becomes of a job without progress: failed when its
@@ -265,8 +274,10 @@ func stalled(st jobs.Status, queued, overdue bool, after time.Duration, now time
 
 func (r *Reaper) Tick(ctx context.Context) error {
 	maxAge := max(r.MaxAge, r.After)
+	page := cmp.Or(r.PageSize, 500)
 	rows, err := r.DB.Query(ctx, `SELECT job_id, kind, page_ref, created_at, lane, created_at < now() - $2::interval FROM jobs
-		WHERE status IN ('running','cancelling') AND created_at < now() - $1::interval LIMIT 500`, r.After.String(), maxAge.String())
+		WHERE status IN ('running','cancelling') AND created_at < now() - $1::interval AND (created_at, job_id) > ($3, $4)
+		ORDER BY created_at, job_id LIMIT $5`, r.After.String(), maxAge.String(), r.afterCreated, r.afterID, page)
 	if err != nil {
 		return err
 	}
@@ -282,8 +293,16 @@ func (r *Reaper) Tick(ctx context.Context) error {
 		var x row
 		return x, c.Scan(&x.id, &x.kind, &x.ref, &x.created, &x.lane, &x.overdue)
 	})
-	if err != nil || len(list) == 0 {
+	if err != nil {
 		return err
+	}
+	if len(list) < page {
+		r.afterCreated, r.afterID = time.Time{}, uuid.UUID{} // all seen: start over next tick
+	} else {
+		r.afterCreated, r.afterID = list[len(list)-1].created, list[len(list)-1].id
+	}
+	if len(list) == 0 {
+		return nil
 	}
 	queued := func(int16) bool { return false }
 	if r.Backlog != nil {
@@ -388,11 +407,20 @@ func (m *Maintenance) Tick(ctx context.Context) error {
 		days int
 	}{
 		{`DELETE FROM jobs WHERE job_id IN (SELECT job_id FROM jobs WHERE finished_at < now() - make_interval(days => $1) LIMIT 5000)`, ret.JobsDays},
-		// Rows never downloaded (variants the policy leaves out, media of
-		// jobs without media) are purged too: their signed URLs expired
-		// long ago, and they keep comment ids after retention.
-		{`DELETE FROM media WHERE media_id IN (SELECT media_id FROM media WHERE status IN ('discovered','deleted','expired','failed','skipped')
+		// Rows never handed over (variants the policy leaves out, media of
+		// jobs without media, failed downloads) are purged: their signed
+		// URLs expired long ago, and they keep comment ids after retention.
+		{`DELETE FROM media WHERE media_id IN (SELECT media_id FROM media WHERE status IN ('discovered','failed','skipped','source_expired')
 			AND discovered_at < now() - make_interval(days => $1) LIMIT 5000)`, ret.MediaRowsDays},
+		// Rows of media handed over stay, as the record that it was (a later
+		// scrape would download and announce it again under the same event
+		// id), but without what ties them to a person or its content. An
+		// empty fb_media_id marks a row done (media_unscrubbed_idx); the
+		// persister leaves these rows alone.
+		{`UPDATE media SET fb_media_id = '', source_url = NULL, alt_text = NULL, comment_id = NULL, owner_id = NULL,
+			author_key = NULL, sha256 = NULL, s3_key = NULL, last_error = NULL
+			WHERE media_id IN (SELECT media_id FROM media WHERE status IN ('deleted','expired') AND fb_media_id <> ''
+				AND discovered_at < now() - make_interval(days => $1) LIMIT 5000)`, ret.MediaRowsDays},
 		{`DELETE FROM comment_authors WHERE author_key IN (SELECT author_key FROM comment_authors
 			WHERE last_seen_at < now() - make_interval(days => $1) LIMIT 5000)`, ret.AuthorsInactiveDays},
 		{`DELETE FROM registry_sync_runs WHERE started_at < now() - make_interval(days => $1)`, ret.JobsDays},

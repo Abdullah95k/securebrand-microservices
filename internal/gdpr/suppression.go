@@ -154,6 +154,28 @@ func ScrubMentions(rs []*fbv1.TextRange) {
 	}
 }
 
+// MentionedKeys returns the author keys (AuthorKey with key) of the people
+// rs mention, in order, nil for a range that names no person.
+func MentionedKeys(key []byte, rs []*fbv1.TextRange) [][]byte {
+	out := make([][]byte, len(rs))
+	for i, r := range rs {
+		if r.EntityId != "" && PersonEntity(r.EntityType) {
+			out[i] = AuthorKey(key, r.EntityId)
+		}
+	}
+	return out
+}
+
+// ScrubSuppressedMentions clears the mentions in rs of suppressed authors;
+// keys are rs's MentionedKeys.
+func ScrubSuppressedMentions(s *Suppression, rs []*fbv1.TextRange, keys [][]byte) {
+	for i, r := range rs {
+		if i < len(keys) && s.AuthorSuppressed(keys[i]) {
+			ScrubMentions([]*fbv1.TextRange{r})
+		}
+	}
+}
+
 // ScrubMentionsJSON is ScrubMentions for text ranges stored as JSON (proto
 // field names). Anything it cannot read comes back as nil.
 func ScrubMentionsJSON(raw []byte) []byte {

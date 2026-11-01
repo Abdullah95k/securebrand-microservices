@@ -27,6 +27,20 @@ type Writer struct {
 	// older than this are not written, since retention would drop their
 	// partition again within the hour. Zero keeps everything.
 	CommentsRetention time.Duration
+	// HMACKey (privacy.author_hmac_key) gives the author keys of the people
+	// text ranges mention, so mentions of erased authors are cleared under
+	// the erasure lock (crawlers learn of an erasure up to a minute late,
+	// and the erasure's own scrub runs once). Empty: not checked.
+	HMACKey []byte
+}
+
+// mentioned returns the author keys of the people rs mention (none
+// without HMACKey).
+func (w *Writer) mentioned(rs []*fbv1.TextRange) [][]byte {
+	if len(w.HMACKey) == 0 {
+		return nil
+	}
+	return gdpr.MentionedKeys(w.HMACKey, rs)
 }
 
 // latest keeps the most recently observed message per key.
@@ -89,21 +103,27 @@ func (w *Writer) Posts(ctx context.Context, posts []*fbv1.Post) error {
 	start := time.Now()
 	pageIDs := make([]int64, len(posts))
 	months := make([]time.Time, len(posts))
+	mentions := make([][][]byte, len(posts))
+	var mentioned [][]byte
 	for i, p := range posts {
 		pageIDs[i], months[i] = p.PageId, p.CreatedAt.AsTime()
+		mentions[i] = w.mentioned(p.TextRanges)
+		mentioned = append(mentioned, mentions[i]...)
 	}
 	var written int64
 	err := w.withPartitions(ctx, "posts", months, func() error {
 		written = 0
 		return pgx.BeginFunc(ctx, w.DB, func(tx pgx.Tx) error {
-			// Posts of an erased page still in flight are dropped.
-			sup, err := gdpr.Guard(ctx, tx, nil, pageIDs)
+			// Posts of an erased page still in flight are dropped, and
+			// erased authors' mentions cleared.
+			sup, err := gdpr.Guard(ctx, tx, mentioned, pageIDs)
 			if err != nil {
 				return err
 			}
 			rows := make([][]any, 0, len(posts))
-			for _, p := range posts {
+			for i, p := range posts {
 				if !sup.PageSuppressed(p.PageId) {
+					gdpr.ScrubSuppressedMentions(sup, p.TextRanges, mentions[i])
 					rows = append(rows, postRow(p))
 				}
 			}
@@ -238,8 +258,11 @@ func (w *Writer) Comments(ctx context.Context, cs []*fbv1.Comment) error {
 	keys := make([][]byte, 0, len(cs))
 	pageIDs := make([]int64, 0, len(cs))
 	var months []time.Time
+	mentions := make(map[*fbv1.Comment][][]byte, len(cs))
 	for _, c := range cs {
 		keys = append(keys, c.GetAuthor().GetAuthorKey())
+		mentions[c] = w.mentioned(c.TextRanges)
+		keys = append(keys, mentions[c]...)
 		pageIDs = append(pageIDs, c.PageId)
 		if c.PostCreatedAt != nil {
 			months = append(months, c.PostCreatedAt.AsTime())
@@ -249,8 +272,9 @@ func (w *Writer) Comments(ctx context.Context, cs []*fbv1.Comment) error {
 	err := w.withPartitions(ctx, "comments", months, func() error {
 		written, edited, restored = 0, 0, 0
 		return pgx.BeginFunc(ctx, w.DB, func(tx pgx.Tx) error {
-			// Comments of an erased page still in flight are dropped, and an
-			// erased author's are stored redacted, without an author row.
+			// Comments of an erased page still in flight are dropped, an
+			// erased author's are stored redacted, without an author row,
+			// and erased authors' mentions are cleared.
 			sup, err := gdpr.Guard(ctx, tx, keys, pageIDs)
 			if err != nil {
 				return err
@@ -265,6 +289,7 @@ func (w *Writer) Comments(ctx context.Context, cs []*fbv1.Comment) error {
 				if !c.Redacted && sup.AuthorSuppressed(c.GetAuthor().GetAuthorKey()) {
 					gdpr.Redact(c)
 				}
+				gdpr.ScrubSuppressedMentions(sup, c.TextRanges, mentions[c])
 				if c.Status == fbv1.CommentStatus_COMMENT_STATUS_DELETED {
 					dels = append(dels, c)
 					continue
@@ -467,6 +492,24 @@ func (w *Writer) Pages(ctx context.Context, ps []*fbv1.Page) error {
 			if p.Obs != nil {
 				hash = p.Obs.ContentHash
 			}
+			// A vanity belongs to one page at a time: one another page held
+			// (it gave it up and this one took it) moves to this page,
+			// instead of failing the unique index. Unless that page was seen
+			// with it later: then this observation is the stale one (a
+			// redelivery, a lagging crawler) and leaves the vanity alone.
+			if vanity != "" {
+				var newer bool
+				if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pages WHERE lower(vanity) = lower($1) AND page_id <> $2
+					AND last_scraped_at > $3)`, vanity, p.PageId, seen).Scan(&newer); err != nil {
+					return err
+				}
+				if newer {
+					vanity = ""
+				} else if _, err := tx.Exec(ctx, `UPDATE pages SET vanity = NULL WHERE lower(vanity) = lower($1) AND page_id <> $2`,
+					vanity, p.PageId); err != nil {
+					return err
+				}
+			}
 			var changed bool
 			err := tx.QueryRow(ctx, `
 				INSERT INTO pages AS t (page_id, vanity, url, name, categories, intro, followers_count, likes_count, verified,
@@ -564,7 +607,7 @@ func (w *Writer) Media(ctx context.Context, ms []*fbv1.Media) error {
 				source_expires_at = EXCLUDED.source_expires_at, width = COALESCE(EXCLUDED.width, t.width),
 				height = COALESCE(EXCLUDED.height, t.height), duration_ms = COALESCE(EXCLUDED.duration_ms, t.duration_ms),
 				alt_text = COALESCE(EXCLUDED.alt_text, t.alt_text)
-			WHERE t.source_url IS DISTINCT FROM EXCLUDED.source_url AND t.status <> 'deleted'`)
+			WHERE t.source_url IS DISTINCT FROM EXCLUDED.source_url AND t.status NOT IN ('deleted','expired')`)
 		return err
 	})
 	if err != nil {
