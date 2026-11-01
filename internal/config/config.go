@@ -424,8 +424,15 @@ func (c *Config) Validate() error {
 	default:
 		errs = append(errs, fmt.Errorf("privacy.pii_mode %q must be full or pseudonymized", c.Privacy.PIIMode))
 	}
-	if c.Service.Env == "prod" && c.Privacy.AuthorHMACKey == "dev-only-change-me" {
-		errs = append(errs, errors.New("privacy.author_hmac_key must be set in prod"))
+	// The author key pseudonymises commenters and matches erased authors on
+	// later scrapes. A known or short key lets anyone confirm a guessed
+	// Facebook id from an author_key. Generate one per deployment (e.g.
+	// openssl rand -hex 32) and never change it: suppression entries are
+	// stored under it.
+	if c.Service.Env == "prod" || (c.Service.Env != "dev" && c.Privacy.PIIMode == "pseudonymized") {
+		if k := c.Privacy.AuthorHMACKey; k == "" || k == "dev-only-change-me" || len(k) < 32 {
+			errs = append(errs, errors.New("privacy.author_hmac_key must be a secret of at least 32 characters (e.g. openssl rand -hex 32)"))
+		}
 	}
 	if c.Media.TTL <= 0 {
 		errs = append(errs, errors.New("media.ttl must be > 0"))

@@ -12,8 +12,8 @@ log:
 http:
   addr: ":8080"            # API listener (fbs-api)
   ops_addr: ":9090"        # /metrics, /healthz, /readyz on every binary
-  read_timeout: 15s
-  write_timeout: 60s
+  read_timeout: 15s       # reading a whole request (fbs-api)
+  write_timeout: 60s      # handling an API request; job results stream without it
 
 postgres:
   dsn: "postgres://fbs:fbs@localhost:5432/fbs?sslmode=disable"

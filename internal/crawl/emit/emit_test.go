@@ -2,10 +2,12 @@ package emit
 
 import (
 	"bytes"
+	"context"
 	"testing"
 
 	fbv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fb/v1"
 	"github.com/abdullah95k/securebrand-microservices/internal/gdpr"
+	"github.com/abdullah95k/securebrand-microservices/internal/platform/kafka"
 )
 
 func TestHashIgnoresSignedURLParams(t *testing.T) {
@@ -47,5 +49,43 @@ func TestPrivatize(t *testing.T) {
 	d := &fbv1.Comment{Text: "ok", Author: &fbv1.Author{Id: "someone", Name: "Y", Url: "u"}}
 	if !e.Privatize(d) || d.Author.Id != "" || d.Author.Name != "" || len(d.Author.AuthorKey) != 32 || d.Text != "ok" {
 		t.Fatalf("pseudonymisation wrong: %+v", d)
+	}
+}
+
+// Pseudonymisation also clears the people a comment or post tags, which a
+// reply carries for the person it answers.
+func TestPseudonymizeScrubsMentions(t *testing.T) {
+	mention := func() []*fbv1.TextRange {
+		return []*fbv1.TextRange{{EntityType: "User", EntityId: "100001", Name: "Some One", Url: "u"}, {EntityType: "Hashtag", Name: "#x"}}
+	}
+	for _, pseudo := range []bool{false, true} {
+		e := &Emitter{HMACKey: []byte("k"), Pseudonymize: pseudo}
+		c := &fbv1.Comment{Text: "Some One hi", TextRanges: mention()}
+		e.Privatize(c)
+		authorless := &fbv1.Comment{TextRanges: mention()}
+		e.Privatize(authorless)
+		for _, rs := range [][]*fbv1.TextRange{c.TextRanges, authorless.TextRanges} {
+			if scrubbed := rs[0].EntityId == "" && rs[0].Name == ""; scrubbed != pseudo || rs[1].Name != "#x" {
+				t.Errorf("pseudonymize %v: %+v", pseudo, rs)
+			}
+		}
+	}
+}
+
+func TestPostMentionsArePseudonymized(t *testing.T) {
+	prod, err := kafka.NewProducer(kafka.ClientConfig{Brokers: []string{"127.0.0.1:1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prod.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // nothing is sent; only the message matters
+	for _, pseudo := range []bool{false, true} {
+		e := &Emitter{HMACKey: []byte("k"), Pseudonymize: pseudo}
+		p := &fbv1.Post{PostId: 1, TextRanges: []*fbv1.TextRange{{EntityType: "User", EntityId: "100001", Name: "Some One"}}}
+		_ = e.Post(ctx, prod.NewBatch(), Source{}, p)
+		if scrubbed := p.TextRanges[0].EntityId == ""; scrubbed != pseudo {
+			t.Errorf("pseudonymize %v: %+v", pseudo, p.TextRanges[0])
+		}
 	}
 }

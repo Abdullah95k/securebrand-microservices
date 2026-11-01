@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -34,18 +35,34 @@ type request struct {
 	authorKey []byte
 	pageID    *int64
 	created   time.Time
+	attempts  int
 }
 
-// Tick processes up to 10 pending requests.
+// MaxErasureAttempts is how many times a request is tried before it is
+// marked failed. With the backoff below that spans about 16 hours.
+const MaxErasureAttempts = 12
+
+// errInvalid marks a request that no retry can complete.
+var errInvalid = errors.New("invalid erasure request")
+
+// retryAfter is the wait after the n-th failed attempt: 1m, 2m, 4m, ...
+// up to 4h.
+func retryAfter(n int) time.Duration {
+	return min(time.Minute<<min(n-1, 8), 4*time.Hour)
+}
+
+// Tick processes up to 10 pending requests that are due. Every step of an
+// erasure is idempotent, so a request that fails part-way is retried from
+// the start.
 func (e *Eraser) Tick(ctx context.Context) error {
-	rows, err := e.DB.Query(ctx, `SELECT id, subject_type, author_key, page_id, created_at FROM erasure_requests
-		WHERE status = 'pending' ORDER BY created_at LIMIT 10`)
+	rows, err := e.DB.Query(ctx, `SELECT id, subject_type, author_key, page_id, created_at, attempts FROM erasure_requests
+		WHERE status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= now()) ORDER BY created_at LIMIT 10`)
 	if err != nil {
 		return err
 	}
 	reqs, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (request, error) {
 		var q request
-		return q, r.Scan(&q.id, &q.subject, &q.authorKey, &q.pageID, &q.created)
+		return q, r.Scan(&q.id, &q.subject, &q.authorKey, &q.pageID, &q.created, &q.attempts)
 	})
 	if err != nil {
 		return err
@@ -53,8 +70,18 @@ func (e *Eraser) Tick(ctx context.Context) error {
 	for _, r := range reqs {
 		stats, err := e.process(ctx, r)
 		if err != nil {
-			slog.Error("erasure failed", "request", r.id, "err", err)
-			_, _ = e.DB.Exec(ctx, `UPDATE erasure_requests SET status = 'failed', error = $2 WHERE id = $1`, r.id, err.Error())
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			n := r.attempts + 1
+			if errors.Is(err, errInvalid) || n >= MaxErasureAttempts {
+				slog.Error("erasure failed", "request", r.id, "attempts", n, "err", err)
+				_, _ = e.DB.Exec(ctx, `UPDATE erasure_requests SET status = 'failed', attempts = $2, error = $3 WHERE id = $1`, r.id, n, err.Error())
+				continue
+			}
+			slog.Warn("erasure will be retried", "request", r.id, "attempts", n, "err", err)
+			_, _ = e.DB.Exec(ctx, `UPDATE erasure_requests SET attempts = $2, error = $3, next_attempt_at = now() + $4 * interval '1 second' WHERE id = $1`,
+				r.id, n, err.Error(), int64(retryAfter(n)/time.Second))
 			continue
 		}
 		sb, _ := json.Marshal(stats)
@@ -72,11 +99,14 @@ func (e *Eraser) process(ctx context.Context, r request) (map[string]int64, erro
 	switch r.subject {
 	case "author":
 		if len(r.authorKey) == 0 {
-			return nil, fmt.Errorf("author erasure without author key")
+			return nil, fmt.Errorf("%w: author erasure without author key", errInvalid)
 		}
 		ev.SubjectType, ev.AuthorKey = fbv1.SubjectType_SUBJECT_TYPE_AUTHOR, r.authorKey
 		var commentIDs []int64
 		err := pgx.BeginFunc(ctx, e.DB, func(tx pgx.Tx) error {
+			if err := lockExclusive(ctx, tx); err != nil {
+				return err
+			}
 			if _, err := tx.Exec(ctx, `INSERT INTO suppression (subject_type, subject_key) VALUES ('author', $1) ON CONFLICT DO NOTHING`,
 				hex.EncodeToString(r.authorKey)); err != nil {
 				return err
@@ -105,12 +135,20 @@ func (e *Eraser) process(ctx context.Context, r request) (map[string]int64, erro
 		stats["media_deleted"] = n
 	case "page":
 		if r.pageID == nil {
-			return nil, fmt.Errorf("page erasure without page id")
+			return nil, fmt.Errorf("%w: page erasure without page id", errInvalid)
 		}
 		pid := *r.pageID
 		ev.SubjectType, ev.PageId = fbv1.SubjectType_SUBJECT_TYPE_PAGE, pid
-		if _, err := e.DB.Exec(ctx, `INSERT INTO suppression (subject_type, subject_key) VALUES ('page', $1) ON CONFLICT DO NOTHING`,
-			strconv.FormatInt(pid, 10)); err != nil {
+		// Once this commits, writers drop the page's data (see Guard);
+		// whatever they wrote before is deleted below.
+		if err := pgx.BeginFunc(ctx, e.DB, func(tx pgx.Tx) error {
+			if err := lockExclusive(ctx, tx); err != nil {
+				return err
+			}
+			_, err := tx.Exec(ctx, `INSERT INTO suppression (subject_type, subject_key) VALUES ('page', $1) ON CONFLICT DO NOTHING`,
+				strconv.FormatInt(pid, 10))
+			return err
+		}); err != nil {
 			return nil, err
 		}
 		n, err := e.deleteMedia(ctx, `page_id = $1`, pid)
@@ -143,7 +181,7 @@ func (e *Eraser) process(ctx context.Context, r request) (map[string]int64, erro
 			return nil, err
 		}
 	default:
-		return nil, fmt.Errorf("unknown subject type %q", r.subject)
+		return nil, fmt.Errorf("%w: unknown subject type %q", errInvalid, r.subject)
 	}
 	ev.CompletedAt = timestamppb.Now()
 	b := e.Producer.NewBatch()

@@ -166,8 +166,17 @@ processes it within ~10s: suppression entry, comment redaction (rows stay as
 tombstones so coverage numbers stay correct), author row deletion, media
 deletion and an `fb.erasure.v1` event downstream must honour. Crawlers refresh
 the suppression set every `crawler.suppression_refresh` (60s) and redact
-before publishing, so re-scrapes never reintroduce the data. Kafka topics and
-raw payloads age out by retention (7 days).
+before publishing, so re-scrapes never reintroduce the data; the persister
+also checks the suppression table on every write, so data crawled before the
+crawlers' last refresh and still in flight is dropped (a suppressed page) or
+stored redacted (a suppressed author). Kafka topics and raw payloads age out
+by retention (7 days).
+
+A request that fails on a passing error (database, object store, Kafka)
+stays `pending` and is retried after 1m, 2m, 4m, ... up to 4h between
+attempts; after 12 attempts (about 16 hours) it is `failed`, with the last
+error in `error`. A request no retry can complete (no author key or page id)
+fails at once. Every step is idempotent, so a retry starts over safely.
 
 ## Stuck jobs
 

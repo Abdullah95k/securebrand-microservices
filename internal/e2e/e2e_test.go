@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -140,6 +141,40 @@ func TestEndToEnd(t *testing.T) {
 	if n := count(t, s, `SELECT count(*) FROM pages WHERE page_id = $1 AND name = $2 AND followers_count > 0`, page.ID, page.Name); n != 1 {
 		t.Fatal("page profile not stored")
 	}
+	// A job belongs to the client that made it (and admins): others get 404.
+	other := s.Key(t, api.ScopeJobsWrite, api.ScopeDataRead)
+	for _, c := range []struct{ key, method, path string }{
+		{other, "GET", "/v1/jobs/" + j.ID}, {other, "GET", "/v1/jobs/" + j.ID + "/results"}, {other, "POST", "/v1/jobs/" + j.ID + "/cancel"},
+	} {
+		resp := s.Do(t, c.key, c.method, c.path, nil)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("another client: %s %s = %d", c.method, c.path, resp.StatusCode)
+		}
+	}
+	if v := decodeBody[jobView](t, s.Do(t, adminKey, "GET", "/v1/jobs/"+j.ID, nil), http.StatusOK); v.ID != j.ID {
+		t.Fatalf("admin read %+v", v)
+	}
+	// The results stream holds every post and comment and ends with an end line.
+	results := s.Do(t, key, "GET", "/v1/jobs/"+j.ID+"/results?include=comments", nil)
+	kinds := map[string]int{}
+	var last string
+	sc := bufio.NewScanner(results.Body)
+	sc.Buffer(make([]byte, 0, 1<<20), 16<<20)
+	for sc.Scan() {
+		var line struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(sc.Bytes(), &line); err != nil {
+			t.Fatalf("results line %q: %v", sc.Text(), err)
+		}
+		kinds[line.Type]++
+		last = line.Type
+	}
+	_ = results.Body.Close()
+	if results.StatusCode != http.StatusOK || last != "end" || kinds["page"] != 1 || kinds["post"] != len(truth.Posts) || kinds["comment"] != wantComments {
+		t.Fatalf("results: status %d, kinds %v, last %q (want %d posts, %d comments)", results.StatusCode, kinds, last, len(truth.Posts), wantComments)
+	}
 	if n := count(t, s, `SELECT count(*) FROM comments WHERE page_id = $1 AND depth = 2`, page.ID); n == 0 {
 		t.Fatal("expected depth-2 replies")
 	}
@@ -161,6 +196,29 @@ func TestEndToEnd(t *testing.T) {
 	})
 	if ev.Status != fbv1.JobStatus_JOB_STATUS_COMPLETED || ev.Completeness.GetCommentsCollected() != int64(wantComments) {
 		t.Fatalf("job event = %+v", &ev)
+	}
+	// Comment media carry their author's key, so an erasure can find them
+	// still in flight.
+	mc, _ := kgo.NewClient(kgo.SeedBrokers(s.Cfg.Kafka.Brokers...), kgo.ConsumeTopics(s.Producer.Topic(topics.Media)),
+		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()))
+	defer mc.Close()
+	var commentMedia, keyed int
+	waitFor(t, "comment media", 20*time.Second, func() bool {
+		pctx, cancel := context.WithTimeout(ctx, time.Second)
+		defer cancel()
+		for _, r := range mc.PollFetches(pctx).Records() {
+			var m fbv1.Media
+			if proto.Unmarshal(r.Value, &m) == nil && m.OwnerType == "comment" {
+				commentMedia++
+				if len(m.AuthorKey) == 32 {
+					keyed++
+				}
+			}
+		}
+		return commentMedia > 0
+	})
+	if keyed != commentMedia {
+		t.Fatalf("%d of %d comment media carry an author key", keyed, commentMedia)
 	}
 
 	// 3. API reads; author identity only with pii:read.

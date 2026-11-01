@@ -290,6 +290,9 @@ func emitComments(ctx context.Context, d *Deps, b *kafka.Batch, t *taskv1.Task, 
 			c["comments_redacted"]++
 			continue
 		}
+		for _, m := range cb.Media {
+			m.AuthorKey = cm.GetAuthor().GetAuthorKey() // so an erasure can find it in flight
+		}
 		n, err := d.media(ctx, b, t, src, cb.Media, true)
 		if err != nil {
 			return 0, 0, err
