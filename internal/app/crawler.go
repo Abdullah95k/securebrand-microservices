@@ -117,7 +117,7 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 		slog.Warn("graphql: query breaker", "query", key, "from", from.String(), "to", to.String())
 	}
 	supp := gdpr.NewSuppression(db)
-	loader := &session.Loader{Rules: rules, AcceptLanguage: cfg.FB.AcceptLanguage}
+	loader := &session.Loader{Rules: rules, AcceptLanguage: cfg.FB.AcceptLanguage, Gate: proxies}
 	if cfg.FB.Browser.Enabled {
 		b, err := browser.NewBootstrapper(cfg.FB.Browser, cfg.FB.AcceptLanguage)
 		if err != nil {

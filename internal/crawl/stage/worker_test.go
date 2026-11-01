@@ -2,7 +2,6 @@ package stage
 
 import (
 	"errors"
-	"fmt"
 	"testing"
 	"time"
 
@@ -61,7 +60,11 @@ func TestExhausted(t *testing.T) {
 	if got := w.exhausted(&taskv1.Task{Attempt: 8}); got != "max_total_attempts" {
 		t.Errorf("configured total cap: %q", got)
 	}
-	// Waits for proxy exits have their own cap, apart from attempts.
+	// Waits for proxy exits have their own cap, apart from attempts; unset,
+	// it is defaultMaxWaits.
+	if got := w.exhausted(&taskv1.Task{Attempt: 2, Waits: defaultMaxWaits}); got != "max_waits" {
+		t.Errorf("default waits cap: %q", got)
+	}
 	w.MaxWaits = 480
 	if got := w.exhausted(&taskv1.Task{Attempt: 2, Waits: 479}); got != "" {
 		t.Errorf("waits under their cap: %q", got)
@@ -150,68 +153,52 @@ func TestNoIdentityWaitsForExits(t *testing.T) {
 
 // pagePlan: the HTML loads when the identity needs tokens or the page id
 // is unknown, and for a stale profile on the first segment before the
-// timeline started. A page load takes a slot from the exit's gate, except
-// a new identity's first one (reserved). Without a slot, a profile read is
-// deferred, and a load the task can't do without waits.
+// timeline started. (The exit's page-load gate is Loader.Load's.)
 func TestPagePlan(t *testing.T) {
 	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
 	cfg := &config.Config{}
 	cfg.Crawler.ProfileRefresh = 24 * time.Hour
-	pool, err := proxy.New(config.Proxy{
-		Tiers:     []config.ProxyTier{{Name: "isp", Kind: "static_list", Endpoints: []string{"http://isp.proxy.example:10001"}}},
-		PageLoads: config.PageLoads{Interval: time.Hour},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	d := &Deps{Cfg: cfg, Proxies: pool, Now: func() time.Time { return now }}
-	ep := proxy.Endpoint{Tier: "isp", Bucket: "isp|isp.proxy.example:10001", Exit: "isp|isp.proxy.example:10001"}
-	withTokens := func() *session.Identity {
-		id := &session.Identity{Endpoint: ep}
-		id.SetTokens(htmlx.Tokens{LSD: "x"})
-		return id
-	}
+	d := &Deps{Cfg: cfg, Now: func() time.Time { return now }}
+	withTokens := &session.Identity{}
+	withTokens.SetTokens(htmlx.Tokens{LSD: "x"})
+	noTokens := &session.Identity{}
 	fresh := &taskv1.PageScope{PageId: 7, ProfileSeenAt: timestamppb.New(now.Add(-time.Hour))}
 	stale := &taskv1.PageScope{PageId: 7, ProfileSeenAt: timestamppb.New(now.Add(-48 * time.Hour))}
 	unknown := &taskv1.PageScope{PageRef: "v:somebrand"}
 	first, later := &taskv1.Task{Seq: 0}, &taskv1.Task{Seq: 1}
 	start, progressed := &checkpoint.State{}, &checkpoint.State{Cursor: "c1", Pages: 2}
-	plan := func(tk *taskv1.Task, sc *taskv1.PageScope, st *checkpoint.State, id *session.Identity, c map[string]int64) string {
-		load, profile, wait := d.pagePlan(tk, sc, st, id, c)
-		return fmt.Sprintf("load=%v profile=%v wait=%v", load, profile, wait)
-	}
 	c := map[string]int64{}
 	for name, tc := range map[string]struct {
-		tk   *taskv1.Task
-		sc   *taskv1.PageScope
-		st   *checkpoint.State
-		want string
+		tk         *taskv1.Task
+		sc         *taskv1.PageScope
+		st         *checkpoint.State
+		id         *session.Identity
+		load, prof bool
 	}{
-		"later segment":        {later, stale, start, "load=false profile=false wait=false"},
-		"fresh profile":        {first, fresh, start, "load=false profile=false wait=false"},
-		"retry after progress": {first, stale, progressed, "load=false profile=false wait=false"},
+		"later segment":           {later, stale, start, withTokens, false, false},
+		"fresh profile":           {first, fresh, start, withTokens, false, false},
+		"retry after progress":    {first, stale, progressed, withTokens, false, false},
+		"stale profile":           {first, stale, start, withTokens, true, true},
+		"unknown page id":         {later, unknown, progressed, withTokens, true, true},
+		"identity without tokens": {later, stale, progressed, noTokens, true, false},
+		"fresh, without tokens":   {first, fresh, start, noTokens, true, false},
 	} {
-		if got := plan(tc.tk, tc.sc, tc.st, withTokens(), c); got != tc.want {
-			t.Errorf("%s: %s", name, got)
+		load, prof := d.pagePlan(tc.tk, tc.sc, tc.st, tc.id, c)
+		if load != tc.load || prof != tc.prof {
+			t.Errorf("%s: load=%v profile=%v, want %v %v", name, load, prof, tc.load, tc.prof)
 		}
 	}
-	if c["profile_skips"] != 1 {
-		t.Fatalf("one fresh profile skipped: %v", c)
+	if c["profile_skips"] != 2 {
+		t.Fatalf("two fresh profiles skipped: %v", c)
 	}
-	if got := plan(first, stale, start, withTokens(), c); got != "load=true profile=true wait=false" {
-		t.Fatalf("stale profile, exit free: %s", got)
+	// A load the task needs waits 30s while its exit paces page loads, 5m
+	// while it backs off after a walled one.
+	tk := &taskv1.Task{TaskId: "t"}
+	if o := pacedRetry(tk, "", session.ErrPaced, map[string]int64{}); o.Delay != "30s" || !o.Waiting {
+		t.Fatalf("paced: %+v", o)
 	}
-	// The exit just loaded a page: the profile read waits for a later run,
-	if got := plan(first, stale, start, withTokens(), c); got != "load=false profile=false wait=false" || c["profile_deferred"] != 1 {
-		t.Fatalf("stale profile, exit paced: %s %v", got, c)
-	}
-	// but a page whose id is still unknown can't go without its HTML,
-	if got := plan(first, unknown, start, withTokens(), c); got != "load=false profile=false wait=true" {
-		t.Fatalf("unknown page id, exit paced: %s", got)
-	}
-	// and neither can an identity without tokens that used its reservation.
-	if got := plan(later, stale, progressed, &session.Identity{Endpoint: ep}, c); got != "load=false profile=false wait=true" {
-		t.Fatalf("identity without tokens, exit paced: %s", got)
+	if o := pacedRetry(tk, "", session.ErrExitPaused, map[string]int64{}); o.Delay != "5m" || !o.Waiting {
+		t.Fatalf("backing off: %+v", o)
 	}
 }
 

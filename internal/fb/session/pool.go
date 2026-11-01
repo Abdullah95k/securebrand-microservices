@@ -134,11 +134,7 @@ func (p *Pool) Release(id *Identity) {
 
 // Retire marks id as unusable and releases it.
 func (p *Pool) Retire(id *Identity, reason string) {
-	id.mu.Lock()
-	if id.retired == "" {
-		id.retired = reason
-	}
-	id.mu.Unlock()
+	id.markRetired(reason)
 	p.Release(id)
 }
 

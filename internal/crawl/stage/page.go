@@ -2,6 +2,7 @@ package stage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -18,6 +19,7 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/detect"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/graphql"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/parse"
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/session"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/kafka"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/metrics"
 	"github.com/abdullah95k/securebrand-microservices/internal/topics"
@@ -67,10 +69,7 @@ func (s *PageStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	// Page HTML: profile + resolve + bootstrap (pagePlan). Page loads are
 	// what Facebook walls for logged-out sessions that view many pages,
 	// GraphQL is not, so they go through the exit's page-load gate.
-	load, profile, wait := d.pagePlan(t, sc, &st, id, c)
-	if wait {
-		return pacedRetry(t, st.Cursor, c)
-	}
+	load, profile := d.pagePlan(t, sc, &st, id, c)
 	if load {
 		url := sc.Url
 		if url == "" {
@@ -82,6 +81,14 @@ func (s *PageStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 			url = u.String()
 		}
 		pl, err := d.Loader.Load(ctx, id, url)
+		if errors.Is(err, session.ErrPaced) {
+			// The exit can't load a page now (nothing was sent).
+			if !id.Bootstrapped() || sc.PageId == 0 {
+				return pacedRetry(t, st.Cursor, err, c)
+			}
+			c["profile_deferred"]++ // only the profile needed it
+			goto timeline
+		}
 		d.observeLoad(pl, err, t.Lane)
 		c["requests"]++
 		if err != nil {
@@ -131,6 +138,7 @@ func (s *PageStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 			c["pages"]++
 		}
 	}
+timeline:
 	if sc.PageId == 0 {
 		return Outcome{Result: Fail, Reason: "page id unresolved", Counters: c}
 	}

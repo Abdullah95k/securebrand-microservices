@@ -1,6 +1,7 @@
 package stage
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
@@ -33,7 +34,8 @@ type Worker struct {
 	// (Task.attempt); 0 means 10 × MaxAttempts.
 	MaxTotalAttempts uint32
 	// MaxWaits bounds the retries spent waiting for proxy exits
-	// (Task.waits), which count toward neither of the above; 0: no bound.
+	// (Task.waits), which count toward neither of the above; 0 means
+	// defaultMaxWaits.
 	MaxWaits uint32
 	LeaseTTL time.Duration
 }
@@ -183,6 +185,9 @@ func stallsAfter(prev uint32, progressed, waiting bool) uint32 {
 	return prev + 1
 }
 
+// defaultMaxWaits is crawler.max_waits when unset: 4 hours of 30s waits.
+const defaultMaxWaits = 480
+
 // exhausted returns the dead-letter reason for a task about to be retried,
 // or "" while it may retry.
 func (w *Worker) exhausted(next *taskv1.Task) string {
@@ -195,7 +200,7 @@ func (w *Worker) exhausted(next *taskv1.Task) string {
 		return "max_attempts"
 	case next.Attempt >= total:
 		return "max_total_attempts"
-	case w.MaxWaits > 0 && next.Waits >= w.MaxWaits:
+	case next.Waits >= cmp.Or(w.MaxWaits, defaultMaxWaits):
 		return "max_waits"
 	}
 	return ""

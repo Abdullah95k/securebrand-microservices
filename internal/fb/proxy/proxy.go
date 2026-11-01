@@ -182,14 +182,21 @@ func (p *Pool) Next(tier string) (Endpoint, error) {
 // between page loads or backs off after a walled one; the caller skips the
 // page load rather than risk walling an identity that serves GraphQL.
 func (p *Pool) TakePageLoad(ep Endpoint) bool {
+	ok, _ := p.PageLoad(ep)
+	return ok
+}
+
+// PageLoad is TakePageLoad that also says why not: "paced" (the interval)
+// or "backoff" (after a walled page load). It implements session.PageGate.
+func (p *Pool) PageLoad(ep Endpoint) (bool, string) {
 	if ep.Exit == "" {
-		return true
+		return true, ""
 	}
 	ok, why, _ := p.pages.take(ep.Exit)
 	if !ok {
 		deferred(ep.Tier, why)
 	}
-	return ok
+	return ok, why
 }
 
 // Available reports whether tier has a bucket that is not cooling down.

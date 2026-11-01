@@ -11,6 +11,7 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/configs"
 	"github.com/abdullah95k/securebrand-microservices/internal/config"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/detect"
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/htmlx"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/proxy"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/transport"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/breaker"
@@ -202,5 +203,47 @@ func TestPageLoadWallsLeaveTheExitServing(t *testing.T) {
 	Outcome(id, detect.RateLimited)
 	if !proxies.IsOpen(id.Endpoint) {
 		t.Fatal("GraphQL blocks must open the exit")
+	}
+}
+
+type gateFunc func(proxy.Endpoint) (bool, string)
+
+func (f gateFunc) PageLoad(ep proxy.Endpoint) (bool, string) { return f(ep) }
+
+// Loader.Load takes a slot from the exit's gate before any page load.
+// Refused, nothing is sent: ErrPaced (ErrExitPaused while the exit backs
+// off). An identity without tokens is then retired, so the next task gets
+// a fresh one on an exit that can load; one with tokens is kept for
+// GraphQL. A new identity's reservation spares it the gate once, while
+// young.
+func TestLoaderPageGate(t *testing.T) {
+	refuse := func(why string) *Loader {
+		return &Loader{Gate: gateFunc(func(proxy.Endpoint) (bool, string) { return false, why })}
+	}
+	id := newIdentity("a", proxy.Endpoint{Tier: "isp", Exit: "isp|h:1"}, Fingerprint{}, nil, nil, 1, 1, 100)
+	if _, err := refuse("paced").Load(context.Background(), id, "https://www.facebook.com/x"); !errors.Is(err, ErrPaced) || errors.Is(err, ErrExitPaused) {
+		t.Fatalf("paced: %v", err)
+	}
+	if id.RetireReason() != "paced" {
+		t.Fatalf("an identity without tokens is retired: %q", id.RetireReason())
+	}
+	ok := newIdentity("b", proxy.Endpoint{Tier: "isp", Exit: "isp|h:1"}, Fingerprint{}, nil, nil, 1, 1, 100)
+	ok.SetTokens(htmlx.Tokens{LSD: "x"})
+	if _, err := refuse("backoff").Load(context.Background(), ok, "https://www.facebook.com/x"); !errors.Is(err, ErrExitPaused) || !errors.Is(err, ErrPaced) {
+		t.Fatalf("backoff: %v", err)
+	}
+	if ok.RetireReason() != "" {
+		t.Fatalf("an identity with tokens is kept: %q", ok.RetireReason())
+	}
+
+	young := newIdentity("c", proxy.Endpoint{}, Fingerprint{}, nil, nil, 1, 1, 100)
+	young.reserved = true
+	if !young.TakeReservation() || young.TakeReservation() {
+		t.Fatal("a young identity's reservation is good once")
+	}
+	old := newIdentity("d", proxy.Endpoint{}, Fingerprint{}, nil, nil, 1, 1, 100)
+	old.reserved, old.born = true, time.Now().Add(-time.Minute)
+	if old.TakeReservation() {
+		t.Fatal("a reservation older than its TTL is gone")
 	}
 }

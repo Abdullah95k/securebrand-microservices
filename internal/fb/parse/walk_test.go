@@ -225,7 +225,9 @@ func TestTimelineStoryCopiesAreNotShares(t *testing.T) {
 	photo := `{"__typename":"Photo","id":"901","image":{"uri":"https://scontent.example/p.jpg","width":10,"height":10}}`
 	link := `{"styles":{"attachment":{"url":"https://news.example/a","title":"A"}}}`
 	story := `{"__typename":"Story","id":"S:1","post_id":"11","creation_time":1700000200,"feedback":{"__typename":"Feedback","id":"F:1"},` +
+		`"attachments":[{"media":` + photo + `}],` +
 		`"comet_sections":{"content":{"story":{"__typename":"Story","id":"S:1","attachments":[` + link + `],"media":` + photo + `}},` +
+		`"context_layout":{"story":{"__typename":"Story","url":"https://www.facebook.com/p/11"}},` +
 		`"feedback":{"story":{"__typename":"Story","id":"S:1"}}}}`
 	body := `{"data":{"node":{"__typename":"Page","timeline_list_feed_units":{"edges":[` + wrapEdges(story) +
 		`],"page_info":{"has_next_page":false,"end_cursor":""}}}}}`
@@ -234,11 +236,14 @@ func TestTimelineStoryCopiesAreNotShares(t *testing.T) {
 		t.Fatalf("posts %d", len(res.Posts))
 	}
 	p := res.Posts[0].Post
-	if p.SharedPostId != nil || p.Type == fbv1.PostType_POST_TYPE_SHARE {
-		t.Fatalf("a copy of the story is not a share: shared=%v type=%v", p.SharedPostId, p.Type)
+	if p.SharedPostId != nil || p.SharedPostUrl != "" || p.Type == fbv1.PostType_POST_TYPE_SHARE {
+		t.Fatalf("a copy of the story is not a share: shared=%v %q type=%v", p.SharedPostId, p.SharedPostUrl, p.Type)
 	}
 	if len(res.Posts[0].Media) == 0 || len(p.Links) != 1 {
 		t.Fatalf("media %d, links %d: the copy's photo and link are the post's", len(res.Posts[0].Media), len(p.Links))
+	}
+	if len(p.MediaIds) != 1 || p.Type == fbv1.PostType_POST_TYPE_ALBUM {
+		t.Fatalf("the photo under the story and its copy is one photo: ids %v, type %v", p.MediaIds, p.Type)
 	}
 
 	// A story with another id is a share.
@@ -262,16 +267,33 @@ func TestHashtagsAfterEmoji(t *testing.T) {
 	}
 }
 
-// Only a breakdown, or a total given as a label ("1.2K"): the total is the
-// breakdown's sum, and not complete.
+// Only a breakdown: the total is the breakdown's sum, not complete. A
+// label like "1.2K" is an approximate total, also not complete. Exact
+// counts win over both.
 func TestReactionsFromABreakdownOnly(t *testing.T) {
-	fb := gjson.Parse(`{"i18n_reaction_count":"1.2K","top_reactions":{"edges":[{"reaction_count":900,"node":{"id":"1635855486666999"}},{"reaction_count":250,"node":{"id":"1678524932434102"}}]}}`)
-	r := Reactions(fb)
-	if r.Total != 1150 || r.Complete || r.ByType["like"] != 900 {
-		t.Fatalf("reactions %+v", r)
+	edges := `"top_reactions":{"edges":[{"reaction_count":900,"node":{"id":"1635855486666999"}},{"reaction_count":250,"node":{"id":"1678524932434102"}}]}`
+	if r := Reactions(gjson.Parse(`{` + edges + `}`)); r.Total != 1150 || r.Complete || r.ByType["like"] != 900 {
+		t.Fatalf("breakdown only: %+v", r)
 	}
-	none := Reactions(gjson.Parse(`{"reaction_count":{"count":0}}`))
-	if none.Total != 0 || !none.Complete {
-		t.Fatalf("no reactions: %+v", none)
+	if r := Reactions(gjson.Parse(`{"i18n_reaction_count":"1.2K",` + edges + `}`)); r.Total != 1200 || r.Complete {
+		t.Fatalf("a label: %+v", r)
+	}
+	if r := Reactions(gjson.Parse(`{"i18n_reaction_count":"1.2K","reaction_count":{"count":1150},` + edges + `}`)); r.Total != 1150 || !r.Complete {
+		t.Fatalf("an exact count beside a label: %+v", r)
+	}
+	if r := Reactions(gjson.Parse(`{"reaction_count":{"count":0}}`)); r.Total != 0 || !r.Complete {
+		t.Fatalf("no reactions: %+v", r)
+	}
+
+	// A story whose own feedback has only the breakdown, and whose nested
+	// copy has the exact count: the exact count wins.
+	story := `{"__typename":"Story","id":"S:1","post_id":"11","creation_time":1700000200,` +
+		`"feedback":{"__typename":"Feedback","id":"F:1",` + edges + `},` +
+		`"comet_sections":{"feedback":{"story":{"story_ufi_container":{"story":{"feedback_context":{"feedback_target_with_context":{"comet_ufi_summary_and_actions_renderer":{"feedback":{"id":"F:1","reaction_count":{"count":1234}}}}}}}}}}}`
+	body := `{"data":{"node":{"__typename":"Page","timeline_list_feed_units":{"edges":[` + wrapEdges(story) +
+		`],"page_info":{"has_next_page":false,"end_cursor":""}}}}}`
+	res, _ := Timeline([]gjson.Result{gjson.Parse(body)}, 5, "https://www.facebook.com")
+	if r := res.Posts[0].Post.Reactions; len(res.Posts) != 1 || r.Total != 1234 || r.ByType["like"] != 900 || r.Complete {
+		t.Fatalf("the exact count wins, the breakdown is kept: %+v", r)
 	}
 }

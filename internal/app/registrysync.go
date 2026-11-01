@@ -60,7 +60,7 @@ func NewRegistrySync(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, 
 	rules := detect.DefaultRules()
 	s := &registrysync.Sync{
 		DB: db, Cfg: rc, Pool: pool, Rules: rules, Params: reg.ClientParams,
-		Loader:         &session.Loader{Rules: rules, AcceptLanguage: cfg.FB.AcceptLanguage},
+		Loader:         &session.Loader{Rules: rules, AcceptLanguage: cfg.FB.AcceptLanguage, Gate: proxies},
 		AcceptLanguage: cfg.FB.AcceptLanguage, Locale: cfg.FB.Locale,
 		Fetch: docids.HTTPFetcher(media.NewHTTPClient()),
 	}

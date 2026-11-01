@@ -57,51 +57,36 @@ func (d *Deps) profileFresh(sc *taskv1.PageScope) bool {
 	return d.now().Sub(sc.ProfileSeenAt.AsTime()) < d.Cfg.Crawler.ProfileRefresh
 }
 
-// pagePlan decides whether the page task t loads the page's HTML now and
+// pagePlan decides whether the page task t loads the page's HTML and
 // whether it reads the profile from it.
 //   - The HTML must load when the identity has no tokens yet, or the page
 //     id is still unknown (the HTML resolves it).
 //   - The profile is read on the first segment while the timeline has not
 //     started (a retry after progress doesn't reload it), unless it is
 //     fresh (profile_skips).
-//   - A page load needs a slot from its exit's page-load gate, except the
-//     first one of a new identity (reserved when its exit was chosen).
-//     Without a slot an optional profile read is deferred
-//     (profile_deferred) and a required load waits (wait).
-func (d *Deps) pagePlan(t *taskv1.Task, sc *taskv1.PageScope, st *checkpoint.State, id *session.Identity, c map[string]int64) (load, profile, wait bool) {
-	required := !id.Bootstrapped() || sc.PageId == 0
+//
+// The load itself goes through the exit's page-load gate (Loader.Load):
+// when the exit can't load a page now, a profile-only read is deferred
+// and a load the task needs waits (pageLoadPaced).
+func (d *Deps) pagePlan(t *taskv1.Task, sc *taskv1.PageScope, st *checkpoint.State, id *session.Identity, c map[string]int64) (load, profile bool) {
 	profile = t.Seq == 0 && st.Cursor == "" && st.Pages == 0
 	if profile && d.profileFresh(sc) {
 		c["profile_skips"]++
 		profile = false
 	}
-	if !required && !profile {
-		return false, false, false
-	}
-	if !d.pageLoadAllowed(id) {
-		if required {
-			return false, false, true
-		}
-		c["profile_deferred"]++
-		return false, false, false
-	}
-	return true, profile || sc.PageId == 0, false
+	load = profile || !id.Bootstrapped() || sc.PageId == 0
+	return load, profile || sc.PageId == 0
 }
 
-// pageLoadAllowed reports whether id may load a page now: a new identity's
-// first page load was reserved when its exit was chosen; any other takes a
-// slot from its exit's page-load gate.
-func (d *Deps) pageLoadAllowed(id *session.Identity) bool {
-	if id.TakeReservation() {
-		return true
+// pacedRetry retries a task whose identity had to load a page while its
+// exit paces page loads (30s), or backs off after a walled one (5m): a
+// wait, not a stall.
+func pacedRetry(t *taskv1.Task, cursor string, err error, c map[string]int64) Outcome {
+	delay := "30s"
+	if errors.Is(err, session.ErrExitPaused) {
+		delay = "5m"
 	}
-	return d.Proxies == nil || d.Proxies.TakePageLoad(id.Endpoint)
-}
-
-// pacedRetry retries a task whose identity must load a page while its exit
-// paces page loads or backs off after a walled one: a wait, not a stall.
-func pacedRetry(t *taskv1.Task, cursor string, c map[string]int64) Outcome {
-	o := retry(t, cursor, "30s", "page loads paced on this exit", c)
+	o := retry(t, cursor, delay, err.Error(), c)
 	o.Waiting = true
 	return o
 }
@@ -194,22 +179,17 @@ func (d *Deps) tierFor(class string, stalls uint32) string {
 	return tiers[from]
 }
 
-// errPaced means an identity without tokens could not load a page: its
-// exit paces page loads or backs off after a walled one.
-var errPaced = errors.New("page loads paced on this exit")
-
 // ensureBootstrapped loads a page on an identity without tokens to obtain
-// them, when its exit's page-load gate allows (errPaced when not).
+// them (session.ErrPaced when its exit can't load a page now).
 func (d *Deps) ensureBootstrapped(ctx context.Context, id *session.Identity, pageID int64, lane taskv1.Lane) (*session.PageLoad, error) {
 	if id.Bootstrapped() {
 		return nil, nil
 	}
-	if !d.pageLoadAllowed(id) {
-		return nil, errPaced
-	}
 	u, _ := id.Base.Parse("/" + strconv.FormatInt(pageID, 10))
 	pl, err := d.Loader.Bootstrap(ctx, id, u.String())
-	d.observeLoad(pl, err, lane)
+	if !errors.Is(err, session.ErrPaced) { // nothing was sent
+		d.observeLoad(pl, err, lane)
+	}
 	return pl, err
 }
 

@@ -56,15 +56,29 @@ type Identity struct {
 	reserved bool
 }
 
+// reservationTTL is how long the page load reserved for a new identity
+// stays good: the slot was its exit's at creation, and another identity
+// may take the exit's next slot once the interval passes.
+const reservationTTL = 30 * time.Second
+
 // TakeReservation reports whether id still holds the page load reserved
-// when it was created, and uses it up. Any other page load must take a
-// slot from its exit's gate (proxy.Pool.TakePageLoad).
+// when it was created (and is young enough to use it), and uses it up.
+// Any other page load takes a slot from its exit's gate.
 func (id *Identity) TakeReservation() bool {
 	id.mu.Lock()
 	defer id.mu.Unlock()
-	r := id.reserved
+	r := id.reserved && time.Since(id.born) < reservationTTL
 	id.reserved = false
 	return r
+}
+
+// markRetired marks id for retirement when it is released.
+func (id *Identity) markRetired(reason string) {
+	id.mu.Lock()
+	if id.retired == "" {
+		id.retired = reason
+	}
+	id.mu.Unlock()
 }
 
 func newIdentity(id string, ep proxy.Endpoint, fp Fingerprint, d transport.Doer, base *url.URL, rps float64, burst, maxReq int) *Identity {
