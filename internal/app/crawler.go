@@ -31,6 +31,7 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/registry"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/session"
 	"github.com/abdullah95k/securebrand-microservices/internal/gdpr"
+	"github.com/abdullah95k/securebrand-microservices/internal/media"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/breaker"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/kafka"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/metrics"
@@ -156,6 +157,11 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 		c.Components = append(c.Components, ceil.Run)
 	}
 	if o.RawS3 != nil && cfg.FB.CaptureRaw != "none" {
+		// Raw responses hold comment text and authors: they expire after
+		// privacy.retention.raw_payload_days by a bucket lifecycle rule.
+		if days := cfg.Privacy.Retention.RawPayloadDays; days > 0 {
+			media.Lifecycle(ctx, o.RawS3, cfg.S3.RawBucket, time.Duration(days-1)*24*time.Hour)
+		}
 		sink := rawsink.New(o.RawS3, cfg.S3.RawBucket)
 		gql.Raw, gql.CaptureAll = sink, cfg.FB.CaptureRaw == "all"
 		c.Components = append(c.Components, func(ctx context.Context) error { return sink.Run(ctx, time.Minute) })

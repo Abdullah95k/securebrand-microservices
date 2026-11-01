@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/minio/minio-go/v7"
@@ -195,11 +196,19 @@ func (j *Janitor) Orphans(ctx context.Context) error {
 			continue
 		}
 		base := obj.Key[strings.LastIndexByte(obj.Key, '/')+1:]
-		id := strings.SplitN(base, ".", 2)[0]
-		var ready bool
-		_ = j.DB.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM media WHERE media_id::text = $1 AND status = 'ready')`, id).Scan(&ready)
-		if ready {
-			continue
+		id, err := uuid.Parse(strings.SplitN(base, ".", 2)[0])
+		if err == nil {
+			// A stored (announcement pending) or ready row keeps its object.
+			// A failed lookup keeps it too: deleting on a database error
+			// would lose media still in use.
+			var used bool
+			if err := j.DB.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM media WHERE media_id = $1 AND status IN ('stored','ready'))`,
+				id).Scan(&used); err != nil {
+				return err
+			}
+			if used {
+				continue
+			}
 		}
 		if err := j.S3.RemoveObject(ctx, j.Bucket, obj.Key, minio.RemoveObjectOptions{}); err != nil {
 			return err

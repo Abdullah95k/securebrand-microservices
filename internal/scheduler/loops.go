@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"math"
 	"time"
@@ -157,6 +158,8 @@ func (p *Planner) TierGauges(ctx context.Context) error {
 		return err
 	}
 	defer rows.Close()
+	type gauge struct{ pages, lag float64 }
+	seen := map[string]gauge{}
 	for rows.Next() {
 		var tier string
 		var n int64
@@ -164,10 +167,27 @@ func (p *Planner) TierGauges(ctx context.Context) error {
 		if err := rows.Scan(&tier, &n, &lag); err != nil {
 			return err
 		}
-		metrics.PageTier.WithLabelValues(tier).Set(float64(n))
-		metrics.ScheduleLag.WithLabelValues(tier).Set(math.Max(lag, 0))
+		seen[tier] = gauge{float64(n), math.Max(lag, 0)}
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	// A configured tier left with no pages reads 0, not its last count and
+	// lag.
+	names := []string{DormantTier}
+	for _, t := range p.Cfg.Scheduler.Tiers {
+		names = append(names, t.Name)
+	}
+	for _, n := range names {
+		if _, ok := seen[n]; !ok {
+			seen[n] = gauge{}
+		}
+	}
+	for tier, g := range seen {
+		metrics.PageTier.WithLabelValues(tier).Set(g.pages)
+		metrics.ScheduleLag.WithLabelValues(tier).Set(g.lag)
+	}
+	return nil
 }
 
 // applyOptions overlays stored per-page options (API CrawlOptions JSON).
@@ -290,16 +310,27 @@ func (r *Reaper) Tick(ctx context.Context) error {
 		}
 		eb, _ := json.Marshal(map[string]any{"message": reason, "pending_tasks": st.Pending})
 		cb, _ := json.Marshal(st.Counters)
-		tag, err := r.DB.Exec(ctx, `UPDATE jobs SET status = $2, error = $3, counters = $4, finished_at = now()
-			WHERE job_id = $1 AND status IN ('running','cancelling')`, j.id, final, eb, cb)
-		if err != nil || tag.RowsAffected() == 0 {
-			continue
+		var prev string
+		if err := r.DB.QueryRow(ctx, `UPDATE jobs SET status = $2, error = $3, counters = $4, finished_at = now()
+			WHERE job_id = $1 AND status IN ('running','cancelling') RETURNING old.status`, j.id, final, eb, cb).Scan(&prev); err != nil {
+			continue // finalized meanwhile, or the database failed: next tick
 		}
 		b := r.Producer.NewBatch()
-		_ = b.AddProto(ctx, topics.Job, j.id.String(), &fbv1.JobEvent{EventId: j.id.String() + ":" + final, JobId: j.id.String(),
+		err = b.AddProto(ctx, topics.Job, j.id.String(), &fbv1.JobEvent{EventId: j.id.String() + ":" + final, JobId: j.id.String(),
 			Status: jobStatus(final), Kind: j.kind, PageRef: j.ref, CreatedAt: timestamppb.New(j.created),
 			FinishedAt: timestamppb.Now(), Counters: st.Counters, Errors: []string{reason}})
-		_ = b.Wait(ctx)
+		if err == nil {
+			err = b.Wait(ctx)
+		}
+		if err != nil {
+			// Not announced: reopen the job, so the next tick closes it
+			// again and sends the event.
+			if _, rerr := r.DB.Exec(ctx, `UPDATE jobs SET status = $2, error = NULL, finished_at = NULL WHERE job_id = $1 AND status = $3`,
+				j.id, prev, final); rerr != nil {
+				slog.Error("reaper: job closed but its event was not sent", "job", j.id, "err", errors.Join(err, rerr))
+			}
+			continue
+		}
 		metrics.Jobs.WithLabelValues(final, "unknown").Inc()
 		slog.Warn("reaper: job closed", "job", j.id, "status", final, "reason", reason)
 	}
@@ -315,15 +346,23 @@ type Maintenance struct {
 func (m *Maintenance) Tick(ctx context.Context) error {
 	now := time.Now().UTC()
 	monthsBack := m.Cfg.Limits.MaxAgeCapDays/30 + 1
+	ret := m.Cfg.Privacy.Retention
+	// Partitions retention would drop again are not created.
+	notBefore := map[string]time.Time{}
+	if ret.CommentsDays > 0 {
+		notBefore["comments"] = now.AddDate(0, 0, -ret.CommentsDays)
+	}
+	if ret.MetricsDays > 0 {
+		notBefore["post_metrics"] = now.AddDate(0, 0, -ret.MetricsDays)
+	}
 	n, err := store.EnsurePartitions(ctx, m.DB, now, store.PartitionWindow{
-		MonthsBack: monthsBack, MonthsAhead: m.Cfg.Scheduler.PartitionMonthsAhead, DaysBack: 1, DaysAhead: 14})
+		MonthsBack: monthsBack, MonthsAhead: m.Cfg.Scheduler.PartitionMonthsAhead, DaysBack: 1, DaysAhead: 14, NotBefore: notBefore})
 	if err != nil {
 		return err
 	}
 	if n > 0 {
 		slog.Info("partitions created", "count", n)
 	}
-	ret := m.Cfg.Privacy.Retention
 	drops := []struct {
 		table string
 		days  int
@@ -345,7 +384,10 @@ func (m *Maintenance) Tick(ctx context.Context) error {
 		days int
 	}{
 		{`DELETE FROM jobs WHERE job_id IN (SELECT job_id FROM jobs WHERE finished_at < now() - make_interval(days => $1) LIMIT 5000)`, ret.JobsDays},
-		{`DELETE FROM media WHERE media_id IN (SELECT media_id FROM media WHERE status IN ('deleted','expired','failed','skipped')
+		// Rows never downloaded (variants the policy leaves out, media of
+		// jobs without media) are purged too: their signed URLs expired
+		// long ago, and they keep comment ids after retention.
+		{`DELETE FROM media WHERE media_id IN (SELECT media_id FROM media WHERE status IN ('discovered','deleted','expired','failed','skipped')
 			AND discovered_at < now() - make_interval(days => $1) LIMIT 5000)`, ret.MediaRowsDays},
 		{`DELETE FROM comment_authors WHERE author_key IN (SELECT author_key FROM comment_authors
 			WHERE last_seen_at < now() - make_interval(days => $1) LIMIT 5000)`, ret.AuthorsInactiveDays},

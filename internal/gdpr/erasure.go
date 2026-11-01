@@ -103,8 +103,15 @@ func (e *Eraser) process(ctx context.Context, r request) (map[string]int64, erro
 		}
 		ev.SubjectType, ev.AuthorKey = fbv1.SubjectType_SUBJECT_TYPE_AUTHOR, r.authorKey
 		var commentIDs []int64
+		var authorID *string
 		err := pgx.BeginFunc(ctx, e.DB, func(tx pgx.Tx) error {
 			if err := lockExclusive(ctx, tx); err != nil {
+				return err
+			}
+			// The Facebook id (stored in pii_mode full) finds the author's
+			// mentions in other people's text, below.
+			if err := tx.QueryRow(ctx, `SELECT author_id FROM comment_authors WHERE author_key = $1`, r.authorKey).
+				Scan(&authorID); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 				return err
 			}
 			if _, err := tx.Exec(ctx, `INSERT INTO suppression (subject_type, subject_key) VALUES ('author', $1) ON CONFLICT DO NOTHING`,
@@ -128,11 +135,19 @@ func (e *Eraser) process(ctx context.Context, r request) (map[string]int64, erro
 			return nil, err
 		}
 		stats["comments_redacted"] = int64(len(commentIDs))
-		n, err := e.deleteMedia(ctx, `comment_id = ANY($1)`, commentIDs)
+		// By author key too: the media of a comment not stored yet.
+		n, err := e.deleteMedia(ctx, `(author_key = $1 OR comment_id = ANY($2))`, r.authorKey, commentIDs)
 		if err != nil {
 			return nil, err
 		}
 		stats["media_deleted"] = n
+		if authorID != nil && *authorID != "" {
+			n, err := e.scrubMentions(ctx, *authorID)
+			if err != nil {
+				return nil, err
+			}
+			stats["mentions_scrubbed"] = n
+		}
 	case "page":
 		if r.pageID == nil {
 			return nil, fmt.Errorf("%w: page erasure without page id", errInvalid)
@@ -158,8 +173,10 @@ func (e *Eraser) process(ctx context.Context, r request) (map[string]int64, erro
 		stats["media_deleted"] = n
 		err = pgx.BeginFunc(ctx, e.DB, func(tx pgx.Tx) error {
 			for _, q := range []struct{ name, sql string }{
-				{"comments", `DELETE FROM comments WHERE page_id = $1`},
-				{"post_metrics", `DELETE FROM post_metrics WHERE page_id = $1`},
+				// Through the page's post ids, which the comments and metrics
+				// are indexed by (page_id alone would scan every partition).
+				{"comments", `DELETE FROM comments WHERE post_id IN (SELECT post_id FROM post_index WHERE page_id = $1) AND page_id = $1`},
+				{"post_metrics", `DELETE FROM post_metrics WHERE post_id IN (SELECT post_id FROM post_index WHERE page_id = $1) AND page_id = $1`},
 				{"posts", `DELETE FROM posts WHERE page_id = $1`},
 				{"post_index", `DELETE FROM post_index WHERE page_id = $1`},
 				{"page_snapshots", `DELETE FROM page_snapshots WHERE page_id = $1`},
@@ -191,11 +208,29 @@ func (e *Eraser) process(ctx context.Context, r request) (map[string]int64, erro
 	return stats, b.Wait(ctx)
 }
 
-// deleteMedia removes stored objects matching where (with one argument)
-// and marks the rows deleted.
-func (e *Eraser) deleteMedia(ctx context.Context, where string, arg any) (int64, error) {
+// scrubMentions clears the id, profile URL and name of the mentions of a
+// Facebook user in stored text ranges, as ScrubMentions does. It runs
+// outside the erasure lock: it reads every row, and writers must not wait.
+func (e *Eraser) scrubMentions(ctx context.Context, fbID string) (int64, error) {
+	var n int64
+	for _, table := range []string{"comments", "posts"} {
+		tag, err := e.DB.Exec(ctx, `UPDATE `+table+` SET text_ranges = (
+				SELECT jsonb_agg(CASE WHEN x.r->>'entity_id' = $1 THEN x.r - 'entity_id' - 'url' - 'name' ELSE x.r END ORDER BY x.i)
+				FROM jsonb_array_elements(text_ranges) WITH ORDINALITY AS x(r, i))
+			WHERE text_ranges @> jsonb_build_array(jsonb_build_object('entity_id', $1::text))`, fbID)
+		if err != nil {
+			return n, fmt.Errorf("mentions in %s: %w", table, err)
+		}
+		n += tag.RowsAffected()
+	}
+	return n, nil
+}
+
+// deleteMedia removes stored objects matching where and marks the rows
+// deleted.
+func (e *Eraser) deleteMedia(ctx context.Context, where string, args ...any) (int64, error) {
 	rows, err := e.DB.Query(ctx, `SELECT media_id::text, s3_bucket, s3_key FROM media WHERE `+where+
-		` AND s3_key IS NOT NULL AND status IN ('stored','ready')`, arg)
+		` AND s3_key IS NOT NULL AND status IN ('stored','ready')`, args...)
 	if err != nil {
 		return 0, err
 	}
@@ -222,7 +257,7 @@ func (e *Eraser) deleteMedia(ctx context.Context, where string, arg any) (int64,
 		metrics.MediaDeleted.WithLabelValues("erasure").Inc()
 	}
 	if _, err := e.DB.Exec(ctx, `UPDATE media SET status = 'deleted', deleted_at = now(), source_url = NULL WHERE `+where+
-		` AND status NOT IN ('deleted')`, arg); err != nil {
+		` AND status NOT IN ('deleted')`, args...); err != nil {
 		return 0, err
 	}
 	return int64(len(objs)), b.Wait(ctx)

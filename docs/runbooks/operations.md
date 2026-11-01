@@ -151,6 +151,14 @@ Symptom: `fbs_parse_total{outcome="drift"}` (alert `FbsSchemaDrift`), or a field
   - `fbs_lane_slots{state="waiting",lane="p0"}` above 0 for long means on-demand work is queuing behind tasks that are still finishing. Tasks yield after `crawler.yield_after`, so it clears within a minute; if it persists, add pods.
 * Persister lag delays job completion (the finalizer waits up to
   `scheduler.finalize_timeout`). Scale the persister; check Postgres I/O.
+* The persister never stalls on one bad record: NUL characters (which
+  Postgres can't store) are removed from every text, and a record Postgres
+  still refuses for its data (SQLSTATE class 22) is skipped by itself, logged
+  with its topic, partition, offset and SQLSTATE (never its content) and
+  counted in `fbs_persist_rows_total{op="rejected"}`. A rising count means a
+  shape Postgres won't take: look at the logged offsets.
+* Comments of posts older than `privacy.retention.comments_days` are not
+  written (`op="past_retention"`): retention would drop them within the hour.
 
 ## Media backlog / TTL expiries
 
@@ -158,6 +166,11 @@ Symptom: `fbs_parse_total{outcome="drift"}` (alert `FbsSchemaDrift`), or a field
   is not acking in time. Fix the consumer or raise `media.ttl`.
 * `fbs_media_download_total{outcome="expired"}` rising: downloads lag behind
   discovery; scale `media-downloader`.
+* A downloaded object is `stored` until its `fb.media.ready.v1` event is
+  acknowledged by Kafka, then `ready`; a record redelivered in between sends
+  the event without downloading again. Rows never downloaded (variants the
+  video policy leaves out, jobs without media) are purged after
+  `privacy.retention.media_rows_days`, with the other finished rows.
 
 ## Erasure requests
 
@@ -169,8 +182,15 @@ the suppression set every `crawler.suppression_refresh` (60s) and redact
 before publishing, so re-scrapes never reintroduce the data; the persister
 also checks the suppression table on every write, so data crawled before the
 crawlers' last refresh and still in flight is dropped (a suppressed page) or
-stored redacted (a suppressed author). Kafka topics and raw payloads age out
-by retention (7 days).
+stored redacted (a suppressed author). Kafka topics age out by retention (7
+days); raw payloads by a bucket lifecycle rule the crawler sets on the raw
+bucket (`privacy.retention.raw_payload_days`, 7).
+
+An author erasure also deletes the author's media whose comment isn't
+stored yet (comment media carry the author key), and clears the author's
+mentions (profile id, URL, name) in other people's comments and posts; the
+crawlers clear them in later scrapes too. A page erasure deletes the page's
+comments and metrics through its post ids.
 
 A request that fails on a passing error (database, object store, Kafka)
 stays `pending` and is retried after 1m, 2m, 4m, ... up to 4h between
