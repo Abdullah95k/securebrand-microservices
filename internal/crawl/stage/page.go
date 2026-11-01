@@ -179,6 +179,7 @@ timeline:
 	started := time.Now()
 	var oldest time.Time
 	finished, truncated := false, ""
+	capped := false // stopped at the job's max_posts
 
 	for !finished {
 		if kafka.IsDraining(ctx) || st.Pages >= d.Cfg.Crawler.YieldPages || time.Since(started) > d.Cfg.Crawler.YieldAfter {
@@ -251,7 +252,7 @@ timeline:
 			}
 			st.ConsecutiveOld = 0
 			if t.Limits.GetMaxPosts() > 0 && st.PostsSeen >= t.Limits.MaxPosts {
-				finished = true
+				finished, capped = true, true
 				break
 			}
 			st.PostsSeen++
@@ -305,11 +306,7 @@ timeline:
 			state = "truncated"
 			c["timelines_truncated"]++
 		}
-		var newest time.Time
-		if st.NewestSeenUnix > 0 {
-			newest = time.Unix(st.NewestSeenUnix, 0).UTC()
-		}
-		if err := d.savePageWatermark(ctx, sc.PageId, newest, oldest, state, truncated, mode == fbv1.CrawlMode_CRAWL_MODE_FULL); err != nil {
+		if err := d.savePageWatermark(ctx, sc.PageId, passNewest(st, mode, truncated != "" || capped), oldest, state, truncated, mode == fbv1.CrawlMode_CRAWL_MODE_FULL); err != nil {
 			return retry(t, st.Cursor, "30s", "watermark: "+err.Error(), c)
 		}
 		return done(c)
@@ -342,7 +339,9 @@ func (s *PageStage) commentsTask(ctx context.Context, t *taskv1.Task, mode fbv1.
 		scope.FeedbackId = parse.FeedbackID(p.PostId)
 	}
 	cmode := fbv1.CrawlMode_CRAWL_MODE_FULL
-	if mode == fbv1.CrawlMode_CRAWL_MODE_INCREMENTAL {
+	// A post a reply thread of which was lost since its last pass is read
+	// whole: a newest-first pass would never reach that old comment again.
+	if mode == fbv1.CrawlMode_CRAWL_MODE_INCREMENTAL && !s.D.Ckpt.TakeIncomplete(ctx, p.PostId) {
 		if prev, ok := s.D.Ckpt.GetPost(ctx, p.PostId); ok {
 			if reported <= prev.Reported && prev.ThreadsComplete {
 				return nil, jobs.PostSkipped
@@ -371,6 +370,18 @@ func (d *Deps) emitUnavailable(ctx context.Context, t *taskv1.Task, sc *taskv1.P
 
 // wallTruncates records a login wall at cursor and reports whether it has
 // now been seen on enough distinct identities to call the stream truncated.
+// passNewest is the newest post time a finished timeline pass records as
+// the page's watermark (zero: leave it). An incremental pass cut short (a
+// login wall, or the job's max_posts) didn't reach its old watermark: the posts between where it stopped and
+// the watermark are still unread, so the watermark stays and the next pass
+// reads back to it again.
+func passNewest(st checkpoint.State, mode fbv1.CrawlMode, truncated bool) time.Time {
+	if st.NewestSeenUnix <= 0 || truncated && mode == fbv1.CrawlMode_CRAWL_MODE_INCREMENTAL {
+		return time.Time{}
+	}
+	return time.Unix(st.NewestSeenUnix, 0).UTC()
+}
+
 func wallTruncates(st *checkpoint.State, cursor string) bool {
 	if st.WallCursor != cursor {
 		st.WallCursor, st.Walls = cursor, 0

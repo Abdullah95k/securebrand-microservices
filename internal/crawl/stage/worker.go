@@ -3,6 +3,7 @@ package stage
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -249,8 +250,14 @@ func (w *Worker) deadLetter(ctx context.Context, t *taskv1.Task, reason, detail 
 		c = map[string]int64{}
 	}
 	c["tasks_failed"]++
-	if t.Kind == taskv1.Kind_KIND_POST {
+	// The post's comments are incomplete: its next pass reads it whole.
+	switch t.Kind {
+	case taskv1.Kind_KIND_POST:
 		_ = w.D.Jobs.UpdatePostState(ctx, t.JobId, t.GetPost().GetPostId(), jobs.PostFailed)
+		_ = w.D.Ckpt.MarkIncomplete(ctx, t.GetPost().GetPostId())
+	case taskv1.Kind_KIND_THREAD:
+		_ = w.D.Jobs.UpdatePostState(ctx, t.JobId, t.GetThread().GetPostId(), jobs.PostTruncated)
+		_ = w.D.Ckpt.MarkIncomplete(ctx, t.GetThread().GetPostId())
 	}
 	return w.finish(ctx, t, c)
 }
@@ -265,13 +272,17 @@ func (w *Worker) deadLetterRaw(ctx context.Context, rec *kgo.Record, reason, det
 	return w.D.Producer.ProduceSync(ctx, out)
 }
 
+// ignoreUnspawned drops the error of a task produced outside job accounting
+// (e.g. a DLQ replay of an old job), which must not block the consumer. Any
+// other error (Redis unreachable) is returned, so the record is retried:
+// otherwise the job would never see the task done and would hang until the
+// reaper closed it.
 func ignoreUnspawned(err error) error {
-	// A task produced outside job accounting (e.g. a DLQ replay of an old
-	// job) must not block the consumer.
-	if err != nil {
+	if errors.Is(err, jobs.ErrNeverSpawned) {
 		slog.Debug("jobs: done", "err", err)
+		return nil
 	}
-	return nil
+	return err
 }
 
 func truncate(s string, n int) string {
@@ -281,11 +292,34 @@ func truncate(s string, n int) string {
 	return s
 }
 
-// RetryRelay moves parked tasks back to their original topic once due. Run
-// it with MaxInflightPerPartition = 1: each retry topic has a fixed delay, so
-// the head of a partition is always the next one due.
+// RetryRelay moves parked tasks back to their original topic once due. Each
+// record waits for its own due time, so run one consumer per retry topic,
+// with room for many records in flight: a record waiting must not hold up
+// one due sooner.
 type RetryRelay struct {
 	Producer *kafka.Producer
+}
+
+// retryRelayInflight is how many parked tasks a relay consumer holds waiting
+// for their due time; past it, it stops fetching until the earliest are
+// relayed.
+const retryRelayInflight = 1024
+
+// RetryRelays returns the relay's consumers: one per retry topic, so a task
+// parked for an hour never holds up one due in 30 seconds. They share one
+// group (and its committed offsets); each member subscribes to one topic.
+func RetryRelays(kcfg kafka.ClientConfig, producer *kafka.Producer) ([]*kafka.Consumer, error) {
+	relay := &RetryRelay{Producer: producer}
+	out := make([]*kafka.Consumer, 0, len(topics.RetryTopics))
+	for _, topic := range topics.RetryTopics {
+		cons, err := kafka.NewConsumer(kafka.ConsumerConfig{ClientConfig: kcfg, Group: "fbs-retry-relay", Topics: []string{topic},
+			MaxInflight: retryRelayInflight, MaxInflightPerPartition: retryRelayInflight, DrainTimeout: 5 * time.Second}, relay.Handle)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, cons)
+	}
+	return out, nil
 }
 
 func (r *RetryRelay) Handle(ctx context.Context, rec *kgo.Record) error {

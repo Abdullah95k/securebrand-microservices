@@ -280,3 +280,43 @@ func TestCommentEditsAndDeletions(t *testing.T) {
 		t.Fatalf("%d comments deleted at the end, want the %d deleted on Facebook", n, len(wantDeleted))
 	}
 }
+
+// An incremental pass reads a post's newest comments and stops at older
+// ones, so it can't see replies added to an old comment. When the post's
+// count grew more than the new comments it found (the older ones it read
+// before stopping don't count), it recrawls the post and finds them.
+func TestIncrementalRecrawlFindsRepliesToOldComments(t *testing.T) {
+	s := Start(t, Options{Spec: fakefb.Spec{Seed: 31, Pages: 1, PostsPerPage: 3, PostSpacing: 2 * time.Hour, MaxComments: 40}})
+	key := s.Key(t, api.ScopeJobsWrite, api.ScopeDataRead)
+	page := s.Fake.World.Pages()[0]
+	if j := s.runJob(t, key, page.Vanity, "full"); j.Status != "completed" {
+		t.Fatalf("first job: %+v", j)
+	}
+	posts := append([]*fakefb.Post(nil), page.Posts...)
+	sort.Slice(posts, func(i, j int) bool { return len(posts[i].Comments) > len(posts[j].Comments) })
+	target := posts[0]
+	if len(target.Comments) < 10 {
+		t.Fatalf("post too small for the test: %d comments", len(target.Comments))
+	}
+	oldest := target.Comments[0]
+	for _, c := range target.Comments {
+		if c.CreatedAt.Before(oldest.CreatedAt) {
+			oldest = c
+		}
+	}
+	before := count(t, s, `SELECT count(*) FROM comments WHERE parent_comment_id = $1`, oldest.ID)
+	if err := s.Fake.World.AddComments(target.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Fake.World.AddReplies(oldest.ID, 4); err != nil {
+		t.Fatal(err)
+	}
+	j := s.runJob(t, key, page.Vanity, "auto")
+	t.Logf("incremental job: mode %s, counters %v", j.Mode, j.Counters)
+	if j.Status != "completed" || j.Counters["recrawls_spawned"] < 1 {
+		t.Fatalf("incremental job: %+v", j)
+	}
+	if after := count(t, s, `SELECT count(*) FROM comments WHERE parent_comment_id = $1`, oldest.ID); after != before+4 {
+		t.Fatalf("replies to the oldest comment: %d, want %d", after, before+4)
+	}
+}

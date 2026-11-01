@@ -199,11 +199,12 @@ func (s *PostStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 		}
 		_ = d.Ckpt.SetPost(ctx, sc.PostId, checkpoint.PostCache{Reported: sc.ReportedCommentCount, NewestComment: newest, ThreadsComplete: !truncated})
 		// An incremental newest-first pass cannot see replies added to older
-		// comments. If the count grew more than we found, do a full pass.
+		// comments. If the count grew more than the new comments we found
+		// (the older ones read before stopping don't count), do a full pass.
 		out := done(c)
 		if t.Mode == fbv1.CrawlMode_CRAWL_MODE_INCREMENTAL && !truncated {
 			grew := sc.ReportedCommentCount - sc.CommentsSeen
-			if grew > 0 && st.ItemsSeen < grew {
+			if grew > 0 && st.NewSeen < grew {
 				out.FollowUps = append(out.FollowUps, task.NewPost(t, fbv1.CrawlMode_CRAWL_MODE_RECRAWL, cloneScope(sc)))
 				c["recrawls_spawned"]++
 			}
@@ -268,13 +269,14 @@ func emitComments(ctx context.Context, d *Deps, b *kafka.Batch, t *taskv1.Task, 
 	for _, cb := range res.Comments {
 		cm := cb.Comment
 		if cm.CreatedAt != nil {
-			u := cm.CreatedAt.AsTime().Unix()
-			if u > st.NewestSeenUnix {
+			if u := cm.CreatedAt.AsTime().Unix(); u > st.NewestSeenUnix {
 				st.NewestSeenUnix = u
 			}
-			if !watermark.IsZero() && cm.CreatedAt.AsTime().Before(watermark) {
-				older++
-			}
+		}
+		if !watermark.IsZero() && cm.CreatedAt != nil && cm.CreatedAt.AsTime().Before(watermark) {
+			older++
+		} else {
+			st.NewSeen++
 		}
 		keep, err := d.Emit.Comment(ctx, b, src, cm)
 		if err != nil {
@@ -444,6 +446,7 @@ func (s *ThreadStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 		if truncated {
 			c["threads_truncated"]++
 			_ = d.Jobs.UpdatePostState(ctx, t.JobId, sc.PostId, jobs.PostTruncated)
+			_ = d.Ckpt.MarkIncomplete(ctx, sc.PostId)
 		} else {
 			_ = d.Ckpt.SetThread(ctx, sc.CommentId, sc.ReportedReplyCount)
 		}
