@@ -64,14 +64,14 @@ func (s *PageStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 		}
 	}
 
-	// Page HTML: profile + resolve + bootstrap. The profile is read on the
-	// first segment unless it is fresh (read within crawler.profile_refresh)
-	// or the identity's exit can't load a page now (it paces page loads);
-	// the HTML is loaded for it, or when the identity has no tokens yet. Page
-	// loads are what Facebook walls for logged-out sessions that view many
-	// pages, GraphQL is not.
-	profile := d.readProfile(t, sc, id, c)
-	if !id.Bootstrapped() || profile {
+	// Page HTML: profile + resolve + bootstrap (pagePlan). Page loads are
+	// what Facebook walls for logged-out sessions that view many pages,
+	// GraphQL is not, so they go through the exit's page-load gate.
+	load, profile, wait := d.pagePlan(t, sc, &st, id, c)
+	if wait {
+		return pacedRetry(t, st.Cursor, c)
+	}
+	if load {
 		url := sc.Url
 		if url == "" {
 			ref := sc.PageRef

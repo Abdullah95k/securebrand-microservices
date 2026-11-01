@@ -154,6 +154,7 @@ func (p *Pool) create(tier string) (*Identity, error) {
 	}
 	maxReq := randRange(p.cfg.MaxRequestsMin, p.cfg.MaxRequestsMax)
 	id := newIdentity(newID(), ep, fp, d, p.base, p.cfg.IdentityRPS, p.cfg.IdentityBurst, maxReq)
+	id.reserved = true // proxies.Next reserved its first page load
 	id.observe = func(c detect.Class, pageLoad bool) {
 		if pageLoad {
 			p.proxies.ObservePageLoad(ep, c)

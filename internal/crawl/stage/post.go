@@ -2,6 +2,7 @@ package stage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -46,8 +47,11 @@ func (s *PostStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	}
 	defer d.Pool.Release(id)
 	if pl, err := d.ensureBootstrapped(ctx, id, sc.PageId, t.Lane); err != nil {
-		if pl != nil {
+		switch {
+		case pl != nil:
 			return classOutcome(t, pl.Class, pl.Reason, t.Cursor, c)
+		case errors.Is(err, errPaced):
+			return pacedRetry(t, t.Cursor, c)
 		}
 		return retry(t, t.Cursor, "30s", "bootstrap: "+err.Error(), c)
 	}
@@ -346,8 +350,11 @@ func (s *ThreadStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	}
 	defer d.Pool.Release(id)
 	if pl, err := d.ensureBootstrapped(ctx, id, sc.PageId, t.Lane); err != nil {
-		if pl != nil {
+		switch {
+		case pl != nil:
 			return classOutcome(t, pl.Class, pl.Reason, t.Cursor, c)
+		case errors.Is(err, errPaced):
+			return pacedRetry(t, t.Cursor, c)
 		}
 		return retry(t, t.Cursor, "30s", "bootstrap: "+err.Error(), c)
 	}

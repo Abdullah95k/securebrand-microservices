@@ -186,6 +186,9 @@ func TestPageLoadWallsLeaveTheExitServing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !id.TakeReservation() || id.TakeReservation() {
+		t.Fatal("a new identity holds one reserved page load")
+	}
 	for range 5 {
 		PageOutcome(id, detect.LoginWall)
 	}

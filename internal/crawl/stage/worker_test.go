@@ -2,6 +2,7 @@ package stage
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -59,6 +60,14 @@ func TestExhausted(t *testing.T) {
 	w.MaxTotalAttempts = 8
 	if got := w.exhausted(&taskv1.Task{Attempt: 8}); got != "max_total_attempts" {
 		t.Errorf("configured total cap: %q", got)
+	}
+	// Waits for proxy exits have their own cap, apart from attempts.
+	w.MaxWaits = 480
+	if got := w.exhausted(&taskv1.Task{Attempt: 2, Waits: 479}); got != "" {
+		t.Errorf("waits under their cap: %q", got)
+	}
+	if got := w.exhausted(&taskv1.Task{Attempt: 2, Waits: 480}); got != "max_waits" {
+		t.Errorf("waits at their cap: %q", got)
 	}
 }
 
@@ -139,12 +148,12 @@ func TestNoIdentityWaitsForExits(t *testing.T) {
 	}
 }
 
-// The profile is read on a page task's first segment when it is stale. An
-// identity that already has tokens reads it only if its exit can load a
-// page now; otherwise the read is deferred, never risking a wall on an
-// identity that serves GraphQL. An identity without tokens loads the page
-// anyway, so the gate does not apply.
-func TestReadProfile(t *testing.T) {
+// pagePlan: the HTML loads when the identity needs tokens or the page id
+// is unknown, and for a stale profile on the first segment before the
+// timeline started. A page load takes a slot from the exit's gate, except
+// a new identity's first one (reserved). Without a slot, a profile read is
+// deferred, and a load the task can't do without waits.
+func TestPagePlan(t *testing.T) {
 	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
 	cfg := &config.Config{}
 	cfg.Crawler.ProfileRefresh = 24 * time.Hour
@@ -156,25 +165,53 @@ func TestReadProfile(t *testing.T) {
 		t.Fatal(err)
 	}
 	d := &Deps{Cfg: cfg, Proxies: pool, Now: func() time.Time { return now }}
-	ep := proxy.Endpoint{Tier: "isp", Bucket: "isp|isp.proxy.example:10001"}
-	withTokens := &session.Identity{Endpoint: ep}
-	withTokens.SetTokens(htmlx.Tokens{LSD: "x"})
+	ep := proxy.Endpoint{Tier: "isp", Bucket: "isp|isp.proxy.example:10001", Exit: "isp|isp.proxy.example:10001"}
+	withTokens := func() *session.Identity {
+		id := &session.Identity{Endpoint: ep}
+		id.SetTokens(htmlx.Tokens{LSD: "x"})
+		return id
+	}
 	fresh := &taskv1.PageScope{PageId: 7, ProfileSeenAt: timestamppb.New(now.Add(-time.Hour))}
 	stale := &taskv1.PageScope{PageId: 7, ProfileSeenAt: timestamppb.New(now.Add(-48 * time.Hour))}
+	unknown := &taskv1.PageScope{PageRef: "v:somebrand"}
 	first, later := &taskv1.Task{Seq: 0}, &taskv1.Task{Seq: 1}
-
+	start, progressed := &checkpoint.State{}, &checkpoint.State{Cursor: "c1", Pages: 2}
+	plan := func(tk *taskv1.Task, sc *taskv1.PageScope, st *checkpoint.State, id *session.Identity, c map[string]int64) string {
+		load, profile, wait := d.pagePlan(tk, sc, st, id, c)
+		return fmt.Sprintf("load=%v profile=%v wait=%v", load, profile, wait)
+	}
 	c := map[string]int64{}
-	if d.readProfile(later, stale, withTokens, c) || d.readProfile(first, fresh, withTokens, c) || c["profile_skips"] != 1 {
-		t.Fatalf("later segments and fresh profiles skip the read: %v", c)
+	for name, tc := range map[string]struct {
+		tk   *taskv1.Task
+		sc   *taskv1.PageScope
+		st   *checkpoint.State
+		want string
+	}{
+		"later segment":        {later, stale, start, "load=false profile=false wait=false"},
+		"fresh profile":        {first, fresh, start, "load=false profile=false wait=false"},
+		"retry after progress": {first, stale, progressed, "load=false profile=false wait=false"},
+	} {
+		if got := plan(tc.tk, tc.sc, tc.st, withTokens(), c); got != tc.want {
+			t.Errorf("%s: %s", name, got)
+		}
 	}
-	if !d.readProfile(first, stale, withTokens, c) {
-		t.Fatal("a stale profile is read when the exit can load a page")
+	if c["profile_skips"] != 1 {
+		t.Fatalf("one fresh profile skipped: %v", c)
 	}
-	if d.readProfile(first, stale, withTokens, c) || c["profile_deferred"] != 1 {
-		t.Fatalf("the exit just loaded a page: the read waits: %v", c)
+	if got := plan(first, stale, start, withTokens(), c); got != "load=true profile=true wait=false" {
+		t.Fatalf("stale profile, exit free: %s", got)
 	}
-	if !d.readProfile(first, stale, &session.Identity{Endpoint: ep}, c) {
-		t.Fatal("an identity without tokens loads the page anyway")
+	// The exit just loaded a page: the profile read waits for a later run,
+	if got := plan(first, stale, start, withTokens(), c); got != "load=false profile=false wait=false" || c["profile_deferred"] != 1 {
+		t.Fatalf("stale profile, exit paced: %s %v", got, c)
+	}
+	// but a page whose id is still unknown can't go without its HTML,
+	if got := plan(first, unknown, start, withTokens(), c); got != "load=false profile=false wait=true" {
+		t.Fatalf("unknown page id, exit paced: %s", got)
+	}
+	// and neither can an identity without tokens that used its reservation.
+	if got := plan(later, stale, progressed, &session.Identity{Endpoint: ep}, c); got != "load=false profile=false wait=true" {
+		t.Fatalf("identity without tokens, exit paced: %s", got)
 	}
 }
 

@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/tidwall/gjson"
+
+	fbv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fb/v1"
 )
 
 // A page that shares one of its own posts: the share's attached story has
@@ -213,5 +215,63 @@ func TestCommentReferencesAreNotComments(t *testing.T) {
 	broken := `{"data":{"node":{"replies_connection":{"edges":[{"node":{"__typename":"Comment","legacy_fbid":"3","body":{"text":"x"}}}]}}}}`
 	if _, rep := Comments([]gjson.Result{gjson.Parse(broken)}, CommentContext{PostID: 5, PageID: 6, Replies: true}); rep.OK() {
 		t.Fatal("a comment without created_time must be drift")
+	}
+}
+
+// Real timelines repeat the story under comet_sections, typed Story with
+// the story's own id. The copy is the story itself: not a share of it, and
+// its photos and links belong to the post. A share has another id.
+func TestTimelineStoryCopiesAreNotShares(t *testing.T) {
+	photo := `{"__typename":"Photo","id":"901","image":{"uri":"https://scontent.example/p.jpg","width":10,"height":10}}`
+	link := `{"styles":{"attachment":{"url":"https://news.example/a","title":"A"}}}`
+	story := `{"__typename":"Story","id":"S:1","post_id":"11","creation_time":1700000200,"feedback":{"__typename":"Feedback","id":"F:1"},` +
+		`"comet_sections":{"content":{"story":{"__typename":"Story","id":"S:1","attachments":[` + link + `],"media":` + photo + `}},` +
+		`"feedback":{"story":{"__typename":"Story","id":"S:1"}}}}`
+	body := `{"data":{"node":{"__typename":"Page","timeline_list_feed_units":{"edges":[` + wrapEdges(story) +
+		`],"page_info":{"has_next_page":false,"end_cursor":""}}}}}`
+	res, _ := Timeline([]gjson.Result{gjson.Parse(body)}, 5, "https://www.facebook.com")
+	if len(res.Posts) != 1 {
+		t.Fatalf("posts %d", len(res.Posts))
+	}
+	p := res.Posts[0].Post
+	if p.SharedPostId != nil || p.Type == fbv1.PostType_POST_TYPE_SHARE {
+		t.Fatalf("a copy of the story is not a share: shared=%v type=%v", p.SharedPostId, p.Type)
+	}
+	if len(res.Posts[0].Media) == 0 || len(p.Links) != 1 {
+		t.Fatalf("media %d, links %d: the copy's photo and link are the post's", len(res.Posts[0].Media), len(p.Links))
+	}
+
+	// A story with another id is a share.
+	shared := `{"__typename":"Story","id":"S:1","post_id":"11","creation_time":1700000200,"feedback":{"__typename":"Feedback","id":"F:1"},` +
+		`"comet_sections":{"feedback":{"story":{"__typename":"Story","id":"S:1"}}},` +
+		`"attached_story":{"__typename":"Story","id":"S:other","post_id":"99","url":"https://www.facebook.com/p/99"}}`
+	body = `{"data":{"node":{"__typename":"Page","timeline_list_feed_units":{"edges":[` + wrapEdges(shared) +
+		`],"page_info":{"has_next_page":false,"end_cursor":""}}}}}`
+	res, _ = Timeline([]gjson.Result{gjson.Parse(body)}, 5, "https://www.facebook.com")
+	if len(res.Posts) != 1 || res.Posts[0].Post.SharedPostId == nil || *res.Posts[0].Post.SharedPostId != 99 {
+		t.Fatalf("the attached story is the share: %+v", res.Posts)
+	}
+}
+
+// Hashtag ranges count UTF-16 code units: emoji before a tag take two.
+func TestHashtagsAfterEmoji(t *testing.T) {
+	text := "🔥🔥 New drop #SummerSale today"
+	got := Hashtags(text, []*fbv1.TextRange{{EntityType: "Hashtag", Offset: 14, Length: 11}})
+	if len(got) != 1 || got[0] != "summersale" {
+		t.Fatalf("hashtags %v", got)
+	}
+}
+
+// Only a breakdown, or a total given as a label ("1.2K"): the total is the
+// breakdown's sum, and not complete.
+func TestReactionsFromABreakdownOnly(t *testing.T) {
+	fb := gjson.Parse(`{"i18n_reaction_count":"1.2K","top_reactions":{"edges":[{"reaction_count":900,"node":{"id":"1635855486666999"}},{"reaction_count":250,"node":{"id":"1678524932434102"}}]}}`)
+	r := Reactions(fb)
+	if r.Total != 1150 || r.Complete || r.ByType["like"] != 900 {
+		t.Fatalf("reactions %+v", r)
+	}
+	none := Reactions(gjson.Parse(`{"reaction_count":{"count":0}}`))
+	if none.Total != 0 || !none.Complete {
+		t.Fatalf("no reactions: %+v", none)
 	}
 }

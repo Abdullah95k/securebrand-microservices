@@ -132,6 +132,7 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 			Pseudonymize: cfg.Privacy.PIIMode == "pseudonymized", Suppression: supp},
 	}
 	worker := &stage.Worker{D: deps, MaxAttempts: uint32(cfg.Crawler.MaxAttempts), MaxTotalAttempts: uint32(cfg.Crawler.MaxTotalAttempts),
+		MaxWaits: uint32(cfg.Crawler.MaxWaits),
 		LeaseTTL: cfg.Crawler.LeaseTTL,
 		Stages: map[taskv1.Kind]stage.Stage{
 			taskv1.Kind_KIND_PAGE:   &stage.PageStage{D: deps},

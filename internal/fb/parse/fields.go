@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
@@ -207,10 +208,11 @@ func Hashtags(text string, ranges []*fbv1.TextRange) []string {
 			out = append(out, h)
 		}
 	}
+	// Facebook's range offsets count UTF-16 code units (an emoji is two).
+	u := utf16.Encode([]rune(text))
 	for _, r := range ranges {
-		if r.EntityType == "Hashtag" && int(r.Offset+r.Length) <= len([]rune(text)) {
-			rs := []rune(text)
-			add(string(rs[r.Offset : r.Offset+r.Length]))
+		if r.EntityType == "Hashtag" && r.Offset >= 0 && r.Length > 0 && int(r.Offset+r.Length) <= len(u) {
+			add(string(utf16.Decode(u[r.Offset : r.Offset+r.Length])))
 		}
 	}
 	for _, m := range hashtagRe.FindAllStringSubmatch(text, -1) {
@@ -255,6 +257,13 @@ func Reactions(fb gjson.Result) *fbv1.Reactions {
 		sum += n
 		return true
 	})
-	r.Complete = total > 0 && sum == total || total == 0
+	switch {
+	case total == 0 && sum > 0:
+		// Only the breakdown came back (or the total was a label like
+		// "1.2K"): the breakdown lists the top reactions, maybe not all.
+		r.Total, r.Complete = sum, false
+	default:
+		r.Complete = sum == total
+	}
 	return r
 }

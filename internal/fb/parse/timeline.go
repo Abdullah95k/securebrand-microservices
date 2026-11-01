@@ -176,9 +176,10 @@ func story(n *Node, all []*Node, pageID int64, baseURL string) (PostBundle, Repo
 		}
 	}
 
-	// Shared post.
+	// Shared post: a Story owned by this one with another id (a nested
+	// copy of this story carries its id and is not a share).
 	for _, x := range all {
-		if x.Typename == "Story" && x.Parent == n {
+		if x.Typename == "Story" && !copyOf(x, n) && ownedBy(x, n) {
 			sid := Int64(x.V.Get("post_id"))
 			if sid == 0 {
 				sid = PostIDFromStoryID(x.V.Get("id").String())
@@ -209,7 +210,7 @@ func story(n *Node, all []*Node, pageID int64, baseURL string) (PostBundle, Repo
 	var media []*fbv1.Media
 	photos, videos := 0, 0
 	for _, x := range all {
-		if !isMedia(x.Typename) || x.Ancestor("Story", "Comment") != n {
+		if !isMedia(x.Typename) || !ownedBy(x, n) {
 			continue
 		}
 		switch x.Typename {
@@ -225,13 +226,24 @@ func story(n *Node, all []*Node, pageID int64, baseURL string) (PostBundle, Repo
 			}
 		}
 	}
-	for _, att := range FindAll(v, "attachments", skip...) {
-		att.ForEach(func(_, a gjson.Result) bool {
-			if l := linkAttachment(a); l != nil {
-				p.Links = append(p.Links, l)
-			}
-			return true
-		})
+	// Links: under the story and under its nested copies, once each.
+	roots := []gjson.Result{v}
+	for _, x := range all {
+		if x != n && copyOf(x, n) && ownedBy(x, n) {
+			roots = append(roots, x.V)
+		}
+	}
+	seenLink := map[string]bool{}
+	for _, root := range roots {
+		for _, att := range FindAll(root, "attachments", skip...) {
+			att.ForEach(func(_, a gjson.Result) bool {
+				if l := linkAttachment(a); l != nil && !seenLink[l.Url] {
+					seenLink[l.Url] = true
+					p.Links = append(p.Links, l)
+				}
+				return true
+			})
+		}
 	}
 
 	p.Type = postType(v, p, photos, videos, reel)
@@ -246,7 +258,13 @@ var ufiFeedbackPaths = []string{
 	"comet_sections.feedback.story.story_ufi_container.story.feedback_context.feedback_target_with_context.ufi_renderer.feedback",
 }
 
-// ownedBy reports whether Feedback node x belongs to story n: its nearest
+// copyOf reports whether x is a nested copy of story n: a Story with n's id.
+func copyOf(x, n *Node) bool {
+	id := n.V.Get("id").String()
+	return x.Typename == "Story" && id != "" && x.V.Get("id").String() == id
+}
+
+// ownedBy reports whether node x belongs to story n: its nearest
 // owner is n, or a Story nested in n with n's id (a copy of n, not a shared
 // post), with no Comment in between.
 func ownedBy(x, n *Node) bool {
