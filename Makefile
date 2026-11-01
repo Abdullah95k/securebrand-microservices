@@ -172,8 +172,6 @@ PILOT_RUN = @test -f $(PILOT_OUT)/pilot-run.yaml || { echo "missing $(PILOT_OUT)
 ## and the Phase 0 registry. Start with the Phase 0 run finished.
 pilot-up:
 	@test -f $(PILOT_PROXIES) || { echo "missing $(PILOT_PROXIES)"; exit 2; }
-	@# The services read it as root without capabilities: mode 600 must be root's.
-	@test "$$(stat -c %u $(PILOT_PROXIES))" = 0 || { echo "$(PILOT_PROXIES) must be owned by root (the services read it as root, without capabilities): sudo chown root $(PILOT_PROXIES)"; exit 2; }
 	@test -s $(PILOT_OUT)/registry.yaml || { echo "missing $(PILOT_OUT)/registry.yaml: finish Phase 0 first"; exit 2; }
 	@command -v docker >/dev/null || { echo "Docker is not installed: docs/runbooks/pilot.md, step 1"; exit 2; }
 	@rps=$$(awk 'BEGIN { r = ENVIRON["PILOT_RPS"]; if (r == "") exit 0; if (r !~ /^[0-9]*\.?[0-9]+$$/ || r + 0 <= 0 || r + 0 > 2) exit 1; printf "%g", r + 0 }') \
@@ -215,6 +213,8 @@ pilot-down:
 	$(PILOT_COMPOSE) down
 pilot-clean:
 	$(PILOT_COMPOSE) down -v
+	@# No pilot left: the local targets may run again (NOT_PILOT).
+	rm -f $(PILOT_OUT)/pilot-run.yaml
 
 ## Rehearse Phase 0 against a local fakefb (no proxies, no Facebook, about a minute).
 phase0-dryrun:

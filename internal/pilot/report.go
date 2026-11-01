@@ -133,10 +133,16 @@ func Load(ctx context.Context, db *pgxpool.Pool, since time.Time) (Report, error
 		return rep, err
 	}
 	var first, last *time.Time
-	if err := db.QueryRow(ctx, `SELECT count(DISTINCT j.page_ref), min(j.created_at),
-			max(CASE WHEN s.interval_seconds > 0 THEN j.created_at + make_interval(secs => s.interval_seconds) ELSE j.finished_at END)
-		FROM jobs j LEFT JOIN page_schedule s ON s.page_ref = j.page_ref
-		WHERE j.created_at >= $1 AND j.kind = 'scheduled' AND j.status IN ('completed', 'partial', 'failed')`, since).
+	// The last cycle's interval is the pages' usual one (the lower median):
+	// a page on a long interval of its own doesn't stretch the span.
+	if err := db.QueryRow(ctx, `WITH j AS (
+			SELECT j.page_ref, j.created_at, j.finished_at, s.interval_seconds FROM jobs j
+			LEFT JOIN page_schedule s ON s.page_ref = j.page_ref
+			WHERE j.created_at >= $1 AND j.kind = 'scheduled' AND j.status IN ('completed', 'partial', 'failed'))
+		SELECT count(DISTINCT page_ref), min(created_at),
+			coalesce(max(created_at) + make_interval(secs => (SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY i)
+				FROM (SELECT DISTINCT page_ref, interval_seconds AS i FROM j WHERE interval_seconds > 0) p)), max(finished_at))
+		FROM j`, since).
 		Scan(&rep.SteadyPages, &first, &last); err != nil {
 		return rep, err
 	}

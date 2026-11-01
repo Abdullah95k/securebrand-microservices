@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -294,21 +295,37 @@ func TestRegisterBackfillsPagesNeverRun(t *testing.T) {
 }
 
 // Asking again for a backfill of a page whose backfill (the client's) is
-// still under way returns that one: each is a full read of the page.
+// still under way returns that one, marked reused: each is a full read of
+// the page. Requests racing each other start one between them.
 func TestBackfillIsNotStartedTwice(t *testing.T) {
-	s := Start(t, Options{Spec: fakefb.Spec{Seed: 5, Pages: 1, PostsPerPage: 40, MaxComments: 30}})
+	s := Start(t, Options{Spec: fakefb.Spec{Seed: 5, Pages: 2, PostsPerPage: 40, MaxComments: 30}})
 	key := s.Key(t, api.ScopePagesWrite, api.ScopeJobsWrite)
-	page := s.Fake.World.Pages()[0]
+	pages := s.Fake.World.Pages()
 	type registered struct {
 		Backfill *jobView `json:"backfill_job"`
+		Reused   bool     `json:"backfill_reused"`
 	}
-	body := []byte(fmt.Sprintf(`{"page":%q,"backfill":true}`, page.Vanity))
-	first := decodeBody[registered](t, s.Do(t, key, "POST", "/v1/pages", body), http.StatusCreated)
-	second := decodeBody[registered](t, s.Do(t, key, "POST", "/v1/pages", body), http.StatusCreated)
-	if first.Backfill == nil || second.Backfill == nil || first.Backfill.ID != second.Backfill.ID {
-		t.Fatalf("backfills: %+v, then %+v", first.Backfill, second.Backfill)
+	register := func(vanity string) registered {
+		body := []byte(fmt.Sprintf(`{"page":%q,"backfill":true}`, vanity))
+		return decodeBody[registered](t, s.Do(t, key, "POST", "/v1/pages", body), http.StatusCreated)
 	}
-	if n := count(t, s, `SELECT count(*) FROM jobs WHERE kind = 'backfill'`); n != 1 {
-		t.Fatalf("%d backfills started", n)
+	first, second := register(pages[0].Vanity), register(pages[0].Vanity)
+	if first.Backfill == nil || second.Backfill == nil || first.Backfill.ID != second.Backfill.ID || first.Reused || !second.Reused {
+		t.Fatalf("backfills: %+v, then %+v", first, second)
+	}
+	var wg sync.WaitGroup
+	racing := make([]registered, 8)
+	for i := range racing {
+		wg.Add(1)
+		go func() { defer wg.Done(); racing[i] = register(pages[1].Vanity) }()
+	}
+	wg.Wait()
+	for _, r := range racing {
+		if r.Backfill == nil || r.Backfill.ID != racing[0].Backfill.ID {
+			t.Fatalf("racing backfills: %+v, %+v", racing[0].Backfill, r.Backfill)
+		}
+	}
+	if n := count(t, s, `SELECT count(*) FROM jobs WHERE kind = 'backfill'`); n != 2 {
+		t.Fatalf("%d backfills started, want one per page", n)
 	}
 }

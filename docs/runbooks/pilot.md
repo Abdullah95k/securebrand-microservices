@@ -105,4 +105,4 @@ build cache.
 
 - **Requests that failed count too.** A task that is rate-limited and retried still adds the requests and bytes it used to its job (`blocked`, `soft_errors`, `transport_errors` and `drift` count why).
 - **The fake Facebook's pacing never applies.** The pilot loads `phase0/proxies.yaml` and `deploy/compose/pilot.yaml` over the production defaults, never `deploy/compose/local.yaml`.
-- **The services run as root in their containers**, to read `proxies.yaml` (mode 600), but without Linux capabilities, so the file must be owned by root as well (`make pilot-up` checks; `sudo chown root phase0/proxies.yaml`). The pilot is meant for a machine of its own.
+- **The services run as root in their containers**, to read `proxies.yaml` (mode 600), with no Linux capabilities but `DAC_READ_SEARCH`, which reads it whoever owns it. The pilot is meant for a machine of its own.

@@ -233,7 +233,7 @@ least one tier is. The recommended tier is the cheapest passing one.
 | HTTP bootstrap success | ≥ 0.90 | Look at the region table (EU consent wall) and the tokens found; try another `fb.fingerprint_profile` or another tier |
 | Block rate | < 5% | Lower `--rps`, add exits (more static endpoints or gateway sessions), or use another tier. Mixing tiers in production (`fb.proxy.routing`) is an option. |
 | Timeline depth | median ≥ `--min-days`, or no login walls | Timelines stop early behind login walls: lower `limits.max_age_days`, or accept partial backfills |
-| Timeline coverage: pages whose timeline was read | ≥ 0.90 (the bootstrap threshold) | Pages loaded but their HTML named no page id (`no_page_id` in the end reasons): a Facebook change the page parser needs. Send the bundle. |
+| Timeline coverage: pages whose timeline was read | ≥ 0.90 | Pages loaded but their HTML named no page id (`no_page_id` in the end reasons): a Facebook change the page parser needs. Send the bundle. |
 
 ## 5. Sending the results back
 

@@ -48,9 +48,12 @@ func ScrubDir(dir string, keep []string) error {
 		keepIDs[id] = true
 	}
 	// A comment's id, with its post's, opens the comment on Facebook: its
-	// author and text. Pseudonyms are the same as in the responses.
+	// author and text. Pseudonyms are the same as in the responses, which
+	// get these ids replaced wherever they appear.
+	var comments []string
 	for _, k := range []string{"comment_id", "parent_comment_id"} {
 		if id := idString(meta[k]); id != "" && strings.Trim(id, "0123456789") == "" {
+			comments = append(comments, id)
 			meta[k] = json.Number(pseudo(id, "comment"))
 		}
 	}
@@ -63,7 +66,7 @@ func ScrubDir(dir string, keep []string) error {
 		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(p, Scrub(b, keepIDs), 0o644); err != nil {
+		if err := os.WriteFile(p, scrub(b, keepIDs, comments), 0o644); err != nil {
 			return err
 		}
 	}
@@ -175,7 +178,8 @@ var (
 	}
 	// Graph ids of comments and their feedback: base64 of
 	// "comment:<post>_<comment>" and "feedback:<post>_<comment>".
-	graphIDRe = regexp.MustCompile(`(?:Y29tbWVudDo|ZmVlZGJhY2s6)[A-Za-z0-9+/]+={0,2}`)
+	// Padding may be missing, or URL-encoded in a link.
+	graphIDRe = regexp.MustCompile(`(?:Y29tbWVudDo|ZmVlZGJhY2s6)[A-Za-z0-9+/]+(?:={1,2}|(?:%3[Dd]){1,2})?`)
 )
 
 // pseudoKey keys the pseudonyms with a secret made for this run and never
@@ -208,8 +212,15 @@ func pseudo(s, salt string) string {
 // units, so the offsets of mentions and links stay valid. JSON responses,
 // and the JSON script blocks of a page, are walked as JSON, nested
 // serialized JSON included; anything else is scrubbed by pattern.
-func Scrub(b []byte, keep map[string]bool) []byte {
+func Scrub(b []byte, keep map[string]bool) []byte { return scrub(b, keep, nil) }
+
+// scrub is Scrub with comment ids known beforehand (meta.json's), replaced
+// wherever they appear in b even in a form the walk doesn't recognise.
+func scrub(b []byte, keep map[string]bool, comments []string) []byte {
 	sc := &scrubber{keep: keep, ids: map[string]string{}}
+	for _, id := range comments {
+		sc.comment(id)
+	}
 	if t := bytes.TrimSpace(b); len(t) > 0 && t[0] == '<' {
 		return sc.html(string(b))
 	}
@@ -235,22 +246,60 @@ func (sc *scrubber) comment(v any) {
 	}
 }
 
+// graphID is a decoded comment or feedback graph id, written back in the
+// form it came in (padded or not, its padding URL-encoded or not).
+type graphID struct {
+	decoded   string
+	raw, pct  bool
+	commentID string // after "comment:<post>_" or "feedback:<post>_"
+}
+
+func parseGraphID(s string) (graphID, bool) {
+	g := graphID{pct: strings.Contains(strings.ToUpper(s), "%3D")}
+	if g.pct {
+		s = strings.ReplaceAll(strings.ReplaceAll(s, "%3D", "="), "%3d", "=")
+	}
+	d, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		if d, err = base64.RawStdEncoding.DecodeString(s); err != nil {
+			return g, false
+		}
+		g.raw = true
+	}
+	g.decoded = string(d)
+	rest, ok := strings.CutPrefix(g.decoded, "comment:")
+	if !ok {
+		rest, ok = strings.CutPrefix(g.decoded, "feedback:")
+	}
+	i := strings.LastIndexByte(rest, '_')
+	if !ok || i < 0 {
+		return g, false
+	}
+	if cid := rest[i+1:]; cid != "" && strings.Trim(cid, "0123456789") == "" {
+		g.commentID = cid
+		return g, true
+	}
+	return g, false
+}
+
+// with returns the graph id with its comment id replaced by id.
+func (g graphID) with(id string) string {
+	d := g.decoded[:len(g.decoded)-len(g.commentID)] + id
+	if g.raw {
+		return base64.RawStdEncoding.EncodeToString([]byte(d))
+	}
+	out := base64.StdEncoding.EncodeToString([]byte(d))
+	if g.pct {
+		out = strings.ReplaceAll(out, "=", "%3D")
+	}
+	return out
+}
+
 // graphComment returns the comment id in a comment's or a comment's
 // feedback graph id ("comment:<post>_<comment>"), or "".
 func graphComment(s string) string {
-	d, err := base64.StdEncoding.DecodeString(s)
-	if err != nil {
-		return ""
-	}
-	rest, ok := strings.CutPrefix(string(d), "comment:")
-	if !ok {
-		rest, ok = strings.CutPrefix(string(d), "feedback:")
-	}
-	i := strings.LastIndexByte(rest, '_')
-	if !ok || i < 0 || strings.Trim(rest[i+1:], "0123456789") != "" {
-		return ""
-	}
-	return rest[i+1:]
+	g, _ := parseGraphID(s)
+	return g.commentID
 }
 
 // jsonDocs scrubs a response of one or more JSON documents (Facebook
@@ -468,14 +517,13 @@ func (sc *scrubber) patterns(s string) string {
 func (sc *scrubber) finish(s string) string {
 	// Graph ids carry a comment id in base64: decoded, it is replaced
 	// like any other, and encoded again.
-	s = graphIDRe.ReplaceAllStringFunc(s, func(g string) string {
-		cid := graphComment(g)
-		nw, ok := sc.ids[cid]
-		if cid == "" || !ok {
-			return g
+	s = graphIDRe.ReplaceAllStringFunc(s, func(m string) string {
+		g, ok := parseGraphID(m)
+		nw, known := sc.ids[g.commentID]
+		if !ok || !known {
+			return m
 		}
-		d, _ := base64.StdEncoding.DecodeString(g)
-		return base64.StdEncoding.EncodeToString([]byte(string(d)[:len(d)-len(cid)] + nw))
+		return g.with(nw)
 	})
 	s = peopleURL.ReplaceAllString(s, "facebook.com/people/scrubbed/$1")
 	s = digits.ReplaceAllStringFunc(s, func(d string) string {

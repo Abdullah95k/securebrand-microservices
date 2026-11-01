@@ -128,7 +128,8 @@ func (s *Server) createErasure(w http.ResponseWriter, r *http.Request) {
 		// number: anything else (a profile link, stray spaces) would match
 		// nothing, and the request would end done with nothing erased.
 		id, profile := strings.TrimSpace(req.AuthorID), strings.TrimSpace(req.ProfileURL)
-		if id != "" && strings.Trim(id, "0123456789") != "" {
+		if v, err := strconv.ParseUint(id, 10, 63); id != "" && (err != nil || strconv.FormatUint(v, 10) != id) {
+			// Not a number, or not as Facebook writes it (leading zeros).
 			problem(w, http.StatusBadRequest, "invalid author_id", "author_id is the numeric Facebook id; for a profile link, use profile_url")
 			return
 		}

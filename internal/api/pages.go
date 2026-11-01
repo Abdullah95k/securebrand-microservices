@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/google/uuid"
 	"math/rand/v2"
 	"net/http"
 	"strconv"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	taskv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fbs/task/v1"
@@ -144,36 +144,45 @@ func (s *Server) registerPage(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{"page_ref": ref, "created": created, "schedule": map[string]any{"enabled": enabled,
 		"interval_seconds": intervalSeconds, "next_run_at": next, "adaptive": adaptive}}
 	if (req.Backfill == nil && neverRun) || (req.Backfill != nil && *req.Backfill) {
-		// The client's own backfill of the page still under way is returned,
-		// not started again: each is a full read of up to years of posts.
-		var running uuid.UUID
-		err := s.DB.QueryRow(r.Context(), `SELECT job_id FROM jobs WHERE page_ref = $1 AND api_client_id = $2 AND kind = 'backfill'
-			AND status IN ('queued','running','finalizing') ORDER BY created_at DESC LIMIT 1`, ref, c.ID).Scan(&running)
-		switch {
-		case err == nil:
-			j, err := s.Dispatch.Get(r.Context(), running)
-			if err != nil {
-				serverError(w, err)
-				return
-			}
-			resp["backfill_job"] = j
-			writeJSON(w, http.StatusCreated, resp)
-			return
-		case !errors.Is(err, pgx.ErrNoRows):
-			serverError(w, err)
-			return
+		// The client's own backfill of the page still under way is returned
+		// (backfill_reused), not started again: each is a full read of up to
+		// years of posts. Requests racing each other (a retry, a parallel
+		// import) share an idempotency key for the minute and start one.
+		j, created, err := s.ownBackfill(r.Context(), c.ID, ref)
+		if err == nil && j == nil {
+			j, created, err = s.Dispatch.Create(r.Context(), dispatch.Request{ClientID: &c.ID, Kind: dispatch.KindBackfill,
+				Lane: taskv1.Lane_LANE_P2, Mode: "full", PageRef: ref, Limits: backfillLim,
+				Params:         map[string]any{"page": req.Page},
+				IdempotencyKey: "backfill:" + ref + ":" + strconv.FormatInt(time.Now().Unix()/60, 10)}, 0)
 		}
-		j, _, err := s.Dispatch.Create(r.Context(), dispatch.Request{ClientID: &c.ID, Kind: dispatch.KindBackfill,
-			Lane: taskv1.Lane_LANE_P2, Mode: "full", PageRef: ref, Limits: backfillLim,
-			Params: map[string]any{"page": req.Page}}, 0)
 		if err != nil {
 			serverError(w, err)
 			return
 		}
 		resp["backfill_job"] = j
-		_, _ = s.DB.Exec(r.Context(), `UPDATE page_schedule SET last_job_id = $2 WHERE page_ref = $1`, ref, j.ID)
+		if !created {
+			resp["backfill_reused"] = true
+		} else {
+			_, _ = s.DB.Exec(r.Context(), `UPDATE page_schedule SET last_job_id = $2 WHERE page_ref = $1`, ref, j.ID)
+		}
 	}
 	writeJSON(w, http.StatusCreated, resp)
+}
+
+// ownBackfill returns the client's backfill of the page still under way,
+// or nil.
+func (s *Server) ownBackfill(ctx context.Context, client uuid.UUID, ref string) (*dispatch.Job, bool, error) {
+	var id uuid.UUID
+	err := s.DB.QueryRow(ctx, `SELECT job_id FROM jobs WHERE page_ref = $1 AND api_client_id = $2 AND kind = 'backfill'
+		AND status IN ('queued','running','finalizing') ORDER BY created_at DESC LIMIT 1`, ref, client).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	j, err := s.Dispatch.Get(ctx, id)
+	return j, false, err
 }
 
 type scheduleView struct {

@@ -107,6 +107,7 @@ paths:
                   created: {type: boolean, description: The page was not registered before}
                   schedule: {type: object, description: The stored schedule after this registration}
                   backfill_job: {$ref: '#/components/schemas/Job'}
+                  backfill_reused: {type: boolean, description: "backfill_job is the client's backfill of the page already under way (started with its own limits), not a new one"}
     get:
       summary: List registered pages and their schedules
       parameters: [{$ref: '#/components/parameters/Limit'}]

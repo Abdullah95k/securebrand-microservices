@@ -2,11 +2,12 @@ package pilot
 
 import (
 	"context"
-	"github.com/abdullah95k/securebrand-microservices/internal/testenv"
 	"math"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/abdullah95k/securebrand-microservices/internal/testenv"
 )
 
 func TestFormatProjects(t *testing.T) {
@@ -65,7 +66,14 @@ func TestSteadyStateCoversWholeCycles(t *testing.T) {
 	db := testenv.Postgres(t)
 	ctx := context.Background()
 	t0 := time.Now().UTC().Add(-7 * time.Hour).Truncate(time.Second)
-	if _, err := db.Exec(ctx, `INSERT INTO page_schedule (page_ref, interval_seconds, next_run_at) VALUES ('v:a', 10800, now())`); err != nil {
+	// Page b, on a long interval of its own (and no requests), doesn't
+	// stretch the span.
+	if _, err := db.Exec(ctx, `INSERT INTO page_schedule (page_ref, interval_seconds, next_run_at) VALUES
+		('v:a', 10800, now()), ('v:b', 2592000, now())`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO jobs (job_id, kind, lane, mode, page_ref, params, status, counters, created_at, finished_at)
+		VALUES (gen_random_uuid(), 'scheduled', 1, 'incremental', 'v:b', '{}', 'completed', '{"requests":0}', $1, $1)`, t0); err != nil {
 		t.Fatal(err)
 	}
 	for i := range 3 {

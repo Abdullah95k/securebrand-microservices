@@ -18,10 +18,12 @@ type Thresholds struct {
 	MinBootstrapSuccess   float64 // e.g. 0.90
 	MaxBlockRate          float64 // e.g. 0.05
 	MinMedianDays         float64 // e.g. 365 (or the reduced default you accept)
+	MinTimelineCoverage   float64 // e.g. 0.90: pages whose timeline was read
 }
 
 // DefaultThresholds match the plan.
-var DefaultThresholds = Thresholds{MinMedianCompleteness: 0.70, MinBootstrapSuccess: 0.90, MaxBlockRate: 0.05, MinMedianDays: 365}
+var DefaultThresholds = Thresholds{MinMedianCompleteness: 0.70, MinBootstrapSuccess: 0.90, MaxBlockRate: 0.05, MinMedianDays: 365,
+	MinTimelineCoverage: 0.90}
 
 // DefaultRequestsPerDay is the production volume the cost projection uses:
 // about 300k pages/day incremental plus 2k pages/day backfilled (README sizing).
@@ -508,8 +510,8 @@ func summarize(tier string, recs []Record, opt ReportOptions) Summary {
 	// Bootstrap success counts page loads that brought tokens, depth and
 	// completeness only pages whose timeline was read: pages that load
 	// but name no page id (a Facebook HTML change) would pass both unseen.
-	check(CheckCoverage, s.TimelineCoverage >= th.MinBootstrapSuccess,
-		fmt.Sprintf("timelines read on %.2f of the pages >= %.2f", s.TimelineCoverage, th.MinBootstrapSuccess))
+	check(CheckCoverage, s.TimelineCoverage >= th.MinTimelineCoverage,
+		fmt.Sprintf("timelines read on %.2f of the pages >= %.2f", s.TimelineCoverage, th.MinTimelineCoverage))
 
 	s.Strata = strata(pages, s.BestOrdering)
 	return s

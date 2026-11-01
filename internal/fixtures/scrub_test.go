@@ -6,13 +6,14 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"github.com/abdullah95k/securebrand-microservices/internal/fb/parse"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf16"
+
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/parse"
 )
 
 func TestScrub(t *testing.T) {
@@ -371,6 +372,19 @@ func TestScrubCommentIDs(t *testing.T) {
 		t.Fatalf("feedback %s, url %s: not the same pseudonym %s", fb, n.URL, n.Legacy)
 	}
 
+	// Graph ids without padding (23 bytes: unpadded base64 would need one
+	// "="), and with it URL-encoded in a link (25 bytes: "==").
+	raw := base64.RawStdEncoding.EncodeToString([]byte("comment:111_33344455566"))
+	pct := strings.ReplaceAll(gid("feedback:111_444555666777"), "=", "%3D")
+	odd := `{"data":{"a":{"__typename":"Comment","id":"` + raw + `","legacy_fbid":"33344455566"},` +
+		`"b":{"__typename":"Comment","legacy_fbid":"444555666777","url":"https:\/\/www.facebook.com\/x?f=` + pct + `"}}}`
+	oddOut := string(Scrub([]byte(odd), nil))
+	for _, leak := range []string{raw, pct, "33344455566", "444555666777"} {
+		if strings.Contains(oddOut, leak) {
+			t.Fatalf("%s left: %s", leak, oddOut)
+		}
+	}
+
 	// A comment known by its legacy id alone.
 	bare := `{"data":{"node":{"__typename":"Comment","legacy_fbid":"777888999000","body":{"text":"hi"}}}}`
 	if out := string(Scrub([]byte(bare), nil)); strings.Contains(out, "777888999000") {
@@ -385,12 +399,21 @@ func TestScrubCommentIDs(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "meta.json"), []byte(`{"page_id":9,"post_id":111,"parent_comment_id":222333444555}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// A response naming the parent only where the walk doesn't look for
+	// comment ids: replaced too, as meta.json says it is one.
+	if err := os.WriteFile(filepath.Join(dir, "response.ndjson"),
+		[]byte(`{"data":{"parent":{"__typename":"Thing","parent_comment_id":222333444555}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := ScrubDir(dir, nil); err != nil {
 		t.Fatal(err)
 	}
 	meta, _ := os.ReadFile(filepath.Join(dir, "meta.json"))
 	if strings.Contains(string(meta), "222333444555") || !strings.Contains(string(meta), `"post_id": 111`) {
 		t.Fatalf("meta.json: %s", meta)
+	}
+	if resp, _ := os.ReadFile(filepath.Join(dir, "response.ndjson")); strings.Contains(string(resp), "222333444555") {
+		t.Fatalf("response.ndjson: %s", resp)
 	}
 }
 
