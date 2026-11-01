@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"github.com/google/uuid"
 	"math/rand/v2"
 	"net/http"
 	"strconv"
@@ -142,6 +144,25 @@ func (s *Server) registerPage(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{"page_ref": ref, "created": created, "schedule": map[string]any{"enabled": enabled,
 		"interval_seconds": intervalSeconds, "next_run_at": next, "adaptive": adaptive}}
 	if (req.Backfill == nil && neverRun) || (req.Backfill != nil && *req.Backfill) {
+		// The client's own backfill of the page still under way is returned,
+		// not started again: each is a full read of up to years of posts.
+		var running uuid.UUID
+		err := s.DB.QueryRow(r.Context(), `SELECT job_id FROM jobs WHERE page_ref = $1 AND api_client_id = $2 AND kind = 'backfill'
+			AND status IN ('queued','running','finalizing') ORDER BY created_at DESC LIMIT 1`, ref, c.ID).Scan(&running)
+		switch {
+		case err == nil:
+			j, err := s.Dispatch.Get(r.Context(), running)
+			if err != nil {
+				serverError(w, err)
+				return
+			}
+			resp["backfill_job"] = j
+			writeJSON(w, http.StatusCreated, resp)
+			return
+		case !errors.Is(err, pgx.ErrNoRows):
+			serverError(w, err)
+			return
+		}
 		j, _, err := s.Dispatch.Create(r.Context(), dispatch.Request{ClientID: &c.ID, Kind: dispatch.KindBackfill,
 			Lane: taskv1.Lane_LANE_P2, Mode: "full", PageRef: ref, Limits: backfillLim,
 			Params: map[string]any{"page": req.Page}}, 0)
@@ -238,25 +259,6 @@ func (s *Server) updatePage(w http.ResponseWriter, r *http.Request) {
 		problem(w, http.StatusBadRequest, "invalid body", err.Error())
 		return
 	}
-	// The schedule is shared by every client registered to the page: only
-	// a registered client (or an admin) may change it.
-	c := clientFrom(r.Context())
-	if !c.Has(ScopeAdmin) {
-		var mine bool
-		// The same rows the update below matches: by reference, or by page
-		// id for a page registered under its vanity.
-		if err := s.DB.QueryRow(r.Context(), `SELECT EXISTS (SELECT 1 FROM page_registrations g
-			JOIN page_schedule p ON p.page_ref = g.page_ref
-			WHERE g.api_client_id = $1 AND (p.page_ref = $2 OR p.page_id::text = $3))`,
-			c.ID, ref, strings.TrimPrefix(ref, "id:")).Scan(&mine); err != nil {
-			serverError(w, err)
-			return
-		}
-		if !mine {
-			problem(w, http.StatusNotFound, "not registered", "page is not registered")
-			return
-		}
-	}
 	var interval *int
 	if req.IntervalHours != nil {
 		if *req.IntervalHours < 1 || *req.IntervalHours > 720 {
@@ -265,6 +267,36 @@ func (s *Server) updatePage(w http.ResponseWriter, r *http.Request) {
 		}
 		v := *req.IntervalHours * 3600
 		interval = &v
+	}
+	// The schedule is shared by every client registered to the page: only
+	// a registered client (or an admin) may change it, and while others are
+	// registered too, it may only crawl more (enable, shorten), as a second
+	// registration does; disabling or slowing it down is the admin's.
+	c := clientFrom(r.Context())
+	if !c.Has(ScopeAdmin) {
+		var mine *bool
+		var others, current int
+		// The same rows the update below matches: by reference, or by page
+		// id for a page registered under its vanity.
+		if err := s.DB.QueryRow(r.Context(), `SELECT bool_or(g.api_client_id = $1),
+				count(DISTINCT g.api_client_id) FILTER (WHERE g.api_client_id <> $1), coalesce(min(p.interval_seconds), 0)
+			FROM page_schedule p LEFT JOIN page_registrations g ON g.page_ref = p.page_ref
+			WHERE p.page_ref = $2 OR p.page_id::text = $3`,
+			c.ID, ref, strings.TrimPrefix(ref, "id:")).Scan(&mine, &others, &current); err != nil {
+			serverError(w, err)
+			return
+		}
+		if mine == nil || !*mine {
+			problem(w, http.StatusNotFound, "not registered", "page is not registered")
+			return
+		}
+		slower := (req.Enabled != nil && !*req.Enabled) || (interval != nil && *interval > current) ||
+			(req.Adaptive != nil && *req.Adaptive)
+		if others > 0 && slower {
+			problem(w, http.StatusConflict, "shared schedule",
+				"other clients are registered to this page: only an admin may disable it or crawl it less often")
+			return
+		}
 	}
 	adaptive := req.Adaptive
 	if interval != nil && adaptive == nil {

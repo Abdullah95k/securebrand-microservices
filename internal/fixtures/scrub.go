@@ -7,6 +7,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -46,6 +47,13 @@ func ScrubDir(dir string, keep []string) error {
 	if id := idString(meta["page_id"]); id != "" {
 		keepIDs[id] = true
 	}
+	// A comment's id, with its post's, opens the comment on Facebook: its
+	// author and text. Pseudonyms are the same as in the responses.
+	for _, k := range []string{"comment_id", "parent_comment_id"} {
+		if id := idString(meta[k]); id != "" && strings.Trim(id, "0123456789") == "" {
+			meta[k] = json.Number(pseudo(id, "comment"))
+		}
+	}
 	for _, name := range []string{"response.ndjson", "response.html"} {
 		p := filepath.Join(dir, name)
 		b, err := os.ReadFile(p)
@@ -64,7 +72,7 @@ func ScrubDir(dir string, keep []string) error {
 
 // scrubVersion is recorded in meta.json. Raise it when Scrub learns a new
 // pattern, so fixtures scrubbed before are scrubbed again when bundled.
-const scrubVersion = 4
+const scrubVersion = 5
 
 func scrubberVersion(meta map[string]any) int64 {
 	if n, ok := meta["__scrubber"].(json.Number); ok {
@@ -131,14 +139,15 @@ var (
 	// The regular expressions cover what the JSON walk cannot see: script
 	// that is not JSON, and responses that do not parse. A JSON string may
 	// hold escapes: \" or é, which is how Facebook writes non-ASCII.
-	nameRe = regexp.MustCompile(`"(name|short_name|alternate_name|first_name|last_name)":"((?:[^"\\]|\\.)*)"`)
+	nameRe = regexp.MustCompile(`"(name|short_name|alternate_name|first_name|last_name|display_name|username)":"((?:[^"\\]|\\.)*)"`)
 	textRe = regexp.MustCompile(`"text":"((?:[^"\\]|\\.)*)"`)
 	// People's ids: a User object's (Facebook puts "__isNode", "__isActor"
 	// and the like between its __typename and id, or the id first), a
 	// page owner's profile, and the id in a /people/<name>/<id>/ URL.
 	idPatterns = []*regexp.Regexp{
-		regexp.MustCompile(`"__typename":"User"[^{}]*?"id":"(\d+)"`),
-		regexp.MustCompile(`"id":"(\d+)"[^{}]*?"__typename":"User"`),
+		// Objects nested one level inside the User's are stepped over.
+		regexp.MustCompile(`"__typename":"User"(?:[^{}]|\{[^{}]*\})*?"id":"(\d+)"`),
+		regexp.MustCompile(`"id":"(\d+)"(?:[^{}]|\{[^{}]*\})*?"__typename":"User"`),
 		regexp.MustCompile(`"owning_profile":\{[^{}]*?"id":"(\d+)"`),
 		peopleURL,
 	}
@@ -158,6 +167,15 @@ var (
 	profileRe = regexp.MustCompile(`https?:(?:\\*/){2}(?:www\.|m\.)?facebook\.com\\*/(profile\.php\?id=\d+|[A-Za-z0-9.]+)(\\*["?])`)
 	// Media captions, which can describe people.
 	captionRe = regexp.MustCompile(`"(accessibility_caption|alt_text)":"((?:[^"\\]|\\.)*)"`)
+	// Comment ids: a comment's own, and in a comment_id parameter.
+	commentIDRe = []*regexp.Regexp{
+		regexp.MustCompile(`"__typename":"Comment"(?:[^{}]|\{[^{}]*\})*?"legacy_fbid":"(\d+)"`),
+		regexp.MustCompile(`"legacy_fbid":"(\d+)"(?:[^{}]|\{[^{}]*\})*?"__typename":"Comment"`),
+		regexp.MustCompile(`comment_id(?:=|\\?"?:\\?"?)(\d+)`),
+	}
+	// Graph ids of comments and their feedback: base64 of
+	// "comment:<post>_<comment>" and "feedback:<post>_<comment>".
+	graphIDRe = regexp.MustCompile(`(?:Y29tbWVudDo|ZmVlZGJhY2s6)[A-Za-z0-9+/]+={0,2}`)
 )
 
 // pseudoKey keys the pseudonyms with a secret made for this run and never
@@ -208,6 +226,31 @@ func Scrub(b []byte, keep map[string]bool) []byte {
 type scrubber struct {
 	keep map[string]bool
 	ids  map[string]string // real id -> pseudonym
+}
+
+// comment records id as a comment's.
+func (sc *scrubber) comment(v any) {
+	if id := idString(v); id != "" && strings.Trim(id, "0123456789") == "" {
+		sc.ids[id] = pseudo(id, "comment")
+	}
+}
+
+// graphComment returns the comment id in a comment's or a comment's
+// feedback graph id ("comment:<post>_<comment>"), or "".
+func graphComment(s string) string {
+	d, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		return ""
+	}
+	rest, ok := strings.CutPrefix(string(d), "comment:")
+	if !ok {
+		rest, ok = strings.CutPrefix(string(d), "feedback:")
+	}
+	i := strings.LastIndexByte(rest, '_')
+	if !ok || i < 0 || strings.Trim(rest[i+1:], "0123456789") != "" {
+		return ""
+	}
+	return rest[i+1:]
 }
 
 // jsonDocs scrubs a response of one or more JSON documents (Facebook
@@ -301,6 +344,10 @@ func (sc *scrubber) collect(v any) {
 		if isUser(v) {
 			sc.person(v.get("id"))
 		}
+		if v.get("__typename") == "Comment" {
+			sc.comment(v.get("legacy_fbid"))
+			sc.comment(v.get("comment_id"))
+		}
 		if op, ok := v.get("owning_profile").(*object); ok {
 			sc.person(op.get("id"))
 		}
@@ -318,6 +365,20 @@ func (sc *scrubber) collect(v any) {
 		for _, m := range peopleURL.FindAllStringSubmatch(v, -1) {
 			sc.person(m[1])
 		}
+		sc.collectComments(v)
+	}
+}
+
+// collectComments finds comment ids in any text: graph ids, comment_id
+// parameters and comments' legacy ids.
+func (sc *scrubber) collectComments(s string) {
+	for _, g := range graphIDRe.FindAllString(s, -1) {
+		sc.comment(graphComment(g))
+	}
+	for _, re := range commentIDRe {
+		for _, m := range re.FindAllStringSubmatch(s, -1) {
+			sc.comment(m[1])
+		}
 	}
 }
 
@@ -327,6 +388,7 @@ func (sc *scrubber) collectPatterns(s string) {
 			sc.person(m[1])
 		}
 	}
+	sc.collectComments(s)
 }
 
 // transform scrubs names, people's text and people's links in v, which
@@ -404,6 +466,17 @@ func (sc *scrubber) patterns(s string) string {
 // (whole numbers only, in one pass: a short id inside a longer one is a
 // different id), /people/ links and signed CDN parameters.
 func (sc *scrubber) finish(s string) string {
+	// Graph ids carry a comment id in base64: decoded, it is replaced
+	// like any other, and encoded again.
+	s = graphIDRe.ReplaceAllStringFunc(s, func(g string) string {
+		cid := graphComment(g)
+		nw, ok := sc.ids[cid]
+		if cid == "" || !ok {
+			return g
+		}
+		d, _ := base64.StdEncoding.DecodeString(g)
+		return base64.StdEncoding.EncodeToString([]byte(string(d)[:len(d)-len(cid)] + nw))
+	})
 	s = peopleURL.ReplaceAllString(s, "facebook.com/people/scrubbed/$1")
 	s = digits.ReplaceAllStringFunc(s, func(d string) string {
 		if nw, ok := sc.ids[d]; ok {

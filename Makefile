@@ -38,12 +38,15 @@ fixtures:
 
 ## Start Postgres, Redpanda and Valkey for integration tests.
 infra-up:
+	$(NOT_PILOT)
 	$(COMPOSE) up -d postgres redpanda valkey
 	@until docker exec fbs-postgres-1 pg_isready -U fbs >/dev/null 2>&1; do sleep 1; done
 
 # The local stack and the pilot are the same Compose project: on the pilot
-# machine, `down -v` would delete the pilot's database.
-NOT_PILOT = @test -z "$(FORCE)" -a -f phase0/out/pilot-run.yaml && { echo "refusing: this machine runs the pilot, and this would delete its data (make pilot-down stops it; FORCE=1 overrides)"; exit 2; } || true
+# machine, `down -v` would delete the pilot's database, and `up` without
+# pilot.yml would recreate its containers with the local settings (no
+# restart policy, no Redpanda volume, the local config).
+NOT_PILOT = @test -z "$(FORCE)" -a -f phase0/out/pilot-run.yaml && { echo "refusing: this machine runs the pilot, and this would replace or delete its stack (use the pilot-* targets; FORCE=1 overrides)"; exit 2; } || true
 
 infra-down:
 	$(NOT_PILOT)
@@ -97,6 +100,7 @@ chart-smoke:
 	python3 scripts/chart-smoke.py --image $(IMAGE) --helm $(HELM)
 
 compose-up:
+	$(NOT_PILOT)
 	$(COMPOSE) up -d
 
 compose-down:
@@ -168,6 +172,8 @@ PILOT_RUN = @test -f $(PILOT_OUT)/pilot-run.yaml || { echo "missing $(PILOT_OUT)
 ## and the Phase 0 registry. Start with the Phase 0 run finished.
 pilot-up:
 	@test -f $(PILOT_PROXIES) || { echo "missing $(PILOT_PROXIES)"; exit 2; }
+	@# The services read it as root without capabilities: mode 600 must be root's.
+	@test "$$(stat -c %u $(PILOT_PROXIES))" = 0 || { echo "$(PILOT_PROXIES) must be owned by root (the services read it as root, without capabilities): sudo chown root $(PILOT_PROXIES)"; exit 2; }
 	@test -s $(PILOT_OUT)/registry.yaml || { echo "missing $(PILOT_OUT)/registry.yaml: finish Phase 0 first"; exit 2; }
 	@command -v docker >/dev/null || { echo "Docker is not installed: docs/runbooks/pilot.md, step 1"; exit 2; }
 	@rps=$$(awk 'BEGIN { r = ENVIRON["PILOT_RPS"]; if (r == "") exit 0; if (r !~ /^[0-9]*\.?[0-9]+$$/ || r + 0 <= 0 || r + 0 > 2) exit 1; printf "%g", r + 0 }') \

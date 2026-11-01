@@ -331,8 +331,16 @@ func TestEndToEnd(t *testing.T) {
 		WHERE c.page_id = $1 AND NOT c.is_op GROUP BY a.author_id ORDER BY count(*) DESC LIMIT 1`, page.ID).Scan(&authorID); err != nil {
 		t.Fatal(err)
 	}
+	// A profile link where the id goes would match nothing: refused. The
+	// id with spaces around it (pasted) is the same id.
+	if r := s.Do(t, adminKey, "POST", "/v1/erasure-requests",
+		[]byte(`{"subject_type":"author","author_id":"https://www.facebook.com/someone"}`)); r.StatusCode != http.StatusBadRequest {
+		t.Fatalf("an author_id that is a link: %d", r.StatusCode)
+	} else {
+		_ = r.Body.Close()
+	}
 	er := decodeBody[api.Erasure](t, s.Do(t, adminKey, "POST", "/v1/erasure-requests",
-		[]byte(fmt.Sprintf(`{"subject_type":"author","author_id":%q}`, authorID))), http.StatusAccepted)
+		[]byte(fmt.Sprintf(`{"subject_type":"author","author_id":" %s "}`, authorID))), http.StatusAccepted)
 	if err := s.Eraser.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}

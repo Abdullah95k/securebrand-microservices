@@ -41,6 +41,7 @@ const (
 	CheckBootstrap    = "bootstrap"
 	CheckBlockRate    = "block_rate"
 	CheckDepth        = "depth"
+	CheckCoverage     = "coverage"
 )
 
 // Advice says what to try when a check fails (docs/runbooks/phase0-spike.md,
@@ -50,6 +51,7 @@ var Advice = map[string]string{
 	CheckBootstrap:    "check the region table (EU consent wall) and the tokens found; try another fingerprint profile or another tier",
 	CheckBlockRate:    "lower --rps, add exits (more static endpoints or gateway sessions) or use another tier",
 	CheckDepth:        "timelines end before max_age: set limits.max_age_days to the measured median, or accept partial backfills",
+	CheckCoverage:     "the page HTML loaded but named no page id (no_page_id), or no timeline was read: send the bundle, the page parser needs updating",
 }
 
 // Summary is the aggregated result for one tier (or for every record, from
@@ -65,12 +67,15 @@ type Summary struct {
 	// Unavailable counts pages that are deleted or restricted to logged-in
 	// viewers. Their page loads count as traffic only: they are left out of
 	// BootstrapSuccess and timeline depth.
-	Unavailable        int                        `json:"unavailable_pages,omitempty"`
-	TokensFoundRate    map[string]float64         `json:"tokens_found_rate"`
-	Requests           int                        `json:"requests"`
-	ClassRate          map[string]float64         `json:"class_rate"`
-	BlockRate          float64                    `json:"block_rate"`
-	TimelineEnd        map[string]int             `json:"timeline_end"`
+	Unavailable     int                `json:"unavailable_pages,omitempty"`
+	TokensFoundRate map[string]float64 `json:"tokens_found_rate"`
+	Requests        int                `json:"requests"`
+	ClassRate       map[string]float64 `json:"class_rate"`
+	BlockRate       float64            `json:"block_rate"`
+	TimelineEnd     map[string]int     `json:"timeline_end"`
+	// TimelineCoverage is the share of pages (unavailable ones aside) whose
+	// timeline was read: a page whose HTML names no page id is not.
+	TimelineCoverage   float64                    `json:"timeline_coverage"`
 	MedianPosts        float64                    `json:"median_posts"`
 	MedianDays         float64                    `json:"median_days"`
 	Completeness       map[string]OrderingSummary `json:"completeness"`
@@ -286,6 +291,7 @@ func summarize(tier string, recs []Record, opt ReportOptions) Summary {
 	// Pages that are deleted or restricted to logged-in viewers say nothing
 	// about sessions or timelines: their loads count as traffic only.
 	unavailable := map[string]bool{}
+	read, unread := map[string]bool{}, map[string]bool{} // timelines read, and not (no page id)
 	pages := map[string]*pageAgg{}
 	agg := func(p string) *pageAgg {
 		a := pages[p]
@@ -359,8 +365,10 @@ func summarize(tier string, recs []Record, opt ReportOptions) Summary {
 				break
 			}
 			if r.EndReason == "no_page_id" {
-				break // no timeline read: no depth to measure (it shows in the end reasons)
+				unread[r.Page] = true
+				break // no timeline read: no depth to measure (coverage counts it)
 			}
+			read[r.Page] = true
 			posts = append(posts, float64(r.Posts))
 			days = append(days, r.DaysCovered)
 			a.days = append(a.days, r.DaysCovered)
@@ -371,8 +379,10 @@ func summarize(tier string, recs []Record, opt ReportOptions) Summary {
 			}
 			allRatios[r.Ordering] = append(allRatios[r.Ordering], ratio)
 			// A post not read whole, by the limits or a reply thread that
-			// stopped early, says nothing about the ordering.
-			if r.Capped || r.ThreadEnd != "" {
+			// stopped on an error, a block or drift, says nothing about the
+			// ordering. A wall is what Phase 0 measures: the post keeps its
+			// ratio (and the wall is counted).
+			if r.Capped || (r.ThreadEnd != "" && r.ThreadEnd != "wall") {
 				capped[r.Ordering]++
 			} else {
 				ratios[r.Ordering] = append(ratios[r.Ordering], ratio)
@@ -398,6 +408,13 @@ func summarize(tier string, recs []Record, opt ReportOptions) Summary {
 	}
 	s.Pages = len(pages)
 	s.Unavailable = len(unavailable)
+	// A page read on one attempt and not on another counts as read.
+	for p := range read {
+		delete(unread, p)
+	}
+	if n := len(read) + len(unread); n > 0 {
+		s.TimelineCoverage = float64(len(read)) / float64(n)
+	}
 	if boots > 0 {
 		s.BootstrapSuccess = float64(bootOK) / float64(boots)
 		for k, v := range tokens {
@@ -488,6 +505,11 @@ func summarize(tier string, recs []Record, opt ReportOptions) Summary {
 			s.MedianDays, th.MinMedianDays)
 	}
 	check(CheckDepth, s.MedianDays >= th.MinMedianDays || ended, depthMsg)
+	// Bootstrap success counts page loads that brought tokens, depth and
+	// completeness only pages whose timeline was read: pages that load
+	// but name no page id (a Facebook HTML change) would pass both unseen.
+	check(CheckCoverage, s.TimelineCoverage >= th.MinBootstrapSuccess,
+		fmt.Sprintf("timelines read on %.2f of the pages >= %.2f", s.TimelineCoverage, th.MinBootstrapSuccess))
 
 	s.Strata = strata(pages, s.BestOrdering)
 	return s

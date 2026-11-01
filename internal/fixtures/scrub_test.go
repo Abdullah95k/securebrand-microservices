@@ -2,9 +2,11 @@ package fixtures
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/parse"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -327,6 +329,78 @@ func TestScrubScriptThatIsNotJSON(t *testing.T) {
 		`"url":"https:\/\/www.facebook.com\/jane.doe\"","m":"https://m.facebook.com/profile.php?id=100055512345678?x"});</script></html>`
 	out := string(Scrub([]byte(in), nil))
 	for _, leak := range []string{"my secret comment", "Jane Doe", "jane.doe", "100055512345678"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("%q left in %s", leak, out)
+		}
+	}
+}
+
+// A comment's id opens it on Facebook (its author and text): it becomes a
+// pseudonym wherever it is (its own id, its graph id and feedback's, a
+// comment_id link, meta.json), consistently, so parsers still match them.
+func TestScrubCommentIDs(t *testing.T) {
+	gid := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	in := `{"data":{"node":{"__typename":"Comment","id":"` + gid("comment:111_222333444555") + `","legacy_fbid":"222333444555",` +
+		`"url":"https:\/\/www.facebook.com\/brand\/posts\/111?comment_id=222333444555",` +
+		`"feedback":{"__typename":"Feedback","id":"` + gid("feedback:111_222333444555") + `"}}}}`
+	out := string(Scrub([]byte(in), nil))
+	if strings.Contains(out, "222333444555") || strings.Contains(out, gid("comment:111_222333444555")) {
+		t.Fatalf("comment id left: %s", out)
+	}
+	var v struct {
+		Data struct {
+			Node struct {
+				ID       string `json:"id"`
+				Legacy   string `json:"legacy_fbid"`
+				URL      string `json:"url"`
+				Feedback struct {
+					ID string `json:"id"`
+				} `json:"feedback"`
+			} `json:"node"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(out), &v); err != nil {
+		t.Fatal(err)
+	}
+	n := v.Data.Node
+	if got := parse.CommentIDFromGraphID(n.ID); got == 0 || strconv.FormatInt(got, 10) != n.Legacy {
+		t.Fatalf("graph id %s gives %d, legacy id %s", n.ID, got, n.Legacy)
+	}
+	if fb, _ := base64.StdEncoding.DecodeString(n.Feedback.ID); string(fb) != "feedback:111_"+n.Legacy ||
+		!strings.HasSuffix(n.URL, "comment_id="+n.Legacy) {
+		t.Fatalf("feedback %s, url %s: not the same pseudonym %s", fb, n.URL, n.Legacy)
+	}
+
+	// A comment known by its legacy id alone.
+	bare := `{"data":{"node":{"__typename":"Comment","legacy_fbid":"777888999000","body":{"text":"hi"}}}}`
+	if out := string(Scrub([]byte(bare), nil)); strings.Contains(out, "777888999000") {
+		t.Fatalf("legacy comment id left: %s", out)
+	}
+
+	// meta.json gets the same pseudonym; the post (public) stays.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "response.ndjson"), []byte(in), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "meta.json"), []byte(`{"page_id":9,"post_id":111,"parent_comment_id":222333444555}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ScrubDir(dir, nil); err != nil {
+		t.Fatal(err)
+	}
+	meta, _ := os.ReadFile(filepath.Join(dir, "meta.json"))
+	if strings.Contains(string(meta), "222333444555") || !strings.Contains(string(meta), `"post_id": 111`) {
+		t.Fatalf("meta.json: %s", meta)
+	}
+}
+
+// Script that isn't JSON: usernames and display names go, and a User's id
+// after a nested object.
+func TestScrubScriptPeopleFields(t *testing.T) {
+	in := `<html><script>require("X",{"__typename":"User","profile_picture":{"uri":"x"},"id":"100077712345678",` +
+		`"username":"ali.hassan.77","display_name":"Ali Hassan"});</script></html>`
+	out := string(Scrub([]byte(in), nil))
+	for _, leak := range []string{"100077712345678", "ali.hassan.77", "Ali Hassan"} {
 		if strings.Contains(out, leak) {
 			t.Errorf("%q left in %s", leak, out)
 		}

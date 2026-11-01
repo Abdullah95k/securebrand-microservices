@@ -98,6 +98,29 @@ func TestAdaptiveScheduleAndPostRefresh(t *testing.T) {
 			t.Fatalf("the registered client's PATCH %s = %d", ref, resp.StatusCode)
 		}
 	}
+	// Once another client registers the page too, one of them may only make
+	// it crawl more: disabling it or slowing it down would cut the other off.
+	other := s.Key(t, api.ScopePagesWrite)
+	if r := s.Do(t, other, "POST", "/v1/pages", []byte(fmt.Sprintf(`{"page":%q,"backfill":false}`, page.Vanity))); r.StatusCode != http.StatusCreated {
+		t.Fatalf("second client's registration = %d", r.StatusCode)
+	} else {
+		_ = r.Body.Close()
+	}
+	for body, want := range map[string]int{
+		`{"enabled":false}`:      http.StatusConflict,
+		`{"interval_hours":720}`: http.StatusConflict,
+		`{"adaptive":true}`:      http.StatusConflict,
+		`{"enabled":true}`:       http.StatusNoContent,
+	} {
+		resp = s.Do(t, key, "PATCH", "/v1/pages/"+page.Vanity, []byte(body))
+		_ = resp.Body.Close()
+		if resp.StatusCode != want {
+			t.Fatalf("PATCH %s on a shared page = %d, want %d", body, resp.StatusCode, want)
+		}
+	}
+	if n := count(t, s, `SELECT count(*) FROM page_schedule WHERE page_id = $1 AND enabled AND interval_seconds < 720 * 3600`, page.ID); n != 1 {
+		t.Fatal("a shared schedule was disabled or slowed down")
+	}
 
 	// 8 posts 20h apart: 1.2 posts a day is tier T1, crawled every 3h like
 	// every tier.
@@ -267,5 +290,25 @@ func TestRegisterBackfillsPagesNeverRun(t *testing.T) {
 	}
 	if r := register(fmt.Sprintf(`{"page":%q}`, page.Vanity)); r.Created || r.Backfill != nil {
 		t.Fatalf("third registration: %+v", r)
+	}
+}
+
+// Asking again for a backfill of a page whose backfill (the client's) is
+// still under way returns that one: each is a full read of the page.
+func TestBackfillIsNotStartedTwice(t *testing.T) {
+	s := Start(t, Options{Spec: fakefb.Spec{Seed: 5, Pages: 1, PostsPerPage: 40, MaxComments: 30}})
+	key := s.Key(t, api.ScopePagesWrite, api.ScopeJobsWrite)
+	page := s.Fake.World.Pages()[0]
+	type registered struct {
+		Backfill *jobView `json:"backfill_job"`
+	}
+	body := []byte(fmt.Sprintf(`{"page":%q,"backfill":true}`, page.Vanity))
+	first := decodeBody[registered](t, s.Do(t, key, "POST", "/v1/pages", body), http.StatusCreated)
+	second := decodeBody[registered](t, s.Do(t, key, "POST", "/v1/pages", body), http.StatusCreated)
+	if first.Backfill == nil || second.Backfill == nil || first.Backfill.ID != second.Backfill.ID {
+		t.Fatalf("backfills: %+v, then %+v", first.Backfill, second.Backfill)
+	}
+	if n := count(t, s, `SELECT count(*) FROM jobs WHERE kind = 'backfill'`); n != 1 {
+		t.Fatalf("%d backfills started", n)
 	}
 }
