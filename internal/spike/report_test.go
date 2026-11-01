@@ -201,12 +201,39 @@ func TestThreadWallsAreNotTheOrderings(t *testing.T) {
 	in := strings.Join([]string{
 		`{"type":"comments","page":"a","post_id":1,"ordering":"comments","reported":10,"collected":10}`,
 		`{"type":"comments","page":"a","post_id":2,"ordering":"comments","reported":10,"collected":2,"thread_end":"wall"}`,
+		`{"type":"comments","page":"a","post_id":3,"ordering":"comments","reported":10,"collected":2,"thread_end":"wall"}`,
+		`{"type":"comments","page":"a","post_id":4,"ordering":"comments","reported":10,"collected":1,"thread_end":"blocked"}`,
 	}, "\n")
 	s, err := Report(strings.NewReader(in), Thresholds{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if o := s.Completeness["comments"]; o.Median != 1 || o.Walls != 1 || o.Capped != 1 {
+	// Walled threads keep their posts' ratios (0.2, 0.2, 1: median 0.2); a
+	// thread stopped by a block is left out of the median.
+	if o := s.Completeness["comments"]; o.Median != 0.2 || o.Walls != 2 || o.Capped != 1 {
 		t.Fatalf("completeness %+v", o)
+	}
+}
+
+// Pages whose HTML names no page id are never read: most pages so is a
+// NO-GO, however good the few read ones look.
+func TestPagesWithoutTimelinesFailCoverage(t *testing.T) {
+	var lines []string
+	for i := range 10 {
+		p := fmt.Sprintf("p%d", i)
+		lines = append(lines, `{"type":"bootstrap","page":"`+p+`","ok":true}`)
+		end, days := "no_page_id", 0
+		if i == 0 {
+			end, days = "end", 400
+		}
+		lines = append(lines, fmt.Sprintf(`{"type":"timeline","page":%q,"end_reason":%q,"posts":50,"days_covered":%d}`, p, end, days))
+	}
+	lines = append(lines, `{"type":"comments","page":"p0","post_id":1,"ordering":"comments","reported":10,"collected":10}`)
+	s, err := Report(strings.NewReader(strings.Join(lines, "\n")), DefaultThresholds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Go || s.TimelineCoverage != 0.1 || !slices.Contains(s.Failed, CheckCoverage) {
+		t.Fatalf("go %v, coverage %.2f, failed %v", s.Go, s.TimelineCoverage, s.Failed)
 	}
 }

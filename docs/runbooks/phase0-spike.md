@@ -224,7 +224,7 @@ go run ./cmd/fbs-spike capture --config phase0/proxies.yaml --registry phase0/ou
 the page ended on and the id counts; the HTML next to it shows what to read
 instead. Like every fixture, it holds Facebook content: keep it off git.
 
-The verdict: a tier is GO when all four checks pass. Phase 0 is GO when at
+The verdict: a tier is GO when all five checks pass. Phase 0 is GO when at
 least one tier is. The recommended tier is the cheapest passing one.
 
 | Check | Threshold | If it fails |
@@ -233,6 +233,7 @@ least one tier is. The recommended tier is the cheapest passing one.
 | HTTP bootstrap success | ≥ 0.90 | Look at the region table (EU consent wall) and the tokens found; try another `fb.fingerprint_profile` or another tier |
 | Block rate | < 5% | Lower `--rps`, add exits (more static endpoints or gateway sessions), or use another tier. Mixing tiers in production (`fb.proxy.routing`) is an option. |
 | Timeline depth | median ≥ `--min-days`, or no login walls | Timelines stop early behind login walls: lower `limits.max_age_days`, or accept partial backfills |
+| Timeline coverage: pages whose timeline was read | ≥ 0.90 | Pages loaded but their HTML named no page id (`no_page_id` in the end reasons): a Facebook change the page parser needs. Send the bundle. |
 
 ## 5. Sending the results back
 
@@ -256,7 +257,7 @@ appears in it.
 - signed media URLs;
 - the text people wrote: comment and post bodies (any text inside a comment), text that mentions someone, a profile's status, and media captions. Letters and digits become `x`, and the length is kept so mention offsets stay valid.
 
-What stays is the page's own name, links and text (such as its follower line), and real structure: post and comment ids, permalinks, timestamps and counts.
+What stays is the page's own name, links and text (such as its follower line), and real structure: post ids, permalinks, timestamps and counts. Comment ids become pseudonyms too (wherever they appear: their own ids, graph ids, `comment_id` links and `meta.json`), consistently, since a comment id with its post id opens the comment on Facebook.
 
 **Re-scrubbing.** Each fixture records the scrubber version. When the bundle is built, fixtures scrubbed by an older version are scrubbed again.
 

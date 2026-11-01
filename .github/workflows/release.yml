@@ -8,9 +8,9 @@ on:
   push:
     tags: ["v*"]
 
+# Read-only by default; only the job that publishes may write packages.
 permissions:
   contents: read
-  packages: write
 
 jobs:
   # Nothing is published unless the tagged commit builds, vets and passes
@@ -29,6 +29,9 @@ jobs:
   publish:
     needs: checks
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
       - name: Names

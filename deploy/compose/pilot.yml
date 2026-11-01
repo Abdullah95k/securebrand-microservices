@@ -8,9 +8,11 @@
 # - every port is bound to 127.0.0.1 (the stack's Postgres password is "fbs");
 # - no fakefb; the Phase 0 registry is imported before the crawler starts;
 # - the fbs services run as root in their containers, to read proxies.yaml
-#   (mode 600, owned by root), but with no Linux capabilities;
-# - everything restarts after a reboot or a Docker restart, Redpanda keeps
-#   its data in a volume (queued tasks survive a container recreate), and
+#   (mode 600), with no Linux capabilities but the one that reads files
+#   whoever owns them;
+# - everything restarts after a reboot or a Docker restart, Redpanda and
+#   Valkey keep their data in volumes (queued tasks, job accounting,
+#   checkpoints and post caches survive a container recreate), and
 #   container logs are rotated (3 x 50 MB per service), so the disk can't
 #   fill up with them.
 
@@ -21,6 +23,9 @@ x-logging: &logging
 x-pilot: &pilot
   user: "0:0"
   cap_drop: [ALL]
+  # Root without capabilities is held to file permissions: this one lets
+  # it read proxies.yaml (mode 600) whoever owns it, nothing more.
+  cap_add: [DAC_READ_SEARCH]
   security_opt: ["no-new-privileges:true"]
   logging: *logging
   environment:
@@ -45,6 +50,10 @@ services:
     ports: !override ["127.0.0.1:6379:6379"]
     restart: unless-stopped
     logging: *logging
+    # Job accounting, checkpoints and post caches survive a recreate
+    # (`make pilot-up` recreates every container).
+    command: ["valkey-server", "--appendonly", "yes"]
+    volumes: [valkey-data:/data]
   s3:
     ports: !override ["127.0.0.1:9000:9000"]
     restart: unless-stopped
@@ -91,3 +100,4 @@ services:
 
 volumes:
   redpanda-data: {}
+  valkey-data: {}

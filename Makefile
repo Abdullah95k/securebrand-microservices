@@ -38,12 +38,15 @@ fixtures:
 
 ## Start Postgres, Redpanda and Valkey for integration tests.
 infra-up:
+	$(NOT_PILOT)
 	$(COMPOSE) up -d postgres redpanda valkey
 	@until docker exec fbs-postgres-1 pg_isready -U fbs >/dev/null 2>&1; do sleep 1; done
 
 # The local stack and the pilot are the same Compose project: on the pilot
-# machine, `down -v` would delete the pilot's database.
-NOT_PILOT = @test -z "$(FORCE)" -a -f phase0/out/pilot-run.yaml && { echo "refusing: this machine runs the pilot, and this would delete its data (make pilot-down stops it; FORCE=1 overrides)"; exit 2; } || true
+# machine, `down -v` would delete the pilot's database, and `up` without
+# pilot.yml would recreate its containers with the local settings (no
+# restart policy, no Redpanda volume, the local config).
+NOT_PILOT = @test -z "$(FORCE)" -a -f phase0/out/pilot-run.yaml && { echo "refusing: this machine runs the pilot, and this would replace or delete its stack (use the pilot-* targets; FORCE=1 overrides)"; exit 2; } || true
 
 infra-down:
 	$(NOT_PILOT)
@@ -97,6 +100,7 @@ chart-smoke:
 	python3 scripts/chart-smoke.py --image $(IMAGE) --helm $(HELM)
 
 compose-up:
+	$(NOT_PILOT)
 	$(COMPOSE) up -d
 
 compose-down:
@@ -209,6 +213,8 @@ pilot-down:
 	$(PILOT_COMPOSE) down
 pilot-clean:
 	$(PILOT_COMPOSE) down -v
+	@# No pilot left: the local targets may run again (NOT_PILOT).
+	rm -f $(PILOT_OUT)/pilot-run.yaml
 
 ## Rehearse Phase 0 against a local fakefb (no proxies, no Facebook, about a minute).
 phase0-dryrun:

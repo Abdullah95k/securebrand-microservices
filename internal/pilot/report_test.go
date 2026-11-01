@@ -1,9 +1,13 @@
 package pilot
 
 import (
+	"context"
+	"math"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/abdullah95k/securebrand-microservices/internal/testenv"
 )
 
 func TestFormatProjects(t *testing.T) {
@@ -52,5 +56,42 @@ func TestFormatProjects(t *testing.T) {
 	}
 	if !strings.Contains(Format(Report{Since: since, Until: since.Add(time.Hour)}, Projection{}), "no scheduled jobs yet") {
 		t.Fatal("an empty pilot says why")
+	}
+}
+
+// Three cycles of a page every 3 hours cover 9 hours: the daily traffic is
+// the cycles' over 9 hours, not over the 6 between the first one's start
+// and the last one's end.
+func TestSteadyStateCoversWholeCycles(t *testing.T) {
+	db := testenv.Postgres(t)
+	ctx := context.Background()
+	t0 := time.Now().UTC().Add(-7 * time.Hour).Truncate(time.Second)
+	// Page b, on a long interval of its own (and no requests), doesn't
+	// stretch the span.
+	if _, err := db.Exec(ctx, `INSERT INTO page_schedule (page_ref, interval_seconds, next_run_at) VALUES
+		('v:a', 10800, now()), ('v:b', 2592000, now())`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO jobs (job_id, kind, lane, mode, page_ref, params, status, counters, created_at, finished_at)
+		VALUES (gen_random_uuid(), 'scheduled', 1, 'incremental', 'v:b', '{}', 'completed', '{"requests":0}', $1, $1)`, t0); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 3 {
+		created := t0.Add(time.Duration(i) * 3 * time.Hour)
+		if _, err := db.Exec(ctx, `INSERT INTO jobs (job_id, kind, lane, mode, page_ref, params, status, counters, created_at, finished_at)
+			VALUES (gen_random_uuid(), 'scheduled', 1, 'incremental', 'v:a', '{}', 'completed', '{"requests":100}', $1, $2)`,
+			created, created.Add(10*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r, err := Load(ctx, db, t0.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := r.SteadyDays(); math.Abs(d-9.0/24) > 1e-9 {
+		t.Fatalf("steady span %.4f days, want %.4f", d, 9.0/24)
+	}
+	if perDay := float64(r.Steady().Requests) / r.SteadyDays(); math.Abs(perDay-800) > 1e-6 {
+		t.Fatalf("%.1f requests a day, want 800 (100 per 3 hours)", perDay)
 	}
 }

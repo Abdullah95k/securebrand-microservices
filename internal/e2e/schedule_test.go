@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -97,6 +98,29 @@ func TestAdaptiveScheduleAndPostRefresh(t *testing.T) {
 		if resp.StatusCode != http.StatusNoContent {
 			t.Fatalf("the registered client's PATCH %s = %d", ref, resp.StatusCode)
 		}
+	}
+	// Once another client registers the page too, one of them may only make
+	// it crawl more: disabling it or slowing it down would cut the other off.
+	other := s.Key(t, api.ScopePagesWrite)
+	if r := s.Do(t, other, "POST", "/v1/pages", []byte(fmt.Sprintf(`{"page":%q,"backfill":false}`, page.Vanity))); r.StatusCode != http.StatusCreated {
+		t.Fatalf("second client's registration = %d", r.StatusCode)
+	} else {
+		_ = r.Body.Close()
+	}
+	for body, want := range map[string]int{
+		`{"enabled":false}`:      http.StatusConflict,
+		`{"interval_hours":720}`: http.StatusConflict,
+		`{"adaptive":true}`:      http.StatusConflict,
+		`{"enabled":true}`:       http.StatusNoContent,
+	} {
+		resp = s.Do(t, key, "PATCH", "/v1/pages/"+page.Vanity, []byte(body))
+		_ = resp.Body.Close()
+		if resp.StatusCode != want {
+			t.Fatalf("PATCH %s on a shared page = %d, want %d", body, resp.StatusCode, want)
+		}
+	}
+	if n := count(t, s, `SELECT count(*) FROM page_schedule WHERE page_id = $1 AND enabled AND interval_seconds < 720 * 3600`, page.ID); n != 1 {
+		t.Fatal("a shared schedule was disabled or slowed down")
 	}
 
 	// 8 posts 20h apart: 1.2 posts a day is tier T1, crawled every 3h like
@@ -267,5 +291,41 @@ func TestRegisterBackfillsPagesNeverRun(t *testing.T) {
 	}
 	if r := register(fmt.Sprintf(`{"page":%q}`, page.Vanity)); r.Created || r.Backfill != nil {
 		t.Fatalf("third registration: %+v", r)
+	}
+}
+
+// Asking again for a backfill of a page whose backfill (the client's) is
+// still under way returns that one, marked reused: each is a full read of
+// the page. Requests racing each other start one between them.
+func TestBackfillIsNotStartedTwice(t *testing.T) {
+	s := Start(t, Options{Spec: fakefb.Spec{Seed: 5, Pages: 2, PostsPerPage: 40, MaxComments: 30}})
+	key := s.Key(t, api.ScopePagesWrite, api.ScopeJobsWrite)
+	pages := s.Fake.World.Pages()
+	type registered struct {
+		Backfill *jobView `json:"backfill_job"`
+		Reused   bool     `json:"backfill_reused"`
+	}
+	register := func(vanity string) registered {
+		body := []byte(fmt.Sprintf(`{"page":%q,"backfill":true}`, vanity))
+		return decodeBody[registered](t, s.Do(t, key, "POST", "/v1/pages", body), http.StatusCreated)
+	}
+	first, second := register(pages[0].Vanity), register(pages[0].Vanity)
+	if first.Backfill == nil || second.Backfill == nil || first.Backfill.ID != second.Backfill.ID || first.Reused || !second.Reused {
+		t.Fatalf("backfills: %+v, then %+v", first, second)
+	}
+	var wg sync.WaitGroup
+	racing := make([]registered, 8)
+	for i := range racing {
+		wg.Add(1)
+		go func() { defer wg.Done(); racing[i] = register(pages[1].Vanity) }()
+	}
+	wg.Wait()
+	for _, r := range racing {
+		if r.Backfill == nil || r.Backfill.ID != racing[0].Backfill.ID {
+			t.Fatalf("racing backfills: %+v, %+v", racing[0].Backfill, r.Backfill)
+		}
+	}
+	if n := count(t, s, `SELECT count(*) FROM jobs WHERE kind = 'backfill'`); n != 2 {
+		t.Fatalf("%d backfills started, want one per page", n)
 	}
 }

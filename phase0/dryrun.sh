@@ -12,6 +12,12 @@ GO=${GO:-go}
 OUT=${OUT:-phase0/out-dryrun}
 ADDR=${ADDR:-127.0.0.1:8090}
 
+# OUT is wiped first: only a dry-run directory, never the real Phase 0
+# results (phase0/out holds them, and the pilot's settings).
+case "$(basename "$OUT")" in
+  *dryrun*) ;;
+  *) echo "OUT=$OUT: the dry run wipes its output directory, so its name must contain \"dryrun\"" >&2; exit 2 ;;
+esac
 "$GO" build -o bin/ ./cmd/fakefb ./cmd/fbs-spike
 rm -rf "$OUT"
 mkdir -p "$OUT"
