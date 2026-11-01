@@ -138,7 +138,9 @@ func (s *Server) createErasure(w http.ResponseWriter, r *http.Request) {
 			problem(w, http.StatusBadRequest, "unknown author", "provide author_id, or a profile_url we have stored")
 			return
 		}
-		e, err := s.insertErasure(r.Context(), c, "author", key, 0, map[string]any{"author_id": req.AuthorID, "profile_url": req.ProfileURL})
+		// The Facebook id (resolved from the profile URL if need be) lets the
+		// erasure find the author's mentions; it is dropped once done.
+		e, err := s.insertErasure(r.Context(), c, "author", key, 0, map[string]any{"author_id": id, "profile_url": req.ProfileURL})
 		if err != nil {
 			serverError(w, err)
 			return

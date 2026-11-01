@@ -5,13 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"google.golang.org/protobuf/proto"
 
 	fbv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fb/v1"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/kafka"
+	"github.com/abdullah95k/securebrand-microservices/internal/platform/metrics"
 	"github.com/abdullah95k/securebrand-microservices/internal/topics"
 )
 
@@ -80,7 +83,7 @@ func (c *Consumer) Run(ctx context.Context) error {
 			c.cl.AllowRebalance()
 			continue
 		}
-		if err := c.flush(ctx, recs); err != nil {
+		if err := c.flushSkipping(ctx, recs); err != nil {
 			if ctx.Err() != nil {
 				// Shutting down: the batch is not committed and is read again.
 				c.cl.AllowRebalance()
@@ -91,7 +94,7 @@ func (c *Consumer) Run(ctx context.Context) error {
 			// unwritten data.
 			for ctx.Err() == nil {
 				time.Sleep(2 * time.Second)
-				if err = c.flush(ctx, recs); err == nil {
+				if err = c.flushSkipping(ctx, recs); err == nil {
 					break
 				}
 				slog.Error("persist: batch retry failed", "err", err)
@@ -106,6 +109,56 @@ func (c *Consumer) Run(ctx context.Context) error {
 		}
 		c.cl.AllowRebalance()
 	}
+}
+
+// isDataError reports Postgres refusing a value (SQLSTATE class 22, data
+// exception): writing the same record again can never succeed.
+func isDataError(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && strings.HasPrefix(pgErr.Code, "22")
+}
+
+// flushSkipping writes recs. A record Postgres refuses for its data, found
+// by halving the batch, is skipped (logged by position, never by content):
+// otherwise it would hold up every record after it for good. Rows are
+// upserted by observation time, so writing the halves apart is the same as
+// writing them together.
+//
+// More than maxRefused refused records in one batch is no bad record but a
+// systematic error (a code or schema change): the batch is then retried,
+// stalling the persister and its lag alert, instead of dropping data.
+func (c *Consumer) flushSkipping(ctx context.Context, recs []*kgo.Record) error {
+	budget := maxRefused
+	return c.flushBisect(ctx, recs, &budget)
+}
+
+// maxRefused is how many records of one batch may be skipped as refused.
+const maxRefused = 3
+
+func (c *Consumer) flushBisect(ctx context.Context, recs []*kgo.Record, budget *int) error {
+	err := c.flush(ctx, recs)
+	if !isDataError(err) {
+		return err
+	}
+	if len(recs) == 1 {
+		if *budget == 0 {
+			return fmt.Errorf("persist: more than %d records of one batch refused; not skipping more: %w", maxRefused, err)
+		}
+		*budget--
+		var pgErr *pgconn.PgError
+		errors.As(err, &pgErr)
+		r := recs[0]
+		slog.Error("persist: record refused by Postgres; skipped", "topic", r.Topic, "partition", r.Partition,
+			"offset", r.Offset, "sqlstate", pgErr.Code)
+		entity := map[string]string{topics.Page: "page", topics.Post: "post", topics.Comment: "comment", topics.Media: "media"}[strings.TrimPrefix(r.Topic, c.prefix)]
+		metrics.PersistRows.WithLabelValues(entity, "rejected").Inc()
+		return nil
+	}
+	mid := len(recs) / 2
+	if err := c.flushBisect(ctx, recs[:mid], budget); err != nil {
+		return err
+	}
+	return c.flushBisect(ctx, recs[mid:], budget)
 }
 
 func (c *Consumer) flush(ctx context.Context, recs []*kgo.Record) error {

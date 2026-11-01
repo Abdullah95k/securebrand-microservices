@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -144,5 +145,68 @@ func TestCappedMeasurementsAreLeftOut(t *testing.T) {
 	}
 	if !strings.Contains(Format(s), "1 hit the spike's limits") {
 		t.Fatal(Format(s))
+	}
+}
+
+// A shallow median passes the depth check only when every timeline really
+// ended; one stopped by an error, a block, a drift or the page limit fails it.
+func TestDepthCheckNeedsTimelinesThatEnded(t *testing.T) {
+	th := Thresholds{MinMedianDays: 365}
+	for end, pass := range map[string]bool{"end": true, "no_feed": true, "no_page_id": true, "wall": false, "error": false, "drift": false, "max_pages": false} {
+		var b strings.Builder
+		for _, p := range []string{"a", "b"} {
+			reason := "end"
+			if p == "b" {
+				reason = end
+			}
+			fmt.Fprintf(&b, `{"type":"timeline","page":%q,"posts":3,"days_covered":20,"end_reason":%q}`+"\n", p, reason)
+		}
+		s, err := Report(strings.NewReader(b.String()), th)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if failed := slices.Contains(s.Failed, CheckDepth); failed == pass {
+			t.Errorf("%s: depth failed %v, want pass %v (%v)", end, failed, pass, s.Verdict)
+		}
+	}
+}
+
+// A page interrupted by shutdown and measured again on resume counts once,
+// by its finished attempt; one interrupted and never resumed doesn't count.
+func TestReportUsesFinishedAttempts(t *testing.T) {
+	in := strings.Join([]string{
+		`{"type":"page","page":"a"}`,
+		`{"type":"request","page":"a","query":"timeline","class":"Transport","reason":"context canceled"}`,
+		`{"type":"bootstrap","page":"a","ok":false,"reason":"context canceled"}`,
+		`{"type":"page","page":"b"}`,
+		`{"type":"bootstrap","page":"b","ok":false,"reason":"context canceled"}`,
+		`{"type":"page","page":"a"}`,
+		`{"type":"bootstrap","page":"a","ok":true,"class":"OK"}`,
+		`{"type":"request","page":"a","query":"timeline","class":"OK"}`,
+		`{"type":"timeline","page":"a","posts":3,"days_covered":400,"end_reason":"end"}`,
+		`{"type":"page_done","page":"a"}`,
+	}, "\n")
+	s, err := Report(strings.NewReader(in), Thresholds{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.BootstrapSuccess != 1 || s.BlockRate != 0 || s.TimelineEnd["end"] != 1 {
+		t.Fatalf("bootstrap %v, block rate %v, ends %v", s.BootstrapSuccess, s.BlockRate, s.TimelineEnd)
+	}
+}
+
+// A post whose reply thread hit a wall wasn't read whole: it is left out of
+// the ordering's completeness and counted as a wall.
+func TestThreadWallsAreNotTheOrderings(t *testing.T) {
+	in := strings.Join([]string{
+		`{"type":"comments","page":"a","post_id":1,"ordering":"comments","reported":10,"collected":10}`,
+		`{"type":"comments","page":"a","post_id":2,"ordering":"comments","reported":10,"collected":2,"thread_end":"wall"}`,
+	}, "\n")
+	s, err := Report(strings.NewReader(in), Thresholds{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o := s.Completeness["comments"]; o.Median != 1 || o.Walls != 1 || o.Capped != 1 {
+		t.Fatalf("completeness %+v", o)
 	}
 }

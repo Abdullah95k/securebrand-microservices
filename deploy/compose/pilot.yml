@@ -8,10 +8,21 @@
 # - every port is bound to 127.0.0.1 (the stack's Postgres password is "fbs");
 # - no fakefb; the Phase 0 registry is imported before the crawler starts;
 # - the fbs services run as root in their containers, to read proxies.yaml
-#   (mode 600, owned by root).
+#   (mode 600, owned by root), but with no Linux capabilities;
+# - everything restarts after a reboot or a Docker restart, Redpanda keeps
+#   its data in a volume (queued tasks survive a container recreate), and
+#   container logs are rotated (3 x 50 MB per service), so the disk can't
+#   fill up with them.
+
+x-logging: &logging
+  driver: json-file
+  options: {max-size: "50m", max-file: "3"}
 
 x-pilot: &pilot
   user: "0:0"
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  logging: *logging
   environment:
     FBS_CONFIG: /etc/fbs/proxies.yaml,/etc/fbs/pilot.yaml,/etc/fbs/pilot-run.yaml
     FBS_FB__BASE_URL: https://www.facebook.com
@@ -23,12 +34,21 @@ x-pilot: &pilot
 services:
   postgres:
     ports: !override ["127.0.0.1:5432:5432"]
+    restart: unless-stopped
+    logging: *logging
   redpanda:
     ports: !override ["127.0.0.1:19092:19092", "127.0.0.1:18081:8081"]
+    restart: unless-stopped
+    logging: *logging
+    volumes: [redpanda-data:/var/lib/redpanda/data]
   valkey:
     ports: !override ["127.0.0.1:6379:6379"]
+    restart: unless-stopped
+    logging: *logging
   s3:
     ports: !override ["127.0.0.1:9000:9000"]
+    restart: unless-stopped
+    logging: *logging
   fakefb:
     profiles: ["fakefb"] # not started
 
@@ -68,3 +88,6 @@ services:
     <<: *pilot
     depends_on:
       pilot-registry: {condition: service_completed_successfully}
+
+volumes:
+  redpanda-data: {}

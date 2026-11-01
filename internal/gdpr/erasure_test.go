@@ -2,6 +2,7 @@ package gdpr
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/kafka"
+	"github.com/abdullah95k/securebrand-microservices/internal/store"
 	"github.com/abdullah95k/securebrand-microservices/internal/testenv"
 )
 
@@ -148,5 +150,79 @@ func TestGuardWaitsForErasure(t *testing.T) {
 	}
 	if r := <-got; r.err != nil || !r.author || !r.page {
 		t.Fatalf("after the erasure: %+v", r)
+	}
+}
+
+// An author erasure deletes the author's media even when the comment isn't
+// stored yet, and scrubs the author's mentions in other people's text; a
+// page erasure deletes the page's comments and metrics through its posts.
+func TestErasureReachesEverything(t *testing.T) {
+	db := testenv.Postgres(t)
+	ctx := context.Background()
+	prod, err := kafka.NewProducer(kafka.ClientConfig{Brokers: testenv.Kafka(t), TopicPrefix: testenv.TopicPrefix()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prod.Close()
+	created := time.Now().UTC().Add(-time.Hour)
+	for _, table := range []string{"posts", "comments"} {
+		if err := store.EnsurePartitionFor(ctx, db, table, created); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.EnsurePartitionFor(ctx, db, "post_metrics", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	mention := `[{"offset":0,"length":6,"entity_type":"User","entity_id":"100001","name":"Erased","url":"u"},{"entity_type":"User","entity_id":"100002","name":"Kept"}]`
+	for _, q := range []string{
+		`INSERT INTO posts (post_created_at, post_id, page_id, post_type, text, text_ranges, content_hash, first_seen_at, last_seen_at)
+			VALUES ($1, 1, 9, 'status', 'hi Erased', $2, '\x01', now(), now()), ($1, 2, 8, 'status', 'other page', NULL, '\x01', now(), now())`,
+		`INSERT INTO post_index (post_id, page_id, post_created_at) VALUES (1, 9, $1), (2, 8, $1)`,
+		`INSERT INTO comments (post_created_at, post_id, comment_id, page_id, depth, author_key, text, text_ranges, content_hash, first_seen_at, last_seen_at)
+			VALUES ($1, 1, 10, 9, 0, '\xbb', 'Erased: thanks', $2, '\x01', now(), now()), ($1, 2, 20, 8, 0, '\xbb', 'stays', NULL, '\x01', now(), now()),
+				($1, 1, 11, 9, 0, '\xaa', 'the erased author, in the thread', NULL, '\x01', now(), now())`,
+		`INSERT INTO post_metrics (post_id, captured_at, page_id) VALUES (1, now(), 9), (2, now(), 8)`,
+		`INSERT INTO media (media_id, fb_media_id, variant, kind, owner_type, comment_id, page_id, status, author_key)
+			VALUES ('00000000-0000-0000-0000-0000000000a1', 'f', 'orig', 'photo', 'comment', 999, 7, 'discovered', '\xaa')`,
+	} {
+		var args []any
+		if strings.Contains(q, "$2") {
+			args = []any{created, mention}
+		} else if strings.Contains(q, "$1") {
+			args = []any{created}
+		}
+		if _, err := db.Exec(ctx, q, args...); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	for _, q := range []string{
+		// The author row is already gone (a retry after the transaction that
+		// deleted it): the Facebook id comes from the request.
+		`INSERT INTO erasure_requests (id, subject_type, author_key, input, status) VALUES (gen_random_uuid(), 'author', '\xaa', '{"author_id":"100001"}', 'pending')`,
+		`INSERT INTO erasure_requests (id, subject_type, page_id, input, status) VALUES (gen_random_uuid(), 'page', 8, '{}', 'pending')`,
+	} {
+		if _, err := db.Exec(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := (&Eraser{DB: db, Producer: prod}).Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for q, want := range map[string]int{
+		`SELECT count(*) FROM erasure_requests WHERE status = 'done'`:     2,
+		`SELECT count(*) FROM erasure_requests WHERE input ? 'author_id'`: 0,
+		`SELECT count(*) FROM media WHERE status = 'deleted'`:             1,
+		`SELECT count(*) FROM comments WHERE comment_id = 10 AND text_ranges->0->>'entity_id' IS NULL
+			AND text_ranges->0->>'name' IS NULL AND text_ranges->1->>'entity_id' = '100002' AND text = 'Erased: thanks'`: 1,
+		`SELECT count(*) FROM posts WHERE post_id = 1 AND text_ranges->0->>'entity_id' IS NULL AND text_ranges->0->>'offset' = '0'`: 1,
+		`SELECT count(*) FROM comments WHERE page_id = 8`:     0,
+		`SELECT count(*) FROM post_metrics WHERE page_id = 8`: 0,
+		`SELECT count(*) FROM post_metrics WHERE page_id = 9`: 1,
+		`SELECT count(*) FROM comments WHERE page_id = 9`:     2,
+	} {
+		var n int
+		if err := db.QueryRow(ctx, q).Scan(&n); err != nil || n != want {
+			t.Errorf("%s = %d (%v), want %d", q, n, err, want)
+		}
 	}
 }

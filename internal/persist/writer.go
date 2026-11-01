@@ -8,9 +8,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"google.golang.org/protobuf/proto"
 
 	fbv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fb/v1"
 	"github.com/abdullah95k/securebrand-microservices/internal/gdpr"
@@ -21,13 +23,22 @@ import (
 // Writer performs batched upserts.
 type Writer struct {
 	DB *pgxpool.Pool
+	// CommentsRetention (privacy.retention.comments_days): comments of posts
+	// older than this are not written, since retention would drop their
+	// partition again within the hour. Zero keeps everything.
+	CommentsRetention time.Duration
 }
 
 // latest keeps the most recently observed message per key.
-func latest[T interface{ GetObs() *fbv1.Observation }](xs []T, key func(T) string) []T {
+// It also removes NUL characters, which Postgres can't store (stripNUL).
+func latest[T interface {
+	GetObs() *fbv1.Observation
+	proto.Message
+}](xs []T, key func(T) string) []T {
 	idx := map[string]int{}
 	out := make([]T, 0, len(xs))
 	for _, x := range xs {
+		stripNUL(x.ProtoReflect())
 		k := key(x)
 		if i, ok := idx[k]; ok {
 			if observed(x.GetObs()).After(observed(out[i].GetObs())) {
@@ -176,13 +187,27 @@ func copyMetrics(ctx context.Context, tx pgx.Tx, rows [][]any) error {
 	if _, err := tx.CopyFrom(ctx, pgx.Identifier{"tmp_metrics"}, cols, pgx.CopyFromRows(rows)); err != nil {
 		return err
 	}
-	_, err := tx.Exec(ctx, `INSERT INTO post_metrics SELECT * FROM tmp_metrics ON CONFLICT DO NOTHING`)
-	if store.IsNoPartition(err) {
-		// Metrics partitions are daily; a missing one is created by the
-		// scheduler. Never fail the post batch for it.
-		return nil
+	// Metrics partitions are daily; a missing one is created by the
+	// scheduler. Never fail the post batch for it.
+	return optionalInsert(ctx, tx, `INSERT INTO post_metrics SELECT * FROM tmp_metrics ON CONFLICT DO NOTHING`)
+}
+
+// optionalInsert runs an insert whose missing partition must not fail the
+// batch. It runs in a savepoint: a failed statement aborts its transaction,
+// so without one the batch would roll back at commit.
+func optionalInsert(ctx context.Context, tx pgx.Tx, q string, args ...any) error {
+	sp, err := tx.Begin(ctx)
+	if err != nil {
+		return err
 	}
-	return err
+	if _, err := sp.Exec(ctx, q, args...); err != nil {
+		_ = sp.Rollback(ctx)
+		if store.IsNoPartition(err) {
+			return nil
+		}
+		return err
+	}
+	return sp.Commit(ctx)
 }
 
 // Comments upserts comments and their authors and applies deletions. An
@@ -193,6 +218,21 @@ func (w *Writer) Comments(ctx context.Context, cs []*fbv1.Comment) error {
 	cs = latest(cs, func(c *fbv1.Comment) string { return strconv.FormatInt(c.CommentId, 10) })
 	if len(cs) == 0 {
 		return nil
+	}
+	if w.CommentsRetention > 0 {
+		cutoff := time.Now().Add(-w.CommentsRetention)
+		kept := cs[:0]
+		for _, c := range cs {
+			if c.PostCreatedAt == nil || !c.PostCreatedAt.AsTime().Before(cutoff) {
+				kept = append(kept, c)
+			}
+		}
+		if dropped := len(cs) - len(kept); dropped > 0 {
+			metrics.PersistRows.WithLabelValues("comment", "past_retention").Add(float64(dropped))
+		}
+		if cs = kept; len(cs) == 0 {
+			return nil
+		}
 	}
 	start := time.Now()
 	keys := make([][]byte, 0, len(cs))
@@ -451,10 +491,9 @@ func (w *Writer) Pages(ctx context.Context, ps []*fbv1.Page) error {
 				return err
 			}
 			if changed {
-				_, err := tx.Exec(ctx, `INSERT INTO page_snapshots (page_id, captured_at, name, followers_count, likes_count, verified)
+				if err := optionalInsert(ctx, tx, `INSERT INTO page_snapshots (page_id, captured_at, name, followers_count, likes_count, verified)
 					VALUES ($1, $2, NULLIF($3,''), $4, $5, $6) ON CONFLICT DO NOTHING`,
-					p.PageId, seen, p.Name, p.FollowersCount, p.LikesCount, p.Verified)
-				if err != nil && !store.IsNoPartition(err) {
+					p.PageId, seen, p.Name, p.FollowersCount, p.LikesCount, p.Verified); err != nil {
 					return err
 				}
 			}
@@ -499,6 +538,12 @@ func (w *Writer) Media(ctx context.Context, ms []*fbv1.Media) error {
 		}
 		rows := make([][]any, 0, len(ms))
 		for _, m := range ms {
+			if uuid.Validate(m.MediaId) != nil {
+				// Media ids are UUIDs made by the crawler; any other can never
+				// be written and must not hold up the batch.
+				metrics.PersistRows.WithLabelValues("media", "rejected").Inc()
+				continue
+			}
 			if !sup.PageSuppressed(m.PageId) && !sup.AuthorSuppressed(m.AuthorKey) {
 				rows = append(rows, mediaRow(m))
 			}

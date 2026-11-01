@@ -6,11 +6,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/twmb/franz-go/pkg/kgo"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	fbv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fb/v1"
 	"github.com/abdullah95k/securebrand-microservices/internal/store"
 	"github.com/abdullah95k/securebrand-microservices/internal/testenv"
+	"github.com/abdullah95k/securebrand-microservices/internal/topics"
 )
 
 func obs(at time.Time, hash string) *fbv1.Observation {
@@ -372,5 +375,123 @@ func TestSuppressedDataInFlight(t *testing.T) {
 		if n != want {
 			t.Errorf("%s = %d, want %d", q, n, want)
 		}
+	}
+}
+
+// A NUL character (valid UTF-8, which Postgres can't store) and a missing
+// metrics or snapshot partition never fail a batch; a record Postgres still
+// refuses is skipped by itself, and the rest of its batch is written.
+func TestBatchesThatPostgresWouldRefuse(t *testing.T) {
+	db := testenv.Postgres(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	// Posts and comments partitions only: no post_metrics nor page_snapshots.
+	for _, table := range []string{"posts", "comments"} {
+		if err := store.EnsurePartitionFor(ctx, db, table, now.Add(-time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := &Writer{DB: db}
+	created := timestamppb.New(now.Add(-time.Hour))
+	cc := int64(3)
+	nul := "bad\x00text"
+	if err := w.Posts(ctx, []*fbv1.Post{{Obs: obs(now, "p1"), PostId: 1, PageId: 9, CreatedAt: created, Text: nul,
+		Hashtags: []string{nul}, TextRanges: []*fbv1.TextRange{{EntityType: "User", Name: nul}}, CommentCount: &cc,
+		Reactions: &fbv1.Reactions{Total: 2, ByType: map[string]int64{"like": 2}}, ExtraJson: `{"k":"a\u0000b"}`}}); err != nil {
+		t.Fatalf("posts: %v", err)
+	}
+	if err := w.Comments(ctx, []*fbv1.Comment{{Obs: obs(now, "c1"), CommentId: 10, PostId: 1, PageId: 9, PostCreatedAt: created,
+		Text: nul, Author: &fbv1.Author{Id: "a", Name: nul, AuthorKey: []byte{1}}}}); err != nil {
+		t.Fatalf("comments: %v", err)
+	}
+	f := int64(5)
+	if err := w.Pages(ctx, []*fbv1.Page{{Obs: obs(now, "pg"), PageId: 9, Name: nul, FollowersCount: &f}}); err != nil {
+		t.Fatalf("pages: %v", err)
+	}
+	for q, want := range map[string]int{
+		`SELECT count(*) FROM posts WHERE text = 'badtext' AND hashtags = '{badtext}' AND extra->>'k' = 'ab'
+			AND text_ranges->0->>'name' = 'badtext'`: 1,
+		`SELECT count(*) FROM comments WHERE text = 'badtext'`:        1,
+		`SELECT count(*) FROM comment_authors WHERE name = 'badtext'`: 1,
+		`SELECT count(*) FROM pages WHERE name = 'badtext'`:           1,
+	} {
+		var n int
+		if err := db.QueryRow(ctx, q).Scan(&n); err != nil || n != want {
+			t.Errorf("%s = %d (%v), want %d", q, n, err, want)
+		}
+	}
+
+	// A record Postgres refuses for its data (here a trigger raises 22023 for
+	// post 666) is skipped by itself; a media id that isn't a UUID is
+	// dropped before writing.
+	if _, err := db.Exec(ctx, `CREATE FUNCTION refuse_666() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN IF NEW.post_id >= 666 THEN RAISE EXCEPTION 'refused' USING ERRCODE = '22023'; END IF; RETURN NEW; END $$;
+		CREATE TRIGGER refuse_666 BEFORE INSERT ON posts FOR EACH ROW EXECUTE FUNCTION refuse_666()`); err != nil {
+		t.Fatal(err)
+	}
+	c := &Consumer{w: w, prefix: "t."}
+	rec := func(topic string, m proto.Message) *kgo.Record {
+		b, err := proto.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &kgo.Record{Topic: "t." + topic, Value: b}
+	}
+	recs := []*kgo.Record{
+		rec(topics.Media, &fbv1.Media{Obs: obs(now, "m"), MediaId: "not-a-uuid", Variant: "orig", OwnerType: "post", PostId: 1, PageId: 9}),
+		rec(topics.Post, &fbv1.Post{Obs: obs(now, "p666"), PostId: 666, PageId: 9, CreatedAt: created, Text: "refused"}),
+		rec(topics.Post, &fbv1.Post{Obs: obs(now, "p2"), PostId: 2, PageId: 9, CreatedAt: created, Text: "kept"}),
+		rec(topics.Media, &fbv1.Media{Obs: obs(now, "m2"), MediaId: "00000000-0000-0000-0000-000000000002", Variant: "orig", OwnerType: "post", PostId: 2, PageId: 9}),
+	}
+	if err := c.flushSkipping(ctx, recs); err != nil {
+		t.Fatalf("flushSkipping: %v", err)
+	}
+	var posts, media int
+	_ = db.QueryRow(ctx, `SELECT count(*) FROM posts WHERE post_id IN (2, 666)`).Scan(&posts)
+	_ = db.QueryRow(ctx, `SELECT count(*) FROM media`).Scan(&media)
+	if posts != 1 || media != 1 {
+		t.Fatalf("after skipping the refused record: %d posts, %d media", posts, media)
+	}
+
+	// More refused records than a bad one or two: a systematic error. The
+	// batch fails (and is retried, stalling) instead of being dropped.
+	var many []*kgo.Record
+	for id := int64(667); id < 667+maxRefused+1; id++ {
+		many = append(many, rec(topics.Post, &fbv1.Post{Obs: obs(now, "m"), PostId: id, PageId: 9, CreatedAt: created}))
+	}
+	if err := c.flushSkipping(ctx, many); err == nil {
+		t.Fatal("a whole batch of refused records was skipped")
+	}
+}
+
+// Comments of a post older than comments retention are not written: their
+// partition would be created only for retention to drop it again.
+func TestCommentsPastRetentionAreNotWritten(t *testing.T) {
+	db := testenv.Postgres(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	old, recent := now.AddDate(0, 0, -400), now.Add(-time.Hour)
+	for _, at := range []time.Time{old, recent} {
+		if err := store.EnsurePartitionFor(ctx, db, "comments", at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := &Writer{DB: db, CommentsRetention: 365 * 24 * time.Hour}
+	if err := w.Comments(ctx, []*fbv1.Comment{
+		{Obs: obs(now, "a"), CommentId: 1, PostId: 1, PageId: 9, PostCreatedAt: timestamppb.New(old), Text: "old post"},
+		{Obs: obs(now, "b"), CommentId: 2, PostId: 2, PageId: 9, PostCreatedAt: timestamppb.New(recent), Text: "recent post"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var ids []int64
+	rows, _ := db.Query(ctx, `SELECT comment_id FROM comments`)
+	for rows.Next() {
+		var id int64
+		_ = rows.Scan(&id)
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if len(ids) != 1 || ids[0] != 2 {
+		t.Fatalf("comments stored: %v, want only the recent post's", ids)
 	}
 }

@@ -4,12 +4,15 @@ package fixtures
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -61,7 +64,7 @@ func ScrubDir(dir string, keep []string) error {
 
 // scrubVersion is recorded in meta.json. Raise it when Scrub learns a new
 // pattern, so fixtures scrubbed before are scrubbed again when bundled.
-const scrubVersion = 3
+const scrubVersion = 4
 
 func scrubberVersion(meta map[string]any) int64 {
 	if n, ok := meta["__scrubber"].(json.Number); ok {
@@ -150,11 +153,29 @@ var (
 	// A profile link in HTML. In JSON, the walk replaces the links of
 	// people's objects only, so post permalinks and the page's own link
 	// survive.
-	profileRe = regexp.MustCompile(`https://www\.facebook\.com/(profile\.php\?id=\d+|[A-Za-z0-9.]+)(["?])`)
+	// Its slashes may be escaped (a link in a JS string), on www., m. or
+	// the bare host.
+	profileRe = regexp.MustCompile(`https?:(?:\\*/){2}(?:www\.|m\.)?facebook\.com\\*/(profile\.php\?id=\d+|[A-Za-z0-9.]+)(\\*["?])`)
+	// Media captions, which can describe people.
+	captionRe = regexp.MustCompile(`"(accessibility_caption|alt_text)":"((?:[^"\\]|\\.)*)"`)
 )
 
+// pseudoKey keys the pseudonyms with a secret made for this run and never
+// written down: an unkeyed hash would let anyone holding a list of
+// Facebook ids or names hash them and find who appears in a fixture. The
+// same person gets the same pseudonym across the fixtures of one run.
+var pseudoKey = func() []byte {
+	k := make([]byte, 32)
+	if _, err := rand.Read(k); err != nil {
+		panic("fixtures: no randomness for the pseudonym key: " + err.Error())
+	}
+	return k
+}()
+
 func pseudo(s, salt string) string {
-	h := sha256.Sum256([]byte(salt + s))
+	m := hmac.New(sha256.New, pseudoKey)
+	m.Write([]byte(salt + "\x00" + s))
+	h := m.Sum(nil)
 	return strconv.FormatUint(binary.BigEndian.Uint64(h[:8])%9_000_000_000_000+100_000_000_000, 10)
 }
 
@@ -368,6 +389,14 @@ func (sc *scrubber) patterns(s string) string {
 		sm := nameRe.FindStringSubmatch(m)
 		return `"` + sm[1] + `":"Person ` + pseudo(sm[2], "name")[:6] + `"`
 	})
+	// What people wrote, and captions, in script that isn't JSON.
+	s = textRe.ReplaceAllStringFunc(s, func(m string) string {
+		return `"text":` + blankJSON(m[len(`"text":`):])
+	})
+	s = captionRe.ReplaceAllStringFunc(s, func(m string) string {
+		sm := captionRe.FindStringSubmatch(m)
+		return `"` + sm[1] + `":` + blankJSON(m[len(sm[1])+3:])
+	})
 	return profileRe.ReplaceAllString(s, `https://www.facebook.com/scrubbed.profile$2`)
 }
 
@@ -387,9 +416,12 @@ func (sc *scrubber) finish(s string) string {
 		if err != nil {
 			return "https://scontent.example.fbcdn.net/scrubbed.jpg"
 		}
-		file := "/"
-		if i := strings.LastIndexByte(u.Path, '/'); i >= 0 {
-			file = u.Path[i:]
+		// The file name is the object's ids (a photo can be a person's):
+		// it becomes a pseudonym, keeping only the extension.
+		file := "/scrubbed"
+		if i := strings.LastIndexByte(u.Path, '/'); i >= 0 && i < len(u.Path)-1 {
+			name := u.Path[i+1:]
+			file = "/" + pseudo(name, "file") + path.Ext(name)
 		}
 		return "https://" + u.Host + "/scrubbed" + file
 	})

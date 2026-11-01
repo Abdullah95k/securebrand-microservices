@@ -89,3 +89,24 @@ func TestPostMentionsArePseudonymized(t *testing.T) {
 		}
 	}
 }
+
+// Without pseudonymisation, the mentions of an erased author are still
+// scrubbed; other people's stay.
+func TestErasedAuthorMentionsAreScrubbed(t *testing.T) {
+	key := []byte("secret")
+	s := gdpr.NewSuppression(nil)
+	s.Add(gdpr.AuthorKey(key, "100001"), 0)
+	e := &Emitter{HMACKey: key, Suppression: s}
+	mentions := func() []*fbv1.TextRange {
+		return []*fbv1.TextRange{{EntityType: "User", EntityId: "100001", Name: "Erased"}, {EntityType: "User", EntityId: "100002", Name: "Kept"}}
+	}
+	c := &fbv1.Comment{Text: "Erased Kept", TextRanges: mentions(), Author: &fbv1.Author{Id: "100003"}}
+	e.Privatize(c)
+	p := &fbv1.Post{TextRanges: mentions()}
+	e.scrubMentions(p.TextRanges)
+	for _, rs := range [][]*fbv1.TextRange{c.TextRanges, p.TextRanges} {
+		if rs[0].EntityId != "" || rs[0].Name != "" || rs[1].EntityId != "100002" || rs[1].Name != "Kept" {
+			t.Errorf("mentions: %+v", rs)
+		}
+	}
+}
