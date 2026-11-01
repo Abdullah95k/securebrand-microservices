@@ -118,6 +118,11 @@ func New(cfg config.Proxy) (*Pool, error) {
 		p.routing = map[string][]string{"default": {"direct"}}
 	}
 	for class, tiers := range p.routing {
+		if !RoutingClasses[class] {
+			// Not an error, so a deployment with a stale key keeps running.
+			slog.Warn("proxy: routing key is not a query class and is ignored", "key", class,
+				"classes", "default, timeline, comments, replies, registry_sync")
+		}
 		for _, t := range tiers {
 			if _, ok := p.tiers[t]; !ok {
 				return nil, fmt.Errorf("proxy: routing %s references unknown tier %s", class, t)
@@ -126,6 +131,11 @@ func New(cfg config.Proxy) (*Pool, error) {
 	}
 	return p, nil
 }
+
+// RoutingClasses are the keys fb.proxy.routing takes: the query classes
+// identities are acquired for, and default. A page load runs on the
+// identity's own exit, whatever the class: a session can't change IPs.
+var RoutingClasses = map[string]bool{"default": true, "timeline": true, "comments": true, "replies": true, "registry_sync": true}
 
 // TiersFor returns the tier names to try for a query class, cheapest first.
 func (p *Pool) TiersFor(class string) []string {

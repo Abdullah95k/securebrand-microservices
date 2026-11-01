@@ -19,9 +19,10 @@ test:
 vet:
 	$(GO) vet ./...
 
+# A lint failure fails the target (`a && b || c` ran c, and passed, when b failed).
 lint: vet
-	@command -v golangci-lint >/dev/null && golangci-lint run ./... || echo "golangci-lint not installed; ran go vet only"
-	@command -v buf >/dev/null && buf lint || echo "buf not installed; skipped proto lint"
+	@if command -v golangci-lint >/dev/null; then golangci-lint run ./...; else echo "golangci-lint not installed; ran go vet only"; fi
+	@if command -v buf >/dev/null; then buf lint; else echo "buf not installed; skipped proto lint"; fi
 
 ## Regenerate protobuf code (requires buf + protoc-gen-go).
 generate:
@@ -40,7 +41,12 @@ infra-up:
 	$(COMPOSE) up -d postgres redpanda valkey
 	@until docker exec fbs-postgres-1 pg_isready -U fbs >/dev/null 2>&1; do sleep 1; done
 
+# The local stack and the pilot are the same Compose project: on the pilot
+# machine, `down -v` would delete the pilot's database.
+NOT_PILOT = @test -z "$(FORCE)" -a -f phase0/out/pilot-run.yaml && { echo "refusing: this machine runs the pilot, and this would delete its data (make pilot-down stops it; FORCE=1 overrides)"; exit 2; } || true
+
 infra-down:
+	$(NOT_PILOT)
 	$(COMPOSE) down -v
 
 ## Integration tests against real Postgres/Redpanda/Valkey (make infra-up first).
@@ -94,6 +100,7 @@ compose-up:
 	$(COMPOSE) up -d
 
 compose-down:
+	$(NOT_PILOT)
 	$(COMPOSE) down -v
 
 spike-report:
@@ -173,6 +180,8 @@ pilot-up:
 	echo "requests/s per IP: $${rps:-the default of configs/default.yaml}"
 	$(MAKE) docker
 	$(PILOT_COMPOSE) up -d --force-recreate
+	@# Old images and build cache would fill the disk over restarts.
+	@docker image prune -f >/dev/null; docker builder prune -f --filter until=72h >/dev/null || true
 	@echo "up; register the pages with: make pilot-register"
 
 ## Registers every page of phase0/pages.csv; each is backfilled (a week), then crawled every 3 hours.
