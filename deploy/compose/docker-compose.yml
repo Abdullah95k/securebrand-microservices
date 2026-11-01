@@ -9,6 +9,10 @@ name: fbs
 x-fbs: &fbs
   image: ${FBS_IMAGE:-fbs:dev}
   restart: unless-stopped
+  # A stop lets in-flight work finish and commits it (the crawler drains for
+  # up to 75s); Docker's default 10s would kill it mid-drain and every task
+  # running would be redone.
+  stop_grace_period: 100s
   environment: &fbs-env
     FBS_CONFIG: /etc/fbs/local.yaml
     FBS_POSTGRES__DSN: postgres://fbs:fbs@postgres:5432/fbs?sslmode=disable

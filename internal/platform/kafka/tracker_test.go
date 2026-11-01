@@ -9,6 +9,7 @@ import (
 
 func TestTrackerCommitsOnlyContiguousOffsets(t *testing.T) {
 	tr := newTracker(10)
+	tr.assign(map[string][]int32{"t": {0}})
 	var es []*entry
 	for off := int64(10); off < 15; off++ {
 		e, _, _ := tr.add(&kgo.Record{Topic: "t", Partition: 0, Offset: off, LeaderEpoch: 1}, context.Background())
@@ -44,13 +45,35 @@ func TestTrackerCommitsOnlyContiguousOffsets(t *testing.T) {
 // a handler still running stops instead of finishing them twice.
 func TestTrackerCancelsDroppedPartitions(t *testing.T) {
 	tr := newTracker(10)
+	tr.assign(map[string][]int32{"t": {0, 1}})
 	_, _, ctx0 := tr.add(&kgo.Record{Topic: "t", Partition: 0, Offset: 1}, context.Background())
 	_, _, ctx1 := tr.add(&kgo.Record{Topic: "t", Partition: 1, Offset: 1}, context.Background())
 	tr.drop(map[string][]int32{"t": {0}})
 	if ctx0.Err() == nil || ctx1.Err() != nil {
 		t.Fatalf("after dropping partition 0: %v, %v", ctx0.Err(), ctx1.Err())
 	}
+	tr.assign(map[string][]int32{"t": {0}})
 	if _, _, again := tr.add(&kgo.Record{Topic: "t", Partition: 0, Offset: 2}, context.Background()); again.Err() != nil {
 		t.Fatal("a partition assigned again gets a fresh context")
+	}
+}
+
+// Records of a fetch still being handed out when their partition was
+// revoked are the next owner's: they are refused, so they neither run here
+// nor get committed by this member, until the partition comes back.
+func TestTrackerRefusesRecordsOfRevokedPartitions(t *testing.T) {
+	tr := newTracker(10)
+	tr.assign(map[string][]int32{"t": {0}})
+	e, _, _ := tr.add(&kgo.Record{Topic: "t", Partition: 0, Offset: 100}, context.Background())
+	tr.markDone(e)
+	tr.drop(map[string][]int32{"t": {0}}) // revoked mid-fetch
+	if e, _, ctx := tr.add(&kgo.Record{Topic: "t", Partition: 0, Offset: 101}, context.Background()); e != nil || ctx != nil {
+		t.Fatal("a record of a revoked partition was accepted")
+	}
+	if got := tr.commitable(nil); len(got) != 0 {
+		t.Fatalf("committed for a revoked partition: %v", got)
+	}
+	if e, _, _ := tr.add(&kgo.Record{Topic: "u", Partition: 0, Offset: 1}, context.Background()); e != nil {
+		t.Fatal("a record of a partition never assigned was accepted")
 	}
 }

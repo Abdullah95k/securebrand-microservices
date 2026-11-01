@@ -297,3 +297,24 @@ func TestReactionsFromABreakdownOnly(t *testing.T) {
 		t.Fatalf("the exact count wins, the breakdown is kept: %+v", r)
 	}
 }
+
+// A comments page without page_info ends the read as if the list had: it is
+// reported, so a Facebook change that moves it shows up in the metrics.
+func TestCommentsWithoutPageInfoAreReported(t *testing.T) {
+	c := `{"__typename":"Comment","id":"Y29tbWVudDoxXzI=","legacy_fbid":"2","body":{"text":"top"},"created_time":1700000200,
+		"author":{"__typename":"User","id":"7","name":"A"}}`
+	without := `{"data":{"node":{"__typename":"Feedback","id":"ZmVlZGJhY2s6MQ==","comments":{"edges":[{"node":` + c + `}]}}}}`
+	with := `{"data":{"node":{"__typename":"Feedback","id":"ZmVlZGJhY2s6MQ==","comments":{"edges":[{"node":` + c + `}],
+		"page_info":{"has_next_page":false}}}}}`
+	empty := `{"data":{"node":{"__typename":"Feedback","id":"ZmVlZGJhY2s6MQ==","comments":{"edges":[]}}}}`
+	for body, want := range map[string]bool{without: true, with: false, empty: false} {
+		res, rep := Comments([]gjson.Result{gjson.Parse(body)}, CommentContext{PostID: 1, PageID: 5})
+		got := false
+		for _, f := range rep.Optional {
+			got = got || f == "page_info"
+		}
+		if got != want || !rep.OK() {
+			t.Errorf("%d comments, page_info found %v: reported %v, want %v (missing %v)", len(res.Comments), res.PageInfo.Found, got, want, rep.Missing)
+		}
+	}
+}

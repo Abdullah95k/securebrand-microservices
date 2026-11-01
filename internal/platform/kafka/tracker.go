@@ -38,22 +38,45 @@ type tracker struct {
 	mu         sync.Mutex
 	parts      map[tp]*partition
 	perPartMax int
+	// owned holds the partitions assigned to this member. A revoke can
+	// come while records of a fetch are still being handed out (the poll
+	// loop waits for capacity meanwhile); those of a partition no longer
+	// owned are the next owner's, and must neither run here nor have their
+	// offsets committed by this member.
+	owned map[tp]bool
 }
 
 func newTracker(perPartMax int) *tracker {
 	if perPartMax <= 0 {
 		perPartMax = 1
 	}
-	return &tracker{parts: map[tp]*partition{}, perPartMax: perPartMax}
+	return &tracker{parts: map[tp]*partition{}, perPartMax: perPartMax, owned: map[tp]bool{}}
+}
+
+// assign records partitions assigned to this member (before their fetches
+// begin).
+func (t *tracker) assign(assigned map[string][]int32) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for topic, parts := range assigned {
+		for _, part := range parts {
+			t.owned[tp{topic, part}] = true
+		}
+	}
 }
 
 // add registers a fetched record and returns its entry, the partition
 // semaphore the caller must acquire before processing, and the context to
-// process it in (derived from base, cancelled when the partition goes).
+// process it in (derived from base, cancelled when the partition goes). It
+// returns a nil entry for a record of a partition this member doesn't own
+// (any more): the caller skips it.
 func (t *tracker) add(r *kgo.Record, base context.Context) (*entry, chan struct{}, context.Context) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	k := tp{r.Topic, r.Partition}
+	if !t.owned[k] {
+		return nil, nil, nil
+	}
 	p := t.parts[k]
 	if p == nil {
 		p = &partition{committed: -1, sem: make(chan struct{}, t.perPartMax)}
@@ -147,15 +170,19 @@ func (t *tracker) pending(only map[string][]int32) int {
 	return n
 }
 
+// drop forgets partitions revoked or lost: their handlers are cancelled and
+// their records are no longer accepted.
 func (t *tracker) drop(only map[string][]int32) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for topic, parts := range only {
 		for _, part := range parts {
-			if p := t.parts[tp{topic, part}]; p != nil && p.cancel != nil {
+			k := tp{topic, part}
+			if p := t.parts[k]; p != nil && p.cancel != nil {
 				p.cancel()
 			}
-			delete(t.parts, tp{topic, part})
+			delete(t.parts, k)
+			delete(t.owned, k)
 		}
 	}
 }

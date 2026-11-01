@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"google.golang.org/protobuf/proto"
 
@@ -51,6 +52,11 @@ func (w *Worker) Handle(ctx context.Context, rec *kgo.Record) error {
 	if err := proto.Unmarshal(rec.Value, &t); err != nil {
 		return w.deadLetterRaw(ctx, rec, "undecodable", err.Error())
 	}
+	if _, ok := w.Stages[t.Kind]; !ok {
+		// Dead-lettered as received: a kind this build doesn't know (an
+		// empty record, a newer producer) has no topic name of its own.
+		return w.deadLetterRaw(ctx, rec, "no_stage", "no stage for kind "+t.Kind.String())
+	}
 	return w.Run(ctx, &t)
 }
 
@@ -61,10 +67,15 @@ func (w *Worker) Run(ctx context.Context, t *taskv1.Task) error {
 	lane := topics.LaneName(t.Lane)
 	st, ok := w.Stages[t.Kind]
 	if !ok {
-		return w.deadLetter(ctx, t, "no_stage", "no stage for kind "+t.Kind.String(), nil)
+		return fmt.Errorf("stage: no stage for kind %v", t.Kind)
 	}
 	if d.Jobs.Cancelled(ctx, t.JobId) {
 		metrics.Tasks.WithLabelValues(name, lane, "cancelled").Inc()
+		// A continuation or thread left unread: the post's next pass reads
+		// it whole. A post whose pass never began keeps its last state.
+		if t.Seq > 0 || t.Kind == taskv1.Kind_KIND_THREAD {
+			w.markIncomplete(ctx, t)
+		}
 		return w.finish(ctx, t, map[string]int64{"cancelled": 1})
 	}
 	if isDone, err := d.Ckpt.IsDone(ctx, t.TaskId); err != nil {
@@ -73,12 +84,16 @@ func (w *Worker) Run(ctx context.Context, t *taskv1.Task) error {
 		_, err := d.Jobs.Done(ctx, t.JobId, t.TaskId, nil)
 		return ignoreUnspawned(err)
 	}
-	lease, ok, err := d.Ckpt.Acquire(ctx, task.ScopeKey(t), t.LineageId, w.LeaseTTL)
+	// The owner is this run: another copy of the same task (a redelivery
+	// while this run still goes, a record produced twice) waits for it
+	// instead of running alongside it, where both would produce the next
+	// segment and every child twice, and so on for the rest of the stream.
+	lease, ok, err := d.Ckpt.Acquire(ctx, task.ScopeKey(t), t.LineageId+"/"+uuid.NewString(), w.LeaseTTL)
 	if err != nil {
 		return err
 	}
 	if !ok {
-		// Another job is paginating the same stream; come back later.
+		// Another run is paginating the same stream; come back later.
 		metrics.Tasks.WithLabelValues(name, lane, "lease_busy").Inc()
 		return w.toRetry(ctx, t, "30s")
 	}
@@ -87,15 +102,15 @@ func (w *Worker) Run(ctx context.Context, t *taskv1.Task) error {
 	// moved its stream forward.
 	before, _, beforeErr := d.Ckpt.Load(ctx, t.LineageId, t.Seq)
 	start := time.Now()
-	out := st.Run(ctx, t)
+	out := w.runStage(ctx, st, t, lease)
 	metrics.TaskSeconds.WithLabelValues(name).Observe(time.Since(start).Seconds())
-	// Release before producing follow-on work so the next segment (or a
-	// follow-up stream on the same scope) can claim the lease immediately.
-	lease.Release(ctx)
 
 	switch out.Result {
 	case Done:
 		metrics.Tasks.WithLabelValues(name, lane, "done").Inc()
+		if out.Counters["cancelled"] > 0 && t.Kind != taskv1.Kind_KIND_PAGE {
+			w.markIncomplete(ctx, t) // cut short by a cancel
+		}
 		if err := d.spawn(ctx, out.FollowUps...); err != nil {
 			return err
 		}
@@ -207,6 +222,32 @@ func (w *Worker) exhausted(next *taskv1.Task) string {
 	return ""
 }
 
+// runStage runs the stage, then releases the lease (before follow-on work
+// is produced, so the next segment can claim it at once), also when the
+// stage panics: the consumer recovers a panic, and a lease left behind
+// would be kept alive forever and block its stream.
+func (w *Worker) runStage(ctx context.Context, st Stage, t *taskv1.Task, lease *checkpoint.Lease) Outcome {
+	defer lease.Release(ctx)
+	return st.Run(ctx, t)
+}
+
+// markIncomplete marks the post whose comments t was collecting: its next
+// pass reads it whole.
+func (w *Worker) markIncomplete(ctx context.Context, t *taskv1.Task) {
+	var post int64
+	switch t.Kind {
+	case taskv1.Kind_KIND_POST:
+		post = t.GetPost().GetPostId()
+	case taskv1.Kind_KIND_THREAD:
+		post = t.GetThread().GetPostId()
+	}
+	if post != 0 {
+		if err := w.D.Ckpt.MarkIncomplete(ctx, post); err != nil {
+			slog.Warn("stage: incomplete mark not set", "post", post, "err", err)
+		}
+	}
+}
+
 func (w *Worker) finish(ctx context.Context, t *taskv1.Task, c map[string]int64) error {
 	if err := w.D.Ckpt.MarkDone(ctx, t.TaskId); err != nil {
 		return err
@@ -254,12 +295,15 @@ func (w *Worker) deadLetter(ctx context.Context, t *taskv1.Task, reason, detail 
 	switch t.Kind {
 	case taskv1.Kind_KIND_POST:
 		_ = w.D.Jobs.UpdatePostState(ctx, t.JobId, t.GetPost().GetPostId(), jobs.PostFailed)
-		_ = w.D.Ckpt.MarkIncomplete(ctx, t.GetPost().GetPostId())
 	case taskv1.Kind_KIND_THREAD:
 		_ = w.D.Jobs.UpdatePostState(ctx, t.JobId, t.GetThread().GetPostId(), jobs.PostTruncated)
-		_ = w.D.Ckpt.MarkIncomplete(ctx, t.GetThread().GetPostId())
 	}
-	return w.finish(ctx, t, c)
+	w.markIncomplete(ctx, t)
+	// Counted for the job, but not marked done: a replay of the dead letter
+	// (fbctl dlq replay) must run, not be skipped as already finished. Job
+	// accounting counts the task once, however often it ends.
+	_, err = w.D.Jobs.Done(ctx, t.JobId, t.TaskId, c)
+	return ignoreUnspawned(err)
 }
 
 func (w *Worker) deadLetterRaw(ctx context.Context, rec *kgo.Record, reason, detail string) error {

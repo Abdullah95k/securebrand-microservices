@@ -38,6 +38,9 @@ type Identity struct {
 	// consecFails counts transport failures in a row: an exit that
 	// stopped answering.
 	consecFails int
+	// consecSoft counts soft errors in a row (transport failures, which
+	// say nothing about the tokens, neither count nor reset it).
+	consecSoft  int
 	requests    int
 	maxRequests int
 	born        time.Time
@@ -143,6 +146,17 @@ func (id *Identity) Wait(ctx context.Context) error {
 // answering, and a fresh identity gets another.
 const MaxTransportFailures = 3
 
+// Soft errors in a row (server errors, HTML instead of GraphQL, an error
+// payload without data): the second drops the identity's tokens, so its next
+// use loads a page for fresh ones (stale tokens fail every request alike),
+// and MaxSoftErrors retire it. A soft error scores as a success otherwise,
+// so health alone would let one identity fail hundreds of requests, and the
+// pool hands the identity released last out first.
+const (
+	softRefreshAfter = 2
+	MaxSoftErrors    = 4
+)
+
 // Record updates health with one request outcome and returns whether the
 // identity must be retired.
 func (id *Identity) Record(c detect.Class) (retire bool, reason string) {
@@ -165,6 +179,14 @@ func (id *Identity) Record(c detect.Class) (retire bool, reason string) {
 	} else {
 		id.consecFails = 0 // the exit answered
 	}
+	if c == detect.SoftError {
+		id.consecSoft++
+		if id.consecSoft >= softRefreshAfter {
+			id.tokens = htmlx.Tokens{}
+		}
+	} else if c != detect.Transport {
+		id.consecSoft = 0
+	}
 	switch {
 	case c == detect.Checkpoint:
 		id.retired = "checkpoint"
@@ -176,6 +198,8 @@ func (id *Identity) Record(c detect.Class) (retire bool, reason string) {
 		// Health alone never retires a dead exit: transport failures
 		// score 0.5, which health approaches but never falls below.
 		id.retired = "transport"
+	case id.consecSoft >= MaxSoftErrors:
+		id.retired = "soft_errors"
 	case c == detect.RateLimited:
 		backoff := time.Duration(30<<min(id.consecBlocks, 5)) * time.Second
 		if backoff > 15*time.Minute {
