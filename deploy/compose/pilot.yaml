@@ -33,5 +33,7 @@ crawler:
   lane_min: 4
 registry_sync:
   # Discovers rotated doc_ids on these pages; set by `make pilot-up` from the
-  # first pages of phase0/pages.csv (pilot-run.yaml).
-  interval: 30m
+  # first pages of phase0/pages.csv (pilot-run.yaml). Every check loads those
+  # pages through the same ISP exits the crawler uses, and page loads are
+  # what Facebook walls, so check every 2 hours, not every 30 minutes.
+  interval: 2h

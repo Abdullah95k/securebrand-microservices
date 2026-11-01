@@ -10,7 +10,11 @@ import (
 	taskv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fbs/task/v1"
 	"github.com/abdullah95k/securebrand-microservices/internal/config"
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/checkpoint"
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/detect"
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/htmlx"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/proxy"
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/session"
+	"github.com/abdullah95k/securebrand-microservices/internal/platform/breaker"
 )
 
 // Only a saved checkpoint that moved counts as progress.
@@ -126,7 +130,83 @@ func TestNoIdentityWaitsForExits(t *testing.T) {
 	if got := stallsAfter(tk.Stalls, false, o.Waiting); got != 4 {
 		t.Fatalf("a stall not counted: %d", got)
 	}
+	o = noIdentity(tk, proxy.ErrExitsPaced, map[string]int64{})
+	if o.Delay != "30s" || !o.Waiting {
+		t.Fatalf("exits pacing their page loads: %+v", o)
+	}
 	if got := stallsAfter(tk.Stalls, true, false); got != 0 {
 		t.Fatalf("progress resets the stalls: %d", got)
+	}
+}
+
+// The profile is read on a page task's first segment when it is stale. An
+// identity that already has tokens reads it only if its exit can load a
+// page now; otherwise the read is deferred, never risking a wall on an
+// identity that serves GraphQL. An identity without tokens loads the page
+// anyway, so the gate does not apply.
+func TestReadProfile(t *testing.T) {
+	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	cfg := &config.Config{}
+	cfg.Crawler.ProfileRefresh = 24 * time.Hour
+	pool, err := proxy.New(config.Proxy{
+		Tiers:     []config.ProxyTier{{Name: "isp", Kind: "static_list", Endpoints: []string{"http://isp.proxy.example:10001"}}},
+		PageLoads: config.PageLoads{Interval: time.Hour},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Deps{Cfg: cfg, Proxies: pool, Now: func() time.Time { return now }}
+	ep := proxy.Endpoint{Tier: "isp", Bucket: "isp|isp.proxy.example:10001"}
+	withTokens := &session.Identity{Endpoint: ep}
+	withTokens.SetTokens(htmlx.Tokens{LSD: "x"})
+	fresh := &taskv1.PageScope{PageId: 7, ProfileSeenAt: timestamppb.New(now.Add(-time.Hour))}
+	stale := &taskv1.PageScope{PageId: 7, ProfileSeenAt: timestamppb.New(now.Add(-48 * time.Hour))}
+	first, later := &taskv1.Task{Seq: 0}, &taskv1.Task{Seq: 1}
+
+	c := map[string]int64{}
+	if d.readProfile(later, stale, withTokens, c) || d.readProfile(first, fresh, withTokens, c) || c["profile_skips"] != 1 {
+		t.Fatalf("later segments and fresh profiles skip the read: %v", c)
+	}
+	if !d.readProfile(first, stale, withTokens, c) {
+		t.Fatal("a stale profile is read when the exit can load a page")
+	}
+	if d.readProfile(first, stale, withTokens, c) || c["profile_deferred"] != 1 {
+		t.Fatalf("the exit just loaded a page: the read waits: %v", c)
+	}
+	if !d.readProfile(first, stale, &session.Identity{Endpoint: ep}, c) {
+		t.Fatal("an identity without tokens loads the page anyway")
+	}
+}
+
+// A task escalates one tier per stall; waits for exits are not stalls, so a
+// waiting task stays on the cheap tier. Tiers whose exits are all cooling
+// down are skipped.
+func TestTierForEscalatesByStalls(t *testing.T) {
+	pool, err := proxy.New(config.Proxy{
+		Tiers: []config.ProxyTier{
+			{Name: "isp", Kind: "static_list", Endpoints: []string{"http://isp.proxy.example:10001"}},
+			{Name: "res", Kind: "gateway", Gateway: "http://gw.example:7777", Country: "us"},
+		},
+		Routing: map[string][]string{"default": {"isp", "res"}},
+		Breaker: breaker.Config{MinEvents: 2, OpenRate: 0.5, Cooldown: time.Hour},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Deps{Proxies: pool}
+	if got := d.tierFor("comments", 0); got != "isp" {
+		t.Fatalf("no stalls: %s", got)
+	}
+	if got := d.tierFor("comments", 1); got != "res" {
+		t.Fatalf("one stall: %s", got)
+	}
+	if got := d.tierFor("comments", 9); got != "res" {
+		t.Fatalf("past the last tier: %s", got)
+	}
+	ep := proxy.Endpoint{Tier: "isp", Bucket: "isp|isp.proxy.example:10001"}
+	pool.Observe(ep, detect.RateLimited)
+	pool.Observe(ep, detect.RateLimited)
+	if got := d.tierFor("comments", 0); got != "res" {
+		t.Fatalf("isp cooling down: %s", got)
 	}
 }

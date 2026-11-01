@@ -44,7 +44,7 @@ func (s *PageStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	if sc == nil {
 		return Outcome{Result: Fail, Reason: "page task without page scope"}
 	}
-	id, err := d.identity(ctx, "timeline", t.Attempt)
+	id, err := d.identity(ctx, "timeline", t.Stalls)
 	if err != nil {
 		return noIdentity(t, err, c)
 	}
@@ -65,15 +65,13 @@ func (s *PageStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	}
 
 	// Page HTML: profile + resolve + bootstrap. The profile is read on the
-	// first segment unless it is fresh (read within crawler.profile_refresh);
+	// first segment unless it is fresh (read within crawler.profile_refresh)
+	// or the identity's exit can't load a page now (it paces page loads);
 	// the HTML is loaded for it, or when the identity has no tokens yet. Page
 	// loads are what Facebook walls for logged-out sessions that view many
 	// pages, GraphQL is not.
-	fresh := t.Seq == 0 && d.profileFresh(sc)
-	if fresh {
-		c["profile_skips"]++
-	}
-	if !id.Bootstrapped() || (t.Seq == 0 && !fresh) {
+	profile := d.readProfile(t, sc, id, c)
+	if !id.Bootstrapped() || profile {
 		url := sc.Url
 		if url == "" {
 			ref := sc.PageRef
@@ -107,7 +105,7 @@ func (s *PageStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 		default:
 			return classOutcome(t, pl.Class, pl.Reason, st.Cursor, c)
 		}
-		if t.Seq == 0 && !fresh {
+		if profile {
 			page, rep := parse.Page(pl.HTML, sc.PageId, 0)
 			for _, f := range rep.Optional {
 				metrics.ParseMissingField.WithLabelValues("page_html", f).Inc()

@@ -199,6 +199,20 @@ type Proxy struct {
 	// Breaker opens an exit bucket (a static /24, or a gateway and country)
 	// that is blocked too often.
 	Breaker breaker.Config `koanf:"breaker"`
+	// PageLoads paces page loads on each static exit, apart from GraphQL.
+	PageLoads PageLoads `koanf:"page_loads"`
+}
+
+// PageLoads paces page loads (HTML), the requests Facebook walls for
+// logged-out sessions that view many pages, on each static exit. Zero
+// values turn the pacing off.
+type PageLoads struct {
+	// Interval is the least time between two page loads on one exit.
+	Interval time.Duration `koanf:"interval"`
+	// Backoff pauses an exit's page loads after one is walled or fails,
+	// doubling up to MaxBackoff; a page that loads resets it.
+	Backoff    time.Duration `koanf:"backoff"`
+	MaxBackoff time.Duration `koanf:"max_backoff"`
 }
 
 type ProxyTier struct {

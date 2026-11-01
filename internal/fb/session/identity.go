@@ -48,8 +48,9 @@ type Identity struct {
 	limiter   *rate.Limiter
 	sessionID string // __s
 
-	// observe reports outcomes to the exit's breaker (set by the pool).
-	observe func(detect.Class)
+	// observe reports outcomes to the exit's breaker or, for page loads, its
+	// page-load gate (set by the pool).
+	observe func(c detect.Class, pageLoad bool)
 }
 
 func newIdentity(id string, ep proxy.Endpoint, fp Fingerprint, d transport.Doer, base *url.URL, rps float64, burst, maxReq int) *Identity {

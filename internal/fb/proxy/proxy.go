@@ -65,11 +65,13 @@ type Pool struct {
 	tiers    map[string]Tier
 	routing  map[string][]string
 	breakers *breaker.Set
+	pages    *pageGate
 }
 
 // New builds a pool from config. A "direct" tier always exists.
 func New(cfg config.Proxy) (*Pool, error) {
-	p := &Pool{tiers: map[string]Tier{"direct": direct{}}, routing: cfg.Routing, breakers: breaker.New(cfg.Breaker)}
+	p := &Pool{tiers: map[string]Tier{"direct": direct{}}, routing: cfg.Routing, breakers: breaker.New(cfg.Breaker),
+		pages: newPageGate(cfg.PageLoads)}
 	p.breakers.OnChange = func(bucket string, from, to breaker.State) {
 		metrics.BreakerState.WithLabelValues("proxy:" + bucket).Set(float64(to))
 		slog.Info("proxy: breaker", "bucket", bucket, "from", from.String(), "to", to.String())
@@ -82,7 +84,9 @@ func New(cfg config.Proxy) (*Pool, error) {
 			}
 			sl := &staticList{name: t.Name, endpoints: t.Endpoints, country: t.Country}
 			for _, e := range t.Endpoints {
-				sl.buckets = append(sl.buckets, staticBucket(t.Name, e))
+				b := staticBucket(t.Name, e)
+				sl.buckets = append(sl.buckets, b)
+				p.pages.gate(b)
 			}
 			p.tiers[t.Name] = sl
 		case "gateway":
@@ -120,14 +124,61 @@ func (p *Pool) TiersFor(class string) []string {
 	return p.routing["default"]
 }
 
-// Next returns a fresh endpoint from tier, skipping buckets whose breaker
-// is open. In a half-open bucket the endpoint is the probe.
+// Next returns a fresh endpoint from tier for a new identity, skipping
+// buckets whose breaker is open or whose page-load gate is closed: a new
+// identity starts with a page load, which Next reserves. In a half-open
+// bucket the endpoint is the probe. When an exit is only waiting out its
+// page-load interval the error is ErrExitsPaced (a short wait); when every
+// exit is open or backing off after walls, ErrTierOpen.
 func (p *Pool) Next(tier string) (Endpoint, error) {
 	t, ok := p.tiers[tier]
 	if !ok {
 		return Endpoint{}, fmt.Errorf("proxy: unknown tier %s", tier)
 	}
-	return t.Next(p.breakers.Allow)
+	paced, backoff := false, false
+	ep, err := t.Next(func(b string) bool {
+		if p.breakers.IsOpen(b) {
+			return false
+		}
+		ok, why, restore := p.pages.take(b)
+		if !ok {
+			paced, backoff = paced || why == "paced", backoff || why == "backoff"
+			return false
+		}
+		if !p.breakers.Allow(b) {
+			restore()
+			return false
+		}
+		return true
+	})
+	if errors.Is(err, ErrTierOpen) {
+		switch {
+		case paced:
+			// An exit loads a page again within the interval.
+			deferred(tier, "paced")
+			return Endpoint{}, ErrExitsPaced
+		case backoff:
+			// Every waiting exit backs off after walls (15m and up): as
+			// long a wait as an open breaker.
+			deferred(tier, "backoff")
+		}
+	}
+	return ep, err
+}
+
+// TakePageLoad reserves a page load on ep's exit for an identity that
+// already has tokens (a profile read). It is false while the exit waits
+// between page loads or backs off after a walled one; the caller skips the
+// page load rather than risk walling an identity that serves GraphQL.
+func (p *Pool) TakePageLoad(ep Endpoint) bool {
+	if ep.Bucket == "" {
+		return true
+	}
+	ok, why, _ := p.pages.take(ep.Bucket)
+	if !ok {
+		deferred(ep.Tier, why)
+	}
+	return ok
 }
 
 // Available reports whether tier has a bucket that is not cooling down.
@@ -150,13 +201,29 @@ func (p *Pool) Available(tier string) bool {
 // IsOpen reports whether ep's bucket is cooling down.
 func (p *Pool) IsOpen(ep Endpoint) bool { return ep.Bucket != "" && p.breakers.IsOpen(ep.Bucket) }
 
-// Observe records a response class for ep's bucket. Blocks and transport
-// failures count against it.
+// Observe records a GraphQL response class for ep's bucket. Blocks and
+// transport failures count against it.
 func (p *Pool) Observe(ep Endpoint, c detect.Class) {
 	if ep.Bucket == "" {
 		return
 	}
 	p.breakers.Observe(ep.Bucket, c.Blocking() || c == detect.Transport)
+}
+
+// ObservePageLoad records a page load's class for ep's exit. A walled or
+// blocked page load pauses the exit's page loads (its gate) but does not
+// count against its breaker: Facebook walls page loads from an exit whose
+// GraphQL still works, and an open breaker would retire every identity
+// there. A transport failure means the exit itself is failing, so it
+// counts against both.
+func (p *Pool) ObservePageLoad(ep Endpoint, c detect.Class) {
+	if ep.Bucket == "" {
+		return
+	}
+	p.pages.observe(ep.Bucket, c.Blocking() || c == detect.Transport)
+	if c == detect.Transport {
+		p.breakers.Observe(ep.Bucket, true)
+	}
 }
 
 // staticBucket is the /24 of an IPv4 endpoint (/48 for IPv6). An endpoint
