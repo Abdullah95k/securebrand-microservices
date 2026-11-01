@@ -27,6 +27,9 @@ const (
 	HeaderNotBefore   = "x-not-before"
 	HeaderReason      = "x-reason"
 	HeaderError       = "x-error"
+	// HeaderReplay marks a dead letter re-produced on purpose (fbctl dlq
+	// replay): its task runs again although it ended.
+	HeaderReplay      = "x-replay"
 	HeaderTraceParent = "traceparent"
 	ContentTypeProto  = "application/x-protobuf"
 )

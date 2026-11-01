@@ -172,7 +172,7 @@ func outcome(id *Identity, c detect.Class, pageLoad bool) {
 	if id.observe != nil {
 		id.observe(c, pageLoad)
 	}
-	if retire, reason := id.Record(c); retire {
+	if retire, reason := id.record(c, pageLoad); retire {
 		slog.Debug("session: identity marked for retirement", "identity", id.ID, "reason", reason, "class", c.String())
 	}
 }

@@ -279,3 +279,34 @@ func TestLoaderPageGate(t *testing.T) {
 		t.Fatal("a reservation older than its TTL is gone")
 	}
 }
+
+// Soft errors in a row drop the identity's tokens at the second (so its
+// next use reloads them) and retire it at MaxSoftErrors, fresh tokens or not:
+// the page load that brings them doesn't end the run, a request that works
+// does, and transport failures leave it as it is.
+func TestSoftErrorsRefreshThenRetireAnIdentity(t *testing.T) {
+	id := newIdentity("s", proxy.Endpoint{Tier: "isp"}, Fingerprint{}, nil, nil, 1, 1, 0)
+	tokens := htmlx.Tokens{LSD: "lsd"}
+	id.SetTokens(tokens)
+	if retire, _ := id.Record(detect.SoftError); retire || !id.Bootstrapped() {
+		t.Fatal("one soft error keeps the tokens")
+	}
+	id.Record(detect.OK)
+	id.Record(detect.SoftError)
+	id.Record(detect.Transport)
+	if !id.Bootstrapped() {
+		t.Fatal("soft errors broken up by a success are not in a row")
+	}
+	id.Record(detect.SoftError) // second in a row: the transport failure counts for neither
+	if id.Bootstrapped() {
+		t.Fatal("two soft errors in a row drop the tokens")
+	}
+	PageOutcome(id, detect.OK) // the page load for fresh tokens
+	id.SetTokens(tokens)
+	if retire, _ := id.Record(detect.SoftError); retire || !id.Bootstrapped() {
+		t.Fatal("the third soft error drops the fresh tokens again, or retires the identity")
+	}
+	if retire, reason := id.Record(detect.SoftError); !retire || reason != "soft_errors" {
+		t.Fatalf("after %d soft errors in a row: retire=%v reason=%q", MaxSoftErrors, retire, reason)
+	}
+}

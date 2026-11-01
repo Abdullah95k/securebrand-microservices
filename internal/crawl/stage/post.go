@@ -42,18 +42,6 @@ func (s *PostStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	if sc == nil {
 		return Outcome{Result: Fail, Reason: "post task without post scope"}
 	}
-	// A post one of whose reply threads was lost since its last pass is read
-	// whole, whoever planned this pass: a newest-first read would never
-	// reach that old comment again. The pass keeps the mark it began with
-	// (continuations carry it) and clears it once it has read the post whole.
-	if t.Seq == 0 && sc.IncompleteMark == "" {
-		if mark := d.Ckpt.Incomplete(ctx, sc.PostId); mark != "" {
-			sc.IncompleteMark = mark
-			if t.Mode == fbv1.CrawlMode_CRAWL_MODE_INCREMENTAL {
-				t.Mode, sc.CommentsWatermark = fbv1.CrawlMode_CRAWL_MODE_FULL, nil
-			}
-		}
-	}
 	id, err := d.identity(ctx, "comments", t.Stalls)
 	if err != nil {
 		return noIdentity(t, err, c)
@@ -73,6 +61,7 @@ func (s *PostStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	if err != nil {
 		return retry(t, "", "30s", "checkpoint: "+err.Error(), c)
 	}
+	d.adoptIncomplete(ctx, t, sc, st)
 	st.Resume(c)
 	if st.Cursor == "" {
 		st.Cursor = t.Cursor
@@ -363,6 +352,28 @@ func threadTasks(ctx context.Context, d *Deps, t *taskv1.Task, refs []parse.Thre
 	return out
 }
 
+// adoptIncomplete makes a pass over a post one of whose reply threads was
+// lost since its last pass read it whole, whoever planned the pass: a
+// newest-first read would never reach that old comment again. The pass
+// keeps the mark it began with (continuations and retries carry it) and
+// clears it once it has read the post whole. A retry of a pass already
+// under way (st, its checkpoint, has progress) doesn't take a mark set
+// meanwhile: its saved cursor belongs to its own read, and the threads it
+// spawned are done for this job, so the mark is left for the next pass.
+func (d *Deps) adoptIncomplete(ctx context.Context, t *taskv1.Task, sc *taskv1.PostScope, st checkpoint.State) {
+	// A retry carries its cursor on the task too (the checkpoint may be
+	// gone: a failed save, its TTL).
+	if t.Seq != 0 || sc.IncompleteMark != "" || st.Pages != 0 || st.Cursor != "" || t.Cursor != "" {
+		return
+	}
+	if mark := d.Ckpt.Incomplete(ctx, sc.PostId); mark != "" {
+		sc.IncompleteMark = mark
+		if t.Mode == fbv1.CrawlMode_CRAWL_MODE_INCREMENTAL {
+			t.Mode, sc.CommentsWatermark = fbv1.CrawlMode_CRAWL_MODE_FULL, nil
+		}
+	}
+}
+
 // ThreadStage paginates the replies of one comment.
 type ThreadStage struct{ D *Deps }
 
@@ -436,6 +447,9 @@ func (s *ThreadStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 		d.GQL.Parsed(resp, rep.OK())
 		if rep.OK() {
 			d.Shadow.CompareComments("replies", resp, res, cc)
+		}
+		for _, f := range rep.Optional {
+			metrics.ParseMissingField.WithLabelValues("replies", f).Inc()
 		}
 		if !rep.OK() {
 			metrics.ParseTotal.WithLabelValues("replies", "1", "drift").Inc()

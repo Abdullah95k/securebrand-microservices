@@ -83,6 +83,12 @@ func (s *Store) MarkDone(ctx context.Context, taskID string) error {
 	return s.r.Set(ctx, "done:"+taskID, "1", 7*24*time.Hour).Err()
 }
 
+// ClearDone forgets a task's completion, for a dead-lettered task replayed
+// on purpose.
+func (s *Store) ClearDone(ctx context.Context, taskID string) error {
+	return s.r.Del(ctx, "done:"+taskID).Err()
+}
+
 var extendScript = redis.NewScript(`
 if redis.call('GET', KEYS[1]) == ARGV[1] then
   return redis.call('PEXPIRE', KEYS[1], ARGV[2])
@@ -104,31 +110,15 @@ type Lease struct {
 	done   chan struct{}
 }
 
-// Acquire claims scope for owner (the task lineage). The same lineage may
-// re-acquire its own lease (redelivery after a crash). The lease is kept
-// alive until Release.
-//
-// So a segment redelivered while its first run is still going (a partition
-// moved in a rebalance and the old owner overran its drain timeout) runs
-// twice for a while. That costs requests, not correctness: both resume from
-// the same checkpoint, the persister keeps one copy of what both emit, the
-// continuation and children have deterministic ids that job accounting
-// counts once, and IsDone skips the later of two finished runs.
+// Acquire claims scope for owner, one run of a task: while it runs, no other
+// run gets the stream, not even another copy of the same task (a segment
+// redelivered while its first run still goes). The lease is kept alive
+// until Release; one left by a run that died expires after ttl.
 func (s *Store) Acquire(ctx context.Context, scope, owner string, ttl time.Duration) (*Lease, bool, error) {
 	k := "lease:" + scope
 	ok, err := s.r.SetNX(ctx, k, owner, ttl).Result()
-	if err != nil {
+	if err != nil || !ok {
 		return nil, false, err
-	}
-	if !ok {
-		cur, err := s.r.Get(ctx, k).Result()
-		if err != nil && !errors.Is(err, redis.Nil) {
-			return nil, false, err
-		}
-		if cur != owner {
-			return nil, false, nil
-		}
-		s.r.PExpire(ctx, k, ttl)
 	}
 	hctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	l := &Lease{s: s, key: k, owner: owner, cancel: cancel, done: make(chan struct{})}

@@ -226,7 +226,8 @@ func dlqReplay(ctx context.Context, cfg *config.Config, args []string) error {
 				skipped++
 				continue
 			}
-			out = append(out, &kgo.Record{Topic: p.Topic(strings.TrimPrefix(orig, cfg.Kafka.TopicPrefix)), Key: r.Key, Value: r.Value})
+			out = append(out, &kgo.Record{Topic: p.Topic(strings.TrimPrefix(orig, cfg.Kafka.TopicPrefix)), Key: r.Key, Value: r.Value,
+				Headers: []kgo.RecordHeader{{Key: kafka.HeaderReplay, Value: []byte("1")}}})
 		}
 		if err := p.ProduceSync(ctx, out...); err != nil {
 			return err

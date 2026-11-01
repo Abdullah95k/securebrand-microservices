@@ -144,6 +144,12 @@ func Comments(parts []gjson.Result, cc CommentContext) (CommentsResult, Report) 
 	if len(res.Comments) == 0 && allNodesNull(parts) {
 		res.NodeNull = true
 	}
+	// Without page_info the read ends here as if the list had: reported
+	// (parse_missing_field), as the timeline does, so a page_info moved by a
+	// Facebook change shows instead of silently cutting every post short.
+	if !res.PageInfo.Found && len(res.Comments) > 0 {
+		rep.optional("page_info")
+	}
 	return res, rep
 }
 

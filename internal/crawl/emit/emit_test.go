@@ -110,3 +110,40 @@ func TestErasedAuthorMentionsAreScrubbed(t *testing.T) {
 		}
 	}
 }
+
+// What a task already running when its page was erased finds is not
+// published: comments, posts and media are dropped (a comment privatized on
+// its own is redacted).
+func TestErasedPageIsNotPublished(t *testing.T) {
+	prod, err := kafka.NewProducer(kafka.ClientConfig{Brokers: []string{"127.0.0.1:1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prod.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // nothing is sent; only what reaches the batch matters
+	s := gdpr.NewSuppression(nil)
+	s.Add(nil, 9)
+	e := &Emitter{HMACKey: []byte("k"), Suppression: s}
+	c := &fbv1.Comment{CommentId: 1, PageId: 9, Text: "hi", Author: &fbv1.Author{Id: "100001", Name: "A"},
+		TextRanges: []*fbv1.TextRange{{EntityType: "User", EntityId: "100002", Name: "B"}}}
+	if e.Privatize(c) || !c.Redacted || c.Text != "" || c.Author.Id != "" || c.TextRanges != nil {
+		t.Fatalf("comment of an erased page: %+v", c)
+	}
+	published := &fbv1.Comment{CommentId: 4, PageId: 9, Text: "hi"}
+	if keep, err := e.Comment(ctx, prod.NewBatch(), Source{}, published); keep || err != nil || published.Obs != nil {
+		t.Fatalf("comment of an erased page was stamped for publishing: %v", err)
+	}
+	p := &fbv1.Post{PostId: 2, PageId: 9}
+	if err := e.Post(ctx, prod.NewBatch(), Source{}, p); err != nil || p.Obs != nil {
+		t.Fatalf("post of an erased page was stamped for publishing: %v", err)
+	}
+	m := &fbv1.Media{MediaId: "m", PageId: 9}
+	if err := e.Media(ctx, prod.NewBatch(), Source{}, m); err != nil || m.Obs != nil {
+		t.Fatalf("media of an erased page was stamped for publishing: %v", err)
+	}
+	other := &fbv1.Comment{CommentId: 3, PageId: 8, Text: "kept", Author: &fbv1.Author{Id: "100003"}}
+	if !e.Privatize(other) || other.Text != "kept" {
+		t.Fatal("another page's comment was redacted")
+	}
+}
