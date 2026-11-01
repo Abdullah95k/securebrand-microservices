@@ -307,9 +307,11 @@ privacy:
   pii_mode: full        # full | pseudonymized
   author_hmac_key: "dev-only-change-me"
   download_author_avatars: false
+  # Days each kind of data is kept; 0 keeps it for good. Erasure requests
+  # remove a person's or a page's data whatever these say.
   retention:
     comments_days: 365
-    authors_inactive_days: 365
+    authors_inactive_days: 0   # comment authors are never deleted for inactivity
     metrics_days: 180
     raw_payload_days: 7
     media_rows_days: 30

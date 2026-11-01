@@ -7,12 +7,12 @@ What has to happen before fbs scrapes real Facebook in production, in order. Ite
 Commenter data is personal data.
 - **Reviews:** a Facebook terms-of-service review, a legitimate-interest assessment and a DPIA.
 - **`privacy.pii_mode`:** `full` keeps author ids and names, readable only with the `pii:read` scope. `pseudonymized` keeps only the HMAC `author_key`.
-- **Retention**, under `privacy.retention`. The defaults:
+- **Retention**, under `privacy.retention` (0 keeps that data for good). The defaults:
 
   | Data | Kept for |
   |---|---|
   | comments | 365 days |
-  | inactive authors | 365 days |
+  | comment authors | for good (`authors_inactive_days: 0`); an erasure request still removes the person |
   | post metrics | 180 days |
   | raw payloads | 7 days |
   | media rows | 30 days |

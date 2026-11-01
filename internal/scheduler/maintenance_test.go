@@ -329,3 +329,36 @@ func TestReaperPagesThroughRunningJobs(t *testing.T) {
 		}
 	}
 }
+
+// Comment authors are kept for good by default (authors_inactive_days: 0),
+// however long ago they were last seen; a positive setting still applies.
+func TestAuthorsAreKeptByDefault(t *testing.T) {
+	db := testenv.Postgres(t)
+	ctx := context.Background()
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO comment_authors (author_key, author_id, name, first_seen_at, last_seen_at)
+		VALUES ('\x01', '100001', 'Author', now() - interval '900 days', now() - interval '800 days')`); err != nil {
+		t.Fatal(err)
+	}
+	authors := func() int {
+		var n int
+		_ = db.QueryRow(ctx, `SELECT count(*) FROM comment_authors`).Scan(&n)
+		return n
+	}
+	if err := (&Maintenance{DB: db, Cfg: cfg}).Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n := authors(); n != 1 {
+		t.Fatalf("an author unseen for 800 days was deleted by default (%d left)", n)
+	}
+	cfg.Privacy.Retention.AuthorsInactiveDays = 365
+	if err := (&Maintenance{DB: db, Cfg: cfg}).Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n := authors(); n != 0 {
+		t.Fatalf("with authors_inactive_days 365, %d author(s) left", n)
+	}
+}
