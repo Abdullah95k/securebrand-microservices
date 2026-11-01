@@ -121,6 +121,60 @@ func (g *pageGate) observe(exit string, r pageResult) {
 	}
 }
 
+// ExitState is an exit's page-load pacing, kept across a restart so a new
+// crawler waits out the pause and interval its predecessor left, rather than
+// loading a page on every exit at once.
+type ExitState struct {
+	Next        time.Time     `json:"next"`
+	PausedUntil time.Time     `json:"paused_until"`
+	Backoff     time.Duration `json:"backoff"`
+}
+
+// PageGateState returns the pacing of every exit that is waiting or backing
+// off, by exit (tier|host:port).
+func (p *Pool) PageGateState() map[string]ExitState {
+	g := p.pages
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	out := map[string]ExitState{}
+	now := g.now()
+	for exit, e := range g.exits {
+		if e.backoff > 0 || e.next.After(now) || e.pausedUntil.After(now) {
+			out[exit] = ExitState{Next: e.next, PausedUntil: e.pausedUntil, Backoff: e.backoff}
+		}
+	}
+	return out
+}
+
+// RestorePageGate installs pacing saved by PageGateState on the exits still
+// configured, keeping whichever wait ends later. Waits longer than the
+// current config allows (it changed) are cut to it.
+func (p *Pool) RestorePageGate(m map[string]ExitState) {
+	g := p.pages
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	now, maxPause := g.now(), max(g.cfg.MaxBackoff, g.cfg.Backoff)
+	for exit, s := range m {
+		e := g.exits[exit]
+		if e == nil {
+			continue
+		}
+		if lim := now.Add(g.cfg.Interval); s.Next.After(lim) {
+			s.Next = lim
+		}
+		if lim := now.Add(maxPause); s.PausedUntil.After(lim) {
+			s.PausedUntil = lim
+		}
+		if s.Next.After(e.next) {
+			e.next = s.Next
+		}
+		if s.PausedUntil.After(e.pausedUntil) {
+			e.pausedUntil = s.PausedUntil
+		}
+		e.backoff = max(e.backoff, s.Backoff) // the next failure doubles it, up to max_backoff
+	}
+}
+
 func deferred(tier, why string) {
 	metrics.PageLoadsDeferred.WithLabelValues(tier, why).Inc()
 }

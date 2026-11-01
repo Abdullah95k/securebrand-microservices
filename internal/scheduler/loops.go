@@ -350,6 +350,13 @@ func (r *Reaper) Tick(ctx context.Context) error {
 			}
 			continue
 		}
+		// Its tasks still waiting (on the retry topics, for exits that can
+		// load pages) stop when they come back, as a cancelled job's do,
+		// instead of cycling for hours for a job that is over. A later job
+		// on the page starts its own.
+		if err := r.Jobs.Cancel(ctx, j.id.String()); err != nil {
+			slog.Warn("reaper: closed job's tasks not stopped", "job", j.id, "err", err)
+		}
 		metrics.Jobs.WithLabelValues(final, "unknown").Inc()
 		slog.Warn("reaper: job closed", "job", j.id, "status", final, "reason", reason)
 	}

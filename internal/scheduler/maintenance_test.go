@@ -216,7 +216,8 @@ func TestFinalizerSendsTheEventBeforeTheJobEnds(t *testing.T) {
 }
 
 // A job the reaper closes but can't announce is reopened, so the next tick
-// closes it again and sends its event.
+// closes it again and sends its event. Once closed, its tasks still waiting
+// stop when they come back; while reopened, they carry on.
 func TestReaperReopensAJobItCouldNotAnnounce(t *testing.T) {
 	db := testenv.Postgres(t)
 	rdb := testenv.Redis(t)
@@ -247,9 +248,15 @@ func TestReaperReopensAJobItCouldNotAnnounce(t *testing.T) {
 	if err := r.Tick(ctx); err != nil || status() != "running" {
 		t.Fatalf("with Kafka down: %v, status %s", err, status())
 	}
+	if r.Jobs.Cancelled(ctx, id.String()) {
+		t.Fatal("a reopened job's tasks are stopped")
+	}
 	r.Producer = up
 	if err := r.Tick(ctx); err != nil || status() != "failed" {
 		t.Fatalf("with Kafka back: %v, status %s", err, status())
+	}
+	if !r.Jobs.Cancelled(ctx, id.String()) {
+		t.Fatal("the closed job's tasks are not stopped")
 	}
 }
 
