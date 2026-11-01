@@ -425,7 +425,7 @@ func TestBatchesThatPostgresWouldRefuse(t *testing.T) {
 	// post 666) is skipped by itself; a media id that isn't a UUID is
 	// dropped before writing.
 	if _, err := db.Exec(ctx, `CREATE FUNCTION refuse_666() RETURNS trigger LANGUAGE plpgsql AS $$
-		BEGIN IF NEW.post_id = 666 THEN RAISE EXCEPTION 'refused' USING ERRCODE = '22023'; END IF; RETURN NEW; END $$;
+		BEGIN IF NEW.post_id >= 666 THEN RAISE EXCEPTION 'refused' USING ERRCODE = '22023'; END IF; RETURN NEW; END $$;
 		CREATE TRIGGER refuse_666 BEFORE INSERT ON posts FOR EACH ROW EXECUTE FUNCTION refuse_666()`); err != nil {
 		t.Fatal(err)
 	}
@@ -451,6 +451,16 @@ func TestBatchesThatPostgresWouldRefuse(t *testing.T) {
 	_ = db.QueryRow(ctx, `SELECT count(*) FROM media`).Scan(&media)
 	if posts != 1 || media != 1 {
 		t.Fatalf("after skipping the refused record: %d posts, %d media", posts, media)
+	}
+
+	// More refused records than a bad one or two: a systematic error. The
+	// batch fails (and is retried, stalling) instead of being dropped.
+	var many []*kgo.Record
+	for id := int64(667); id < 667+maxRefused+1; id++ {
+		many = append(many, rec(topics.Post, &fbv1.Post{Obs: obs(now, "m"), PostId: id, PageId: 9, CreatedAt: created}))
+	}
+	if err := c.flushSkipping(ctx, many); err == nil {
+		t.Fatal("a whole batch of refused records was skipped")
 	}
 }
 

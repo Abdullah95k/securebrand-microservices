@@ -123,12 +123,28 @@ func isDataError(err error) bool {
 // otherwise it would hold up every record after it for good. Rows are
 // upserted by observation time, so writing the halves apart is the same as
 // writing them together.
+//
+// More than maxRefused refused records in one batch is no bad record but a
+// systematic error (a code or schema change): the batch is then retried,
+// stalling the persister and its lag alert, instead of dropping data.
 func (c *Consumer) flushSkipping(ctx context.Context, recs []*kgo.Record) error {
+	budget := maxRefused
+	return c.flushBisect(ctx, recs, &budget)
+}
+
+// maxRefused is how many records of one batch may be skipped as refused.
+const maxRefused = 3
+
+func (c *Consumer) flushBisect(ctx context.Context, recs []*kgo.Record, budget *int) error {
 	err := c.flush(ctx, recs)
 	if !isDataError(err) {
 		return err
 	}
 	if len(recs) == 1 {
+		if *budget == 0 {
+			return fmt.Errorf("persist: more than %d records of one batch refused; not skipping more: %w", maxRefused, err)
+		}
+		*budget--
 		var pgErr *pgconn.PgError
 		errors.As(err, &pgErr)
 		r := recs[0]
@@ -139,10 +155,10 @@ func (c *Consumer) flushSkipping(ctx context.Context, recs []*kgo.Record) error 
 		return nil
 	}
 	mid := len(recs) / 2
-	if err := c.flushSkipping(ctx, recs[:mid]); err != nil {
+	if err := c.flushBisect(ctx, recs[:mid], budget); err != nil {
 		return err
 	}
-	return c.flushSkipping(ctx, recs[mid:])
+	return c.flushBisect(ctx, recs[mid:], budget)
 }
 
 func (c *Consumer) flush(ctx context.Context, recs []*kgo.Record) error {

@@ -213,3 +213,39 @@ func TestOrphansKeepStoredMedia(t *testing.T) {
 		}
 	}
 }
+
+// An ack can come before the downloader marks the media ready (its event
+// goes out first): the janitor acts on a stored row as on a ready one.
+func TestJanitorActsOnStoredMedia(t *testing.T) {
+	db := testenv.Postgres(t)
+	ctx := context.Background()
+	prod, err := kafka.NewProducer(kafka.ClientConfig{Brokers: testenv.Kafka(t), TopicPrefix: testenv.TopicPrefix()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prod.Close()
+	s3srv := httptest.NewServer(gofakes3.New(s3mem.New()).Server())
+	defer s3srv.Close()
+	u, _ := url.Parse(s3srv.URL)
+	s3, err := s3x.Open(ctx, u.Host, "k", "secretsecret", "us-east-1", false, "media")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const id = "00000000-0000-0000-0000-0000000000d1"
+	if _, err := s3.PutObject(ctx, "media", "media/00/"+id+".jpg", strings.NewReader("x"), 1, minio.PutObjectOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO media (media_id, fb_media_id, variant, kind, owner_type, status, s3_bucket, s3_key)
+		VALUES ($1, 'f', 'orig', 'photo', 'post', 'stored', 'media', $2)`, id, "media/00/"+id+".jpg"); err != nil {
+		t.Fatal(err)
+	}
+	j := &Janitor{DB: db, S3: s3, Bucket: "media", Producer: prod, TTL: time.Hour}
+	if err := j.delete(ctx, id, fbv1.DeleteReason_DELETE_REASON_ACKED); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	_ = db.QueryRow(ctx, `SELECT status FROM media WHERE media_id = $1`, id).Scan(&status)
+	if _, err := s3.StatObject(ctx, "media", "media/00/"+id+".jpg", minio.StatObjectOptions{}); err == nil || status != "deleted" {
+		t.Fatalf("acked stored media: status %q, object still there: %v", status, err == nil)
+	}
+}

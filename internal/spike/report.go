@@ -358,6 +358,9 @@ func summarize(tier string, recs []Record, opt ReportOptions) Summary {
 				unavailable[r.Page] = true
 				break
 			}
+			if r.EndReason == "no_page_id" {
+				break // no timeline read: no depth to measure (it shows in the end reasons)
+			}
 			posts = append(posts, float64(r.Posts))
 			days = append(days, r.DaysCovered)
 			a.days = append(a.days, r.DaysCovered)
@@ -475,7 +478,7 @@ func summarize(tier string, recs []Record, opt ReportOptions) Summary {
 	// drift or the page limit says nothing about older posts.
 	ended := true
 	for reason, n := range s.TimelineEnd {
-		if n > 0 && reason != "end" && reason != "no_feed" && reason != "unavailable" {
+		if n > 0 && reason != "end" && reason != "no_feed" && reason != "unavailable" && reason != "no_page_id" {
 			ended = false
 		}
 	}

@@ -237,3 +237,34 @@ func TestReaperReopensAJobItCouldNotAnnounce(t *testing.T) {
 		t.Fatalf("with Kafka back: %v, status %s", err, status())
 	}
 }
+
+// A partition that can't be created now (its table locked by a long
+// reader) doesn't hold up retention: the rest of the tick still runs.
+func TestRetentionRunsWhenPartitionsWait(t *testing.T) {
+	db := testenv.Postgres(t)
+	ctx := context.Background()
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Privacy.Retention.JobsDays = 30
+	if _, err := db.Exec(ctx, `INSERT INTO jobs (job_id, kind, lane, mode, page_ref, params, status, finished_at)
+		VALUES (gen_random_uuid(), 'on_demand', 1, 'full', 'v:a', '{}', 'completed', now() - interval '100 days')`); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := db.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reader.Rollback(ctx) }()
+	if _, err := reader.Exec(ctx, `SELECT count(*) FROM comments`); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&Maintenance{DB: db, Cfg: cfg}).Tick(ctx); err == nil {
+		t.Fatal("partitions couldn't be created, but the tick reported nothing")
+	}
+	var jobs int
+	if err := db.QueryRow(ctx, `SELECT count(*) FROM jobs`).Scan(&jobs); err != nil || jobs != 0 {
+		t.Fatalf("old jobs left: %d (%v)", jobs, err)
+	}
+}

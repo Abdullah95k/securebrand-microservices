@@ -160,7 +160,7 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 		// Raw responses hold comment text and authors: they expire after
 		// privacy.retention.raw_payload_days by a bucket lifecycle rule.
 		if days := cfg.Privacy.Retention.RawPayloadDays; days > 0 {
-			media.Lifecycle(ctx, o.RawS3, cfg.S3.RawBucket, time.Duration(days-1)*24*time.Hour)
+			media.RawLifecycle(ctx, o.RawS3, cfg.S3.RawBucket, days)
 		}
 		sink := rawsink.New(o.RawS3, cfg.S3.RawBucket)
 		gql.Raw, gql.CaptureAll = sink, cfg.FB.CaptureRaw == "all"

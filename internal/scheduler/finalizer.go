@@ -207,8 +207,9 @@ func (f *Finalizer) finalize(ctx context.Context, id string) error {
 	}
 	cb, _ := json.Marshal(st.Counters)
 	compb, _ := json.Marshal(comp)
-	if _, err := f.DB.Exec(ctx, `UPDATE jobs SET status = $2, counters = $3, completeness = $4, finished_at = $5 WHERE job_id = $1`,
-		jid, final, cb, compb, now); err != nil {
+	// Guarded: a job something else made terminal meanwhile keeps that.
+	if _, err := f.DB.Exec(ctx, `UPDATE jobs SET status = $2, counters = $3, completeness = $4, finished_at = $5
+		WHERE job_id = $1 AND status IN ('running','cancelling','finalizing')`, jid, final, cb, compb, now); err != nil {
 		return err
 	}
 	if _, err := f.DB.Exec(ctx, `UPDATE page_schedule SET page_id = COALESCE(page_id, $2),

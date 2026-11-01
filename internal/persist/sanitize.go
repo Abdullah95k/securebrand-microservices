@@ -63,8 +63,11 @@ func jsonbSafe(b []byte) []byte {
 	if !bytes.Contains(b, []byte(`\u0000`)) {
 		return b
 	}
+	// Numbers stay exact (UseNumber): float64 would round 64-bit ids.
+	d := json.NewDecoder(bytes.NewReader(b))
+	d.UseNumber()
 	var v any
-	if json.Unmarshal(b, &v) != nil {
+	if d.Decode(&v) != nil {
 		return nil
 	}
 	out, err := json.Marshal(dropNUL(v))

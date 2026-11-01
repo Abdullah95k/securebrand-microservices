@@ -344,6 +344,10 @@ type Maintenance struct {
 }
 
 func (m *Maintenance) Tick(ctx context.Context) error {
+	// Every step runs whatever the others did: a partition that can't be
+	// created now (its table locked by a long reader) must not hold up
+	// retention, which is a privacy obligation.
+	var errs []error
 	now := time.Now().UTC()
 	monthsBack := m.Cfg.Limits.MaxAgeCapDays/30 + 1
 	ret := m.Cfg.Privacy.Retention
@@ -358,7 +362,7 @@ func (m *Maintenance) Tick(ctx context.Context) error {
 	n, err := store.EnsurePartitions(ctx, m.DB, now, store.PartitionWindow{
 		MonthsBack: monthsBack, MonthsAhead: m.Cfg.Scheduler.PartitionMonthsAhead, DaysBack: 1, DaysAhead: 14, NotBefore: notBefore})
 	if err != nil {
-		return err
+		errs = append(errs, err)
 	}
 	if n > 0 {
 		slog.Info("partitions created", "count", n)
@@ -373,7 +377,7 @@ func (m *Maintenance) Tick(ctx context.Context) error {
 		}
 		dropped, err := store.DropPartitionsBefore(ctx, m.DB, d.table, now.AddDate(0, 0, -d.days))
 		if err != nil {
-			return err
+			errs = append(errs, err)
 		}
 		if len(dropped) > 0 {
 			slog.Info("retention: partitions dropped", "table", d.table, "partitions", dropped)
@@ -398,7 +402,7 @@ func (m *Maintenance) Tick(ctx context.Context) error {
 			continue
 		}
 		if _, err := m.DB.Exec(ctx, s.q, s.days); err != nil {
-			return err
+			errs = append(errs, err)
 		}
 	}
 	// Refresh rows of posts past every refresh window and recrawl age, and
@@ -407,7 +411,7 @@ func (m *Maintenance) Tick(ctx context.Context) error {
 		LEFT JOIN page_schedule s ON s.page_id = r.page_id AND s.enabled
 		WHERE r.post_created_at < $1 OR s.page_id IS NULL LIMIT 20000)`,
 		now.Add(-maxRefreshAge(m.Cfg.Scheduler.PostRefresh)-24*time.Hour)); err != nil {
-		return err
+		errs = append(errs, err)
 	}
-	return nil
+	return errors.Join(errs...)
 }

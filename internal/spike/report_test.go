@@ -152,7 +152,7 @@ func TestCappedMeasurementsAreLeftOut(t *testing.T) {
 // ended; one stopped by an error, a block, a drift or the page limit fails it.
 func TestDepthCheckNeedsTimelinesThatEnded(t *testing.T) {
 	th := Thresholds{MinMedianDays: 365}
-	for end, pass := range map[string]bool{"end": true, "no_feed": true, "wall": false, "error": false, "drift": false, "max_pages": false} {
+	for end, pass := range map[string]bool{"end": true, "no_feed": true, "no_page_id": true, "wall": false, "error": false, "drift": false, "max_pages": false} {
 		var b strings.Builder
 		for _, p := range []string{"a", "b"} {
 			reason := "end"
