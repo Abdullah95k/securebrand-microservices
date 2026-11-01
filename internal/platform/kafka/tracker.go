@@ -1,6 +1,7 @@
 package kafka
 
 import (
+	"context"
 	"sync"
 
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -24,6 +25,12 @@ type partition struct {
 	next      kgo.EpochOffset // offset after the last fetched record
 	committed int64
 	sem       chan struct{}
+	// ctx is the handlers' context for this partition's records, cancelled
+	// when the partition is revoked or lost: its records belong to the next
+	// owner then, so a handler still running must stop, not finish them a
+	// second time.
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // tracker is safe for concurrent use.
@@ -40,21 +47,23 @@ func newTracker(perPartMax int) *tracker {
 	return &tracker{parts: map[tp]*partition{}, perPartMax: perPartMax}
 }
 
-// add registers a fetched record and returns its entry and the partition
-// semaphore the caller must acquire before processing.
-func (t *tracker) add(r *kgo.Record) (*entry, chan struct{}) {
+// add registers a fetched record and returns its entry, the partition
+// semaphore the caller must acquire before processing, and the context to
+// process it in (derived from base, cancelled when the partition goes).
+func (t *tracker) add(r *kgo.Record, base context.Context) (*entry, chan struct{}, context.Context) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	k := tp{r.Topic, r.Partition}
 	p := t.parts[k]
 	if p == nil {
 		p = &partition{committed: -1, sem: make(chan struct{}, t.perPartMax)}
+		p.ctx, p.cancel = context.WithCancel(base)
 		t.parts[k] = p
 	}
 	e := &entry{offset: r.Offset, epoch: r.LeaderEpoch}
 	p.queue = append(p.queue, e)
 	p.next = kgo.EpochOffset{Epoch: r.LeaderEpoch, Offset: r.Offset + 1}
-	return e, p.sem
+	return e, p.sem, p.ctx
 }
 
 func (t *tracker) markDone(e *entry) {
@@ -143,6 +152,9 @@ func (t *tracker) drop(only map[string][]int32) {
 	defer t.mu.Unlock()
 	for topic, parts := range only {
 		for _, part := range parts {
+			if p := t.parts[tp{topic, part}]; p != nil && p.cancel != nil {
+				p.cancel()
+			}
 			delete(t.parts, tp{topic, part})
 		}
 	}

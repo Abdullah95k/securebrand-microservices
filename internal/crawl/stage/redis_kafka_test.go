@@ -86,9 +86,10 @@ func TestRetryRelayIsNotHeldUpByLaterTasks(t *testing.T) {
 }
 
 // A reply thread lost after its post's pass (dead-lettered here; a cut
-// short thread does the same) makes the post's next pass read it whole, once:
-// a newest-first pass would never reach the thread's old comment again.
-func TestLostThreadMakesTheNextPassFull(t *testing.T) {
+// short thread does the same) marks the post: planning never skips it, and
+// clearing the mark takes the exact mark a whole read began with, so one
+// set since (a thread of that read lost too) stays.
+func TestLostThreadMarksThePost(t *testing.T) {
 	rdb := testenv.Redis(t)
 	ctx := context.Background()
 	kcfg := kafka.ClientConfig{Brokers: testenv.Kafka(t), TopicPrefix: testenv.TopicPrefix()}
@@ -105,15 +106,12 @@ func TestLostThreadMakesTheNextPassFull(t *testing.T) {
 	if err := d.Ckpt.SetPost(ctx, 77, checkpoint.PostCache{Reported: 5, NewestComment: time.Now().Unix(), ThreadsComplete: true}); err != nil {
 		t.Fatal(err)
 	}
-	plan := func() (fbv1.CrawlMode, string) {
+	skipped := func() bool {
 		pt, state := ps.commentsTask(ctx, page, fbv1.CrawlMode_CRAWL_MODE_INCREMENTAL, post)
-		if pt == nil {
-			return fbv1.CrawlMode_CRAWL_MODE_UNSPECIFIED, state
-		}
-		return pt.Mode, state
+		return pt == nil && state == jobs.PostSkipped
 	}
-	if _, state := plan(); state != jobs.PostSkipped {
-		t.Fatalf("an unchanged, complete post: %q", state)
+	if !skipped() {
+		t.Fatal("an unchanged, complete post is skipped")
 	}
 
 	pt := task.NewPost(page, fbv1.CrawlMode_CRAWL_MODE_INCREMENTAL, &taskv1.PostScope{PostId: 77, PageId: 9})
@@ -121,10 +119,21 @@ func TestLostThreadMakesTheNextPassFull(t *testing.T) {
 	if err := (&Worker{D: d}).deadLetter(ctx, thread, "max_attempts", "test", nil); err != nil {
 		t.Fatal(err)
 	}
-	if mode, _ := plan(); mode != fbv1.CrawlMode_CRAWL_MODE_FULL {
-		t.Fatalf("after a lost thread: %v, want a full pass", mode)
+	first := d.Ckpt.Incomplete(ctx, 77)
+	if first == "" || skipped() {
+		t.Fatal("a post with a lost thread is marked and not skipped")
 	}
-	if _, state := plan(); state != jobs.PostSkipped {
-		t.Fatalf("the mark is taken once: %q", state)
+	time.Sleep(time.Millisecond)
+	if err := d.Ckpt.MarkIncomplete(ctx, 77); err != nil { // lost again during the read
+		t.Fatal(err)
+	}
+	_ = d.Ckpt.ClearIncomplete(ctx, 77, first)
+	second := d.Ckpt.Incomplete(ctx, 77)
+	if second == "" || second == first {
+		t.Fatal("a mark set after the read began must stay")
+	}
+	_ = d.Ckpt.ClearIncomplete(ctx, 77, second)
+	if d.Ckpt.Incomplete(ctx, 77) != "" || !skipped() {
+		t.Fatal("the read's own mark is cleared")
 	}
 }

@@ -42,6 +42,18 @@ func (s *PostStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	if sc == nil {
 		return Outcome{Result: Fail, Reason: "post task without post scope"}
 	}
+	// A post one of whose reply threads was lost since its last pass is read
+	// whole, whoever planned this pass: a newest-first read would never
+	// reach that old comment again. The pass keeps the mark it began with
+	// (continuations carry it) and clears it once it has read the post whole.
+	if t.Seq == 0 && sc.IncompleteMark == "" {
+		if mark := d.Ckpt.Incomplete(ctx, sc.PostId); mark != "" {
+			sc.IncompleteMark = mark
+			if t.Mode == fbv1.CrawlMode_CRAWL_MODE_INCREMENTAL {
+				t.Mode, sc.CommentsWatermark = fbv1.CrawlMode_CRAWL_MODE_FULL, nil
+			}
+		}
+	}
 	id, err := d.identity(ctx, "comments", t.Stalls)
 	if err != nil {
 		return noIdentity(t, err, c)
@@ -67,10 +79,14 @@ func (s *PostStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	}
 
 	query := "comments"
-	var watermark time.Time
+	// The read stops after comments older than watermark (a minute of
+	// overlap before the newest comment stored); comments after newSince
+	// (that newest comment) count as new.
+	var watermark, newSince time.Time
 	if t.Mode == fbv1.CrawlMode_CRAWL_MODE_INCREMENTAL && sc.CommentsWatermark != nil {
 		query = "comments_newest"
-		watermark = sc.CommentsWatermark.AsTime().Add(-time.Minute)
+		newSince = sc.CommentsWatermark.AsTime()
+		watermark = newSince.Add(-time.Minute)
 	}
 	q, _ := d.GQL.Registry.Get(query)
 	src := emit.Source{JobID: t.JobId, Query: query, DocID: q.DocID, ParserVersion: parse.CommentsVersion, Mode: t.Mode}
@@ -134,7 +150,7 @@ func (s *PostStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 		}
 
 		b := d.Producer.NewBatch()
-		n, older, err := emitComments(ctx, d, b, t, src, res, watermark, &st, c)
+		n, older, err := emitComments(ctx, d, b, t, src, res, watermark, newSince, &st, c)
 		if err != nil {
 			return retry(t, st.Cursor, "30s", err.Error(), c)
 		}
@@ -198,13 +214,17 @@ func (s *PostStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 			newest = st.NewestSeenUnix
 		}
 		_ = d.Ckpt.SetPost(ctx, sc.PostId, checkpoint.PostCache{Reported: sc.ReportedCommentCount, NewestComment: newest, ThreadsComplete: !truncated})
+		if sc.IncompleteMark != "" && exhausted && !truncated && t.Mode != fbv1.CrawlMode_CRAWL_MODE_INCREMENTAL {
+			_ = d.Ckpt.ClearIncomplete(ctx, sc.PostId, sc.IncompleteMark)
+		}
 		// An incremental newest-first pass cannot see replies added to older
-		// comments. If the count grew more than the new comments we found
-		// (the older ones read before stopping don't count), do a full pass.
+		// comments. If the count grew more than the new comments the pass
+		// found (in every segment; the older ones read before stopping don't
+		// count), do a full pass.
 		out := done(c)
 		if t.Mode == fbv1.CrawlMode_CRAWL_MODE_INCREMENTAL && !truncated {
 			grew := sc.ReportedCommentCount - sc.CommentsSeen
-			if grew > 0 && st.NewSeen < grew {
+			if grew > 0 && sc.NewSeen+st.NewSeen < grew {
 				out.FollowUps = append(out.FollowUps, task.NewPost(t, fbv1.CrawlMode_CRAWL_MODE_RECRAWL, cloneScope(sc)))
 				c["recrawls_spawned"]++
 			}
@@ -212,6 +232,7 @@ func (s *PostStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 		return out
 	}
 	next := task.Continuation(t, st.Cursor)
+	next.GetPost().NewSeen = sc.NewSeen + st.NewSeen // after its id is set, which must not depend on it
 	metrics.TaskYields.WithLabelValues("post").Inc()
 	return Outcome{Result: Continue, Next: next, Counters: c}
 }
@@ -262,9 +283,10 @@ func cloneScope(sc *taskv1.PostScope) *taskv1.PostScope {
 }
 
 // emitComments publishes one page of comments and their media. It returns
-// how many comments were seen and how many were older than watermark.
+// how many comments were seen and how many were older than watermark, and
+// counts those after newSince in st.NewSeen.
 func emitComments(ctx context.Context, d *Deps, b *kafka.Batch, t *taskv1.Task, src emit.Source, res parse.CommentsResult,
-	watermark time.Time, st *checkpoint.State, c map[string]int64) (int, int, error) {
+	watermark, newSince time.Time, st *checkpoint.State, c map[string]int64) (int, int, error) {
 	older := 0
 	for _, cb := range res.Comments {
 		cm := cb.Comment
@@ -275,7 +297,8 @@ func emitComments(ctx context.Context, d *Deps, b *kafka.Batch, t *taskv1.Task, 
 		}
 		if !watermark.IsZero() && cm.CreatedAt != nil && cm.CreatedAt.AsTime().Before(watermark) {
 			older++
-		} else {
+		}
+		if newSince.IsZero() || cm.CreatedAt == nil || cm.CreatedAt.AsTime().After(newSince) {
 			st.NewSeen++
 		}
 		keep, err := d.Emit.Comment(ctx, b, src, cm)
@@ -420,7 +443,7 @@ func (s *ThreadStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 		}
 		metrics.ParseTotal.WithLabelValues("replies", "1", "ok").Inc()
 		b := d.Producer.NewBatch()
-		if _, _, err := emitComments(ctx, d, b, t, src, res, time.Time{}, &st, c); err != nil {
+		if _, _, err := emitComments(ctx, d, b, t, src, res, time.Time{}, time.Time{}, &st, c); err != nil {
 			return retry(t, st.Cursor, "30s", err.Error(), c)
 		}
 		nested := threadTasks(ctx, d, t, res.Threads, sc.PostId, sc.PageId, sc.PostCreatedAt)

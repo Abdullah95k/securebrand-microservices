@@ -13,6 +13,7 @@ import (
 
 	fbv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fb/v1"
 	"github.com/abdullah95k/securebrand-microservices/internal/api"
+	"github.com/abdullah95k/securebrand-microservices/internal/crawl/checkpoint"
 	"github.com/abdullah95k/securebrand-microservices/internal/fakefb"
 	"github.com/abdullah95k/securebrand-microservices/internal/topics"
 )
@@ -287,6 +288,7 @@ func TestCommentEditsAndDeletions(t *testing.T) {
 // before stopping don't count), it recrawls the post and finds them.
 func TestIncrementalRecrawlFindsRepliesToOldComments(t *testing.T) {
 	s := Start(t, Options{Spec: fakefb.Spec{Seed: 31, Pages: 1, PostsPerPage: 3, PostSpacing: 2 * time.Hour, MaxComments: 40}})
+	ctx := context.Background()
 	key := s.Key(t, api.ScopeJobsWrite, api.ScopeDataRead)
 	page := s.Fake.World.Pages()[0]
 	if j := s.runJob(t, key, page.Vanity, "full"); j.Status != "completed" {
@@ -318,5 +320,29 @@ func TestIncrementalRecrawlFindsRepliesToOldComments(t *testing.T) {
 	}
 	if after := count(t, s, `SELECT count(*) FROM comments WHERE parent_comment_id = $1`, oldest.ID); after != before+4 {
 		t.Fatalf("replies to the oldest comment: %d, want %d", after, before+4)
+	}
+
+	// One reply and nothing else: the post's newest comment, which the
+	// read sees again in its minute of overlap, doesn't count as new.
+	if err := s.Fake.World.AddReplies(oldest.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	j = s.runJob(t, key, page.Vanity, "auto")
+	if j.Status != "completed" || j.Counters["recrawls_spawned"] < 1 {
+		t.Fatalf("a single reply: %+v", j)
+	}
+	if after := count(t, s, `SELECT count(*) FROM comments WHERE parent_comment_id = $1`, oldest.ID); after != before+5 {
+		t.Fatalf("replies to the oldest comment: %d, want %d", after, before+5)
+	}
+
+	// A post marked incomplete (a reply thread lost) is read whole by the
+	// next incremental job, though nothing changed, which clears the mark.
+	ckpt := checkpoint.New(s.Redis)
+	if err := ckpt.MarkIncomplete(ctx, target.ID); err != nil {
+		t.Fatal(err)
+	}
+	j = s.runJob(t, key, page.Vanity, "auto")
+	if j.Status != "completed" || ckpt.Incomplete(ctx, target.ID) != "" {
+		t.Fatalf("after the marked post's pass: %+v, mark %q", j, ckpt.Incomplete(ctx, target.ID))
 	}
 }

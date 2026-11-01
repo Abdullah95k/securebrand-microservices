@@ -315,6 +315,9 @@ func RetryRelays(kcfg kafka.ClientConfig, producer *kafka.Producer) ([]*kafka.Co
 		cons, err := kafka.NewConsumer(kafka.ConsumerConfig{ClientConfig: kcfg, Group: "fbs-retry-relay", Topics: []string{topic},
 			MaxInflight: retryRelayInflight, MaxInflightPerPartition: retryRelayInflight, DrainTimeout: 5 * time.Second}, relay.Handle)
 		if err != nil {
+			for _, c := range out {
+				c.Client().Close()
+			}
 			return nil, err
 		}
 		out = append(out, cons)
