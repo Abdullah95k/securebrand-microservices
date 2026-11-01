@@ -24,7 +24,7 @@ var storeExits = []string{"http://u:secret@203.0.113.10:8000", "http://u:secret@
 func storePool(t *testing.T, store Store, endpoints ...string) (*Pool, *proxy.Pool) {
 	t.Helper()
 	proxies, err := proxy.New(config.Proxy{
-		Tiers: []config.ProxyTier{{Name: "isp", Kind: "static_list", Endpoints: endpoints}},
+		Tiers:     []config.ProxyTier{{Name: "isp", Kind: "static_list", Endpoints: endpoints}},
 		PageLoads: config.PageLoads{Interval: 2 * time.Minute, Backoff: 15 * time.Minute, MaxBackoff: 2 * time.Hour},
 	})
 	if err != nil {
@@ -123,9 +123,14 @@ func TestSessionsResumeAfterARestart(t *testing.T) {
 	}
 
 	// Each saved session resumes once.
-	again, _ := storePool(t, store, storeExits...)
+	// Each saved session resumes once, and so does the exits' pacing: a
+	// later start never re-applies it over what page loads showed since.
+	again, againProxies := storePool(t, store, storeExits...)
 	if n, _ := again.Resume(ctx); n != 0 {
 		t.Fatalf("a saved session resumed twice: %d", n)
+	}
+	if ok, _ := againProxies.PageLoad(walled.Endpoint); !ok {
+		t.Fatal("the exits' saved pacing is restored twice")
 	}
 
 	// A session whose exit is no longer configured is dropped.
@@ -174,7 +179,7 @@ func TestSavedSessionsThatCannotResume(t *testing.T) {
 	if err := store.Save(ctx, []Saved{s, fresh}, nil); err != nil {
 		t.Fatal(err)
 	}
-	got, _, err := store.Load(ctx)
+	got, err := store.TakeSessions(ctx)
 	if err != nil || len(got) != 1 || got[0].ID != "id-2" {
 		t.Fatalf("%+v %v", got, err)
 	}
@@ -196,5 +201,38 @@ func TestSavedSessionsThatCannotResume(t *testing.T) {
 	direct.markRetired("unhealthy")
 	if _, ok := direct.saved(); ok {
 		t.Fatal("a retired session is saved")
+	}
+}
+
+// A crawler resumes the sessions of one that stops after it started (a
+// rolling update starts the new pod first).
+func TestSessionsSavedLaterResume(t *testing.T) {
+	mr := miniredis.RunT(t)
+	store := &RedisStore{R: redis.NewClient(&redis.Options{Addr: mr.Addr()}), NS: "t."}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pool, _ := storePool(t, store, storeExits...)
+	if n, err := pool.Resume(ctx); err != nil || n != 0 {
+		t.Fatalf("%d %v", n, err)
+	}
+	go func() { _ = pool.RunResume(ctx, 10*time.Millisecond) }()
+	s := Saved{ID: "id-1", Tier: "isp", Exit: "isp|203.0.113.10:8000", Profile: "chrome_146", Tokens: htmlx.Tokens{LSD: "x"}, SavedAt: time.Now()}
+	if err := store.Save(ctx, []Saved{s}, map[string]proxy.ExitState{"isp|203.0.113.10:8000": {PausedUntil: time.Now().Add(48 * time.Hour)}}); err != nil {
+		t.Fatal(err)
+	}
+	if ttl := mr.TTL("{t.fbs:sessions}:exits"); ttl < 48*time.Hour {
+		t.Fatalf("the exits' pacing expires before its pause ends: %s", ttl)
+	}
+	id, err := pool.Acquire(ctx, "isp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(5 * time.Second); id.ID != "id-1" && time.Now().Before(deadline); {
+		pool.Release(id)
+		time.Sleep(20 * time.Millisecond)
+		id, _ = pool.Acquire(ctx, "isp")
+	}
+	if id.ID != "id-1" {
+		t.Fatal("a session saved after the start is not resumed")
 	}
 }

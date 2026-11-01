@@ -152,6 +152,8 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 	c.Components = []run.Func{
 		func(ctx context.Context) error { return reg.Run(ctx, cfg.FB.RegistryRefresh) },
 		func(ctx context.Context) error { return supp.Run(ctx, cfg.Crawler.SuppressionRefresh) },
+		// Sessions of crawlers that stop after this one started.
+		func(ctx context.Context) error { return pool.RunResume(ctx, time.Minute) },
 	}
 	// The reporter feeds both AIMD (block rate) and the traffic budget.
 	if cfg.FB.AIMD.Enabled || cfg.Scheduler.Budget.Enabled {

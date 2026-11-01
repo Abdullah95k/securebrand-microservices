@@ -18,9 +18,12 @@ import (
 // Facebook walls.
 type Store interface {
 	Save(ctx context.Context, sessions []Saved, exits map[string]proxy.ExitState) error
-	// Load takes the saved sessions (each goes to one crawler) and reads the
-	// exits' pacing (every crawler waits it out).
-	Load(ctx context.Context) ([]Saved, map[string]proxy.ExitState, error)
+	// TakeSessions removes and returns the saved sessions: each goes to
+	// one crawler.
+	TakeSessions(ctx context.Context) ([]Saved, error)
+	// TakeExits removes and returns the exits' saved pacing, so a later
+	// start never re-applies it over what page loads have since shown.
+	TakeExits(ctx context.Context) (map[string]proxy.ExitState, error)
 }
 
 // Saved is a session kept across a restart. It names its exit, never the
@@ -79,35 +82,48 @@ func (s *RedisStore) Save(ctx context.Context, sessions []Saved, exits map[strin
 			p.HSet(ctx, savedExitsKey, exit, b)
 		}
 		if len(exits) > 0 {
-			// Longer than any pause (fb.proxy.page_loads.max_backoff).
-			p.Expire(ctx, savedExitsKey, 24*time.Hour)
+			// Past every pause: a later start has nothing to wait out.
+			keep := 24 * time.Hour
+			for _, st := range exits {
+				keep = max(keep, time.Until(st.PausedUntil)+time.Hour)
+			}
+			p.Expire(ctx, savedExitsKey, keep)
 		}
 		return nil
 	})
 	return err
 }
 
-func (s *RedisStore) Load(ctx context.Context) ([]Saved, map[string]proxy.ExitState, error) {
-	savedSessionsKey, savedExitsKey := s.keys()
-	exits := map[string]proxy.ExitState{}
-	m, err := s.R.HGetAll(ctx, savedExitsKey).Result()
-	if err != nil {
-		return nil, nil, err
+func (s *RedisStore) TakeExits(ctx context.Context) (map[string]proxy.ExitState, error) {
+	_, savedExitsKey := s.keys()
+	var all *redis.MapStringStringCmd
+	if _, err := s.R.TxPipelined(ctx, func(p redis.Pipeliner) error {
+		all = p.HGetAll(ctx, savedExitsKey)
+		p.Del(ctx, savedExitsKey)
+		return nil
+	}); err != nil {
+		return nil, err
 	}
-	for exit, b := range m {
+	exits := map[string]proxy.ExitState{}
+	for exit, b := range all.Val() {
 		var st proxy.ExitState
 		if json.Unmarshal([]byte(b), &st) == nil {
 			exits[exit] = st
 		}
 	}
+	return exits, nil
+}
+
+func (s *RedisStore) TakeSessions(ctx context.Context) ([]Saved, error) {
+	savedSessionsKey, _ := s.keys()
 	var out []Saved
 	for {
 		b, err := s.R.LPop(ctx, savedSessionsKey).Bytes()
 		if errors.Is(err, redis.Nil) {
-			return out, exits, nil
+			return out, nil
 		}
 		if err != nil {
-			return out, exits, err
+			return out, err
 		}
 		var v Saved
 		if json.Unmarshal(b, &v) != nil || time.Since(v.SavedAt) > SavedSessionTTL {

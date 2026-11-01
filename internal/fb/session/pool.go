@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -200,17 +201,28 @@ func (p *Pool) Save(ctx context.Context) (int, error) {
 }
 
 // Resume restores what the last crawler saved when it stopped (Save): the
-// exits' page-load pauses, and its sessions, which become idle identities
-// with their tokens and cookies, so the first tasks need no page load.
-// Sessions it can't rebuild are dropped: an exit no longer configured or
-// cooling down, another fingerprint profile, or a tier at its cap. It
-// returns how many sessions resumed.
+// exits' page-load pauses, and its sessions (ResumeSessions). Call it once,
+// at start.
 func (p *Pool) Resume(ctx context.Context) (int, error) {
 	if p.cfg.Store == nil {
 		return 0, nil
 	}
-	saved, exits, err := p.cfg.Store.Load(ctx)
+	exits, err := p.cfg.Store.TakeExits(ctx)
 	p.proxies.RestorePageGate(exits)
+	n, serr := p.ResumeSessions(ctx)
+	return n, errors.Join(err, serr)
+}
+
+// ResumeSessions takes the sessions crawlers saved when they stopped, which
+// become idle identities with their tokens and cookies, so the tasks they
+// serve need no page load. Sessions it can't rebuild are dropped: an exit
+// no longer configured or cooling down, another fingerprint profile, or a
+// tier at its cap. It returns how many sessions resumed.
+func (p *Pool) ResumeSessions(ctx context.Context) (int, error) {
+	if p.cfg.Store == nil {
+		return 0, nil
+	}
+	saved, err := p.cfg.Store.TakeSessions(ctx)
 	n := 0
 	for _, s := range saved {
 		id := p.rebuild(s)
@@ -226,6 +238,7 @@ func (p *Pool) Resume(ctx context.Context) (int, error) {
 		p.live[s.Tier]++
 		p.idle[s.Tier] = append(p.idle[s.Tier], id)
 		metrics.IdentityActive.WithLabelValues(s.Tier).Set(float64(p.live[s.Tier]))
+		p.cond.Broadcast()
 		p.mu.Unlock()
 		metrics.Bootstraps.WithLabelValues("resumed", "ok").Inc()
 		n++
@@ -234,6 +247,25 @@ func (p *Pool) Resume(ctx context.Context) (int, error) {
 		metrics.Bootstraps.WithLabelValues("resumed", "dropped").Add(float64(len(saved) - n))
 	}
 	return n, err
+}
+
+// RunResume resumes, every interval, the sessions of crawlers that stopped
+// after this one started (a rolling update starts the new pod first).
+func (p *Pool) RunResume(ctx context.Context, interval time.Duration) error {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-t.C:
+			if n, err := p.ResumeSessions(ctx); err != nil && ctx.Err() == nil {
+				slog.Warn("session: saved sessions not resumed", "resumed", n, "err", err)
+			} else if n > 0 {
+				slog.Info("session: saved sessions resumed", "sessions", n)
+			}
+		}
+	}
 }
 
 // rebuild makes a saved session an identity again, on its exit, or returns
