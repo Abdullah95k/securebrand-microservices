@@ -59,7 +59,7 @@ func Continuation(t *taskv1.Task, cursor string) *taskv1.Task {
 	c := cloneShallow(t)
 	c.Seq = t.Seq + 1
 	c.Cursor = cursor
-	c.Attempt, c.Stalls = 0, 0
+	c.Attempt, c.Stalls, c.Waits = 0, 0, 0
 	c.EnqueuedAt = nil
 	return Finalize(c)
 }
@@ -78,7 +78,7 @@ func Retry(t *taskv1.Task, cursor string) *taskv1.Task {
 func cloneShallow(t *taskv1.Task) *taskv1.Task {
 	c := &taskv1.Task{
 		TaskId: t.TaskId, LineageId: t.LineageId, Seq: t.Seq, JobId: t.JobId, Lane: t.Lane, Kind: t.Kind,
-		Mode: t.Mode, Cursor: t.Cursor, Limits: t.Limits, Affinity: t.Affinity, Attempt: t.Attempt, Stalls: t.Stalls, Trace: t.Trace,
+		Mode: t.Mode, Cursor: t.Cursor, Limits: t.Limits, Affinity: t.Affinity, Attempt: t.Attempt, Stalls: t.Stalls, Waits: t.Waits, Trace: t.Trace,
 	}
 	switch s := t.Scope.(type) {
 	case *taskv1.Task_Page:

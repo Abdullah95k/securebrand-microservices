@@ -57,23 +57,38 @@ func (d *Deps) profileFresh(sc *taskv1.PageScope) bool {
 	return d.now().Sub(sc.ProfileSeenAt.AsTime()) < d.Cfg.Crawler.ProfileRefresh
 }
 
-// readProfile reports whether the page task t reads the page's HTML for
-// its profile, counting why not: the profile is fresh (profile_skips), or
-// the identity already has tokens and its exit can't load a page now
-// (profile_deferred: it paces page loads, or backs off after a walled one;
-// a walled profile read would retire an identity that serves GraphQL).
-func (d *Deps) readProfile(t *taskv1.Task, sc *taskv1.PageScope, id *session.Identity, c map[string]int64) bool {
-	switch {
-	case t.Seq != 0:
-		return false
-	case d.profileFresh(sc):
+// pagePlan decides whether the page task t loads the page's HTML and
+// whether it reads the profile from it.
+//   - The HTML must load when the identity has no tokens yet, or the page
+//     id is still unknown (the HTML resolves it).
+//   - The profile is read on the first segment while the timeline has not
+//     started (a retry after progress doesn't reload it), unless it is
+//     fresh (profile_skips).
+//
+// The load itself goes through the exit's page-load gate (Loader.Load):
+// when the exit can't load a page now, a profile-only read is deferred
+// and a load the task needs waits (pageLoadPaced).
+func (d *Deps) pagePlan(t *taskv1.Task, sc *taskv1.PageScope, st *checkpoint.State, id *session.Identity, c map[string]int64) (load, profile bool) {
+	profile = t.Seq == 0 && st.Cursor == "" && st.Pages == 0
+	if profile && d.profileFresh(sc) {
 		c["profile_skips"]++
-		return false
-	case id.Bootstrapped() && d.Proxies != nil && !d.Proxies.TakePageLoad(id.Endpoint):
-		c["profile_deferred"]++
-		return false
+		profile = false
 	}
-	return true
+	load = profile || !id.Bootstrapped() || sc.PageId == 0
+	return load, profile || sc.PageId == 0
+}
+
+// pacedRetry retries a task whose identity had to load a page while its
+// exit paces page loads (30s), or backs off after a walled one (5m): a
+// wait, not a stall.
+func pacedRetry(t *taskv1.Task, cursor string, err error, c map[string]int64) Outcome {
+	delay := "30s"
+	if errors.Is(err, session.ErrExitPaused) {
+		delay = "5m"
+	}
+	o := retry(t, cursor, delay, err.Error(), c)
+	o.Waiting = true
+	return o
 }
 
 func (d *Deps) now() time.Time {
@@ -164,14 +179,17 @@ func (d *Deps) tierFor(class string, stalls uint32) string {
 	return tiers[from]
 }
 
-// ensureBootstrapped loads a page on a fresh identity to obtain tokens.
+// ensureBootstrapped loads a page on an identity without tokens to obtain
+// them (session.ErrPaced when its exit can't load a page now).
 func (d *Deps) ensureBootstrapped(ctx context.Context, id *session.Identity, pageID int64, lane taskv1.Lane) (*session.PageLoad, error) {
 	if id.Bootstrapped() {
 		return nil, nil
 	}
 	u, _ := id.Base.Parse("/" + strconv.FormatInt(pageID, 10))
 	pl, err := d.Loader.Bootstrap(ctx, id, u.String())
-	d.observeLoad(pl, err, lane)
+	if !errors.Is(err, session.ErrPaced) { // nothing was sent
+		d.observeLoad(pl, err, lane)
+	}
 	return pl, err
 }
 

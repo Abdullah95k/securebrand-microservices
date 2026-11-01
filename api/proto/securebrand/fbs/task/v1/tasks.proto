@@ -122,7 +122,13 @@ message Task {
   google.protobuf.Timestamp not_before = 16;
   google.protobuf.Timestamp enqueued_at = 17;
   map<string, string> trace = 18;
-  // Retries since the task last advanced its checkpoint. crawler.max_attempts
-  // applies to these; attempt (which picks the proxy tier) counts every retry.
+  // Retries since the task last advanced its checkpoint, waits excluded.
+  // crawler.max_attempts applies to these, and they pick the proxy tier
+  // (one tier further per stall). attempt counts every retry but waits.
   uint32 stalls = 19;
+  // Retries spent waiting for proxy exits: every exit cooling down behind
+  // its breaker, or pacing its page loads. They are the exits' doing, not
+  // the task's, so they count toward neither stalls nor attempt;
+  // crawler.max_waits bounds them.
+  uint32 waits = 20;
 }

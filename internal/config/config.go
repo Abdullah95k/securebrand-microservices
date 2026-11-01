@@ -245,6 +245,7 @@ type Crawler struct {
 	ConsecutiveOldStop      int            `koanf:"consecutive_old_stop"`
 	MaxAttempts             int            `koanf:"max_attempts"`
 	MaxTotalAttempts        int            `koanf:"max_total_attempts"`
+	MaxWaits                int            `koanf:"max_waits"`
 	LeaseTTL                time.Duration  `koanf:"lease_ttl"`
 	FreshnessP0             time.Duration  `koanf:"freshness_p0"`
 	FreshnessP1             time.Duration  `koanf:"freshness_p1"`

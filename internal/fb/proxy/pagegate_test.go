@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -132,5 +133,79 @@ func TestPageLoadGateOff(t *testing.T) {
 	}
 	if !p.TakePageLoad(Endpoint{Tier: "direct"}) {
 		t.Fatal("direct is never gated")
+	}
+}
+
+// Each static exit (IP:port) has its own gate, even when several share a
+// /24 bucket for the breaker.
+func TestPageLoadsArePacedPerIP(t *testing.T) {
+	p, err := New(config.Proxy{
+		Tiers:     []config.ProxyTier{{Name: "isp", Kind: "static_list", Endpoints: []string{"http://u:p@203.0.113.10:8000", "http://u:p@203.0.113.11:8000"}}},
+		PageLoads: pilotGate,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err1 := p.Next("isp")
+	b, err2 := p.Next("isp")
+	if err1 != nil || err2 != nil || a.Bucket != b.Bucket || a.Exit == b.Exit {
+		t.Fatalf("two IPs of one /24 load a page each: %+v %v / %+v %v", a, err1, b, err2)
+	}
+	if _, err := p.Next("isp"); !errors.Is(err, ErrExitsPaced) {
+		t.Fatalf("both IPs just loaded a page: %v", err)
+	}
+}
+
+// After a pause ends the exit is only paced (a short wait), and outcomes
+// that say nothing about the exit (no tokens, a missing page) neither pause
+// it nor reset its doubling.
+func TestPageLoadPauseAndNeutralOutcomes(t *testing.T) {
+	p, c := gatedPool(t, pilotGate)
+	ep, _ := p.Next("isp")
+	other, _ := p.Next("isp")
+	p.ObservePageLoad(ep, detect.LoginWall) // 15m
+	p.ObservePageLoad(other, detect.LoginWall)
+	c.add(15 * time.Minute)
+	if !p.TakePageLoad(ep) || !p.TakePageLoad(other) {
+		t.Fatal("the pause is over")
+	}
+	if _, err := p.Next("isp"); !errors.Is(err, ErrExitsPaced) {
+		t.Fatalf("right after the pause both exits are only paced: %v", err)
+	}
+	p.ObservePageLoad(ep, detect.SoftError)
+	p.ObservePageLoad(ep, detect.ContentUnavailable)
+	c.add(2 * time.Minute)
+	if !p.TakePageLoad(ep) {
+		t.Fatal("neutral outcomes don't pause the exit")
+	}
+	p.ObservePageLoad(ep, detect.LoginWall) // the doubling continues: 30m
+	c.add(29 * time.Minute)
+	if p.TakePageLoad(ep) {
+		t.Fatal("neutral outcomes must not reset the doubling")
+	}
+}
+
+// A proxy endpoint that is not a URL is refused without echoing it (it
+// holds credentials); a tier with endpoints but no kind is refused rather
+// than silently sending traffic from the machine's own IP.
+func TestProxyConfigIsValidated(t *testing.T) {
+	for _, ep := range []string{"isp.proxy.example:10003:user1:secret1", "user1:secret1@isp.proxy.example:10004", "203.0.113.12:8000:user1:secret1"} {
+		_, err := New(config.Proxy{Tiers: []config.ProxyTier{{Name: "isp", Kind: "static_list", Endpoints: []string{ep}}}})
+		if err == nil || strings.Contains(err.Error(), "secret1") || strings.Contains(err.Error(), "user1") {
+			t.Errorf("%q: %v", ep, err)
+		}
+	}
+	if _, err := New(config.Proxy{Tiers: []config.ProxyTier{{Name: "isp", Endpoints: []string{"http://203.0.113.10:8000"}}}}); err == nil {
+		t.Error("endpoints without a kind")
+	}
+	if _, err := New(config.Proxy{Tiers: []config.ProxyTier{{Name: "res", Kind: "gateway", Gateway: "gw.example"}}}); err == nil {
+		t.Error("a gateway that is not a URL")
+	}
+	p, err := New(config.Proxy{Tiers: []config.ProxyTier{{Name: "dc", Kind: "direct"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ep, err := p.Next("dc"); err != nil || ep.Tier != "dc" {
+		t.Fatalf("a direct tier keeps its name: %+v %v", ep, err)
 	}
 }

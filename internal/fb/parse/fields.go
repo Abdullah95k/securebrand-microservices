@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
@@ -207,10 +208,17 @@ func Hashtags(text string, ranges []*fbv1.TextRange) []string {
 			out = append(out, h)
 		}
 	}
+	// Facebook's range offsets count UTF-16 code units (an emoji is two).
+	var u []uint16
 	for _, r := range ranges {
-		if r.EntityType == "Hashtag" && int(r.Offset+r.Length) <= len([]rune(text)) {
-			rs := []rune(text)
-			add(string(rs[r.Offset : r.Offset+r.Length]))
+		if r.EntityType != "Hashtag" {
+			continue
+		}
+		if u == nil {
+			u = utf16.Encode([]rune(text))
+		}
+		if r.Offset >= 0 && r.Length > 0 && int(r.Offset+r.Length) <= len(u) {
+			add(string(utf16.Decode(u[r.Offset : r.Offset+r.Length])))
 		}
 	}
 	for _, m := range hashtagRe.FindAllStringSubmatch(text, -1) {
@@ -244,7 +252,14 @@ func reactionName(node gjson.Result) string {
 
 // Reactions reads a Feedback object's reaction totals and breakdown.
 func Reactions(fb gjson.Result) *fbv1.Reactions {
-	total := Int64(First(fb, "reaction_count.count", "reactors.count", "i18n_reaction_count", "reaction_count"))
+	// Exact counts first; a label like "1.2K" is only an approximation.
+	total := Int64(First(fb, "reaction_count.count", "reactors.count", "reaction_count"))
+	approx := false
+	if total == 0 {
+		if n, ok := ParseCount(fb.Get("i18n_reaction_count").String()); ok {
+			total, approx = n, true
+		}
+	}
 	r := &fbv1.Reactions{Total: total, ByType: map[string]int64{}}
 	var sum int64
 	edges := First(fb, "top_reactions.edges", "reaction_breakdown.edges", "important_reactors.edges")
@@ -255,6 +270,13 @@ func Reactions(fb gjson.Result) *fbv1.Reactions {
 		sum += n
 		return true
 	})
-	r.Complete = total > 0 && sum == total || total == 0
+	switch {
+	case total == 0 && sum > 0:
+		// Only the breakdown came back: it lists the top reactions, maybe
+		// not all.
+		r.Total, r.Complete = sum, false
+	default:
+		r.Complete = sum == total && !approx
+	}
 	return r
 }

@@ -176,9 +176,10 @@ func story(n *Node, all []*Node, pageID int64, baseURL string) (PostBundle, Repo
 		}
 	}
 
-	// Shared post.
+	// Shared post: a Story owned by this one with another id (a nested
+	// copy of this story carries its id and is not a share).
 	for _, x := range all {
-		if x.Typename == "Story" && x.Parent == n {
+		if x.Typename == "Story" && x.V.Get("id").String() != "" && !copyOf(x, n) && ownedBy(x, n) {
 			sid := Int64(x.V.Get("post_id"))
 			if sid == 0 {
 				sid = PostIDFromStoryID(x.V.Get("id").String())
@@ -208,9 +209,16 @@ func story(n *Node, all []*Node, pageID int64, baseURL string) (PostBundle, Repo
 	owner := Owner{Type: "post", ID: postID, PostID: postID, PageID: pageID, Reel: reel}
 	var media []*fbv1.Media
 	photos, videos := 0, 0
+	seenMedia := map[string]bool{} // a copy of the story repeats its media
 	for _, x := range all {
-		if !isMedia(x.Typename) || x.Ancestor("Story", "Comment") != n {
+		if !isMedia(x.Typename) || !ownedBy(x, n) {
 			continue
+		}
+		if mid := x.V.Get("id").String(); mid != "" {
+			if seenMedia[x.Typename+mid] {
+				continue
+			}
+			seenMedia[x.Typename+mid] = true
 		}
 		switch x.Typename {
 		case "Photo":
@@ -225,13 +233,24 @@ func story(n *Node, all []*Node, pageID int64, baseURL string) (PostBundle, Repo
 			}
 		}
 	}
-	for _, att := range FindAll(v, "attachments", skip...) {
-		att.ForEach(func(_, a gjson.Result) bool {
-			if l := linkAttachment(a); l != nil {
-				p.Links = append(p.Links, l)
-			}
-			return true
-		})
+	// Links: under the story and under its nested copies, once each.
+	roots := []gjson.Result{v}
+	for _, x := range all {
+		if x != n && copyOf(x, n) && ownedBy(x, n) {
+			roots = append(roots, x.V)
+		}
+	}
+	seenLink := map[string]bool{}
+	for _, root := range roots {
+		for _, att := range FindAll(root, "attachments", skip...) {
+			att.ForEach(func(_, a gjson.Result) bool {
+				if l := linkAttachment(a); l != nil && !seenLink[l.Url] {
+					seenLink[l.Url] = true
+					p.Links = append(p.Links, l)
+				}
+				return true
+			})
+		}
 	}
 
 	p.Type = postType(v, p, photos, videos, reel)
@@ -246,7 +265,13 @@ var ufiFeedbackPaths = []string{
 	"comet_sections.feedback.story.story_ufi_container.story.feedback_context.feedback_target_with_context.ufi_renderer.feedback",
 }
 
-// ownedBy reports whether Feedback node x belongs to story n: its nearest
+// copyOf reports whether x is a nested copy of story n: a Story with n's id.
+func copyOf(x, n *Node) bool {
+	id := n.V.Get("id").String()
+	return x.Typename == "Story" && id != "" && x.V.Get("id").String() == id
+}
+
+// ownedBy reports whether node x belongs to story n: its nearest
 // owner is n, or a Story nested in n with n's id (a copy of n, not a shared
 // post), with no Comment in between.
 func ownedBy(x, n *Node) bool {
@@ -269,14 +294,13 @@ func applyFeedback(p *fbv1.Post, fbs []gjson.Result, rep *Report) {
 		rep.optional("story.feedback")
 		return
 	}
+	exact := false // p.Reactions.Total is an exact count
 	for _, fb := range fbs {
 		if p.FeedbackId == "" {
 			p.FeedbackId = fb.Get("id").String()
 		}
-		if p.Reactions == nil || p.Reactions.Total == 0 {
-			if r := Reactions(fb); r.Total > 0 || First(fb, "reaction_count", "reactors").Exists() {
-				p.Reactions = r
-			}
+		if r := Reactions(fb); r.Total > 0 || First(fb, "reaction_count", "reactors").Exists() {
+			p.Reactions, exact = mergeReactions(p.Reactions, exact, r, exactReactionTotal(fb))
 		}
 		if p.CommentCount == nil {
 			if c := First(fb, "comment_rendering_instance.comments.total_count",
@@ -306,6 +330,32 @@ func applyFeedback(p *fbv1.Post, fbs []gjson.Result, rep *Report) {
 	if p.CommentCount == nil {
 		rep.optional("story.comment_count")
 	}
+}
+
+// exactReactionTotal reports whether a Feedback carries an exact reaction
+// count (not only a breakdown or a "1.2K" label).
+func exactReactionTotal(fb gjson.Result) bool {
+	return Int64(First(fb, "reaction_count.count", "reactors.count", "reaction_count")) > 0
+}
+
+// mergeReactions keeps the first reactions found, except that an exact
+// total replaces a partial one (a breakdown sum, or a label). The
+// breakdown is kept from whichever node has one.
+func mergeReactions(cur *fbv1.Reactions, curExact bool, r *fbv1.Reactions, rExact bool) (*fbv1.Reactions, bool) {
+	switch {
+	case cur == nil || cur.Total == 0:
+		return r, rExact
+	case rExact && !curExact:
+		if len(r.ByType) == 0 && len(cur.ByType) > 0 {
+			var sum int64
+			for _, n := range cur.ByType {
+				sum += n
+			}
+			r.ByType, r.Complete = cur.ByType, sum == r.Total
+		}
+		return r, true
+	}
+	return cur, curExact
 }
 
 func linkAttachment(a gjson.Result) *fbv1.LinkAttachment {

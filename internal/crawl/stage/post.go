@@ -2,6 +2,7 @@ package stage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -20,6 +21,7 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/detect"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/graphql"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/parse"
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/session"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/kafka"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/metrics"
 	"github.com/abdullah95k/securebrand-microservices/internal/topics"
@@ -46,8 +48,11 @@ func (s *PostStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	}
 	defer d.Pool.Release(id)
 	if pl, err := d.ensureBootstrapped(ctx, id, sc.PageId, t.Lane); err != nil {
-		if pl != nil {
+		switch {
+		case pl != nil:
 			return classOutcome(t, pl.Class, pl.Reason, t.Cursor, c)
+		case errors.Is(err, session.ErrPaced):
+			return pacedRetry(t, t.Cursor, err, c)
 		}
 		return retry(t, t.Cursor, "30s", "bootstrap: "+err.Error(), c)
 	}
@@ -346,8 +351,11 @@ func (s *ThreadStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	}
 	defer d.Pool.Release(id)
 	if pl, err := d.ensureBootstrapped(ctx, id, sc.PageId, t.Lane); err != nil {
-		if pl != nil {
+		switch {
+		case pl != nil:
 			return classOutcome(t, pl.Class, pl.Reason, t.Cursor, c)
+		case errors.Is(err, session.ErrPaced):
+			return pacedRetry(t, t.Cursor, err, c)
 		}
 		return retry(t, t.Cursor, "30s", "bootstrap: "+err.Error(), c)
 	}

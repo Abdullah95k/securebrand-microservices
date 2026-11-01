@@ -191,10 +191,13 @@ crawler:
   consecutive_old_stop: 3
   # Retries a task gets without its stream moving forward (a stream that
   # saves new pages between rate limits starts counting again), and in all.
-  # Exhausted tasks go to the DLQ with reason max_attempts or
-  # max_total_attempts.
+  # Waits for proxy exits (every exit cooling down, or pacing its page
+  # loads; 30s or 5m each) count toward neither: max_waits bounds them.
+  # Exhausted tasks go to the DLQ with reason max_attempts,
+  # max_total_attempts or max_waits.
   max_attempts: 5
   max_total_attempts: 50
+  max_waits: 480
   lease_ttl: 120s
   freshness_p0: 15m
   freshness_p1: 6h

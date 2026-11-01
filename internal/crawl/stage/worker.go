@@ -1,6 +1,7 @@
 package stage
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
@@ -32,7 +33,11 @@ type Worker struct {
 	// MaxTotalAttempts bounds every retry of a task, progress or not
 	// (Task.attempt); 0 means 10 × MaxAttempts.
 	MaxTotalAttempts uint32
-	LeaseTTL         time.Duration
+	// MaxWaits bounds the retries spent waiting for proxy exits
+	// (Task.waits), which count toward neither of the above; 0 means
+	// defaultMaxWaits.
+	MaxWaits uint32
+	LeaseTTL time.Duration
 }
 
 var stageNames = map[taskv1.Kind]string{
@@ -104,6 +109,10 @@ func (w *Worker) Run(ctx context.Context, t *taskv1.Task) error {
 		next := out.Next
 		after, _, afterErr := d.Ckpt.Load(ctx, t.LineageId, t.Seq)
 		next.Stalls = stallsAfter(t.Stalls, beforeErr == nil && afterErr == nil && advanced(before, after), out.Waiting)
+		if out.Waiting {
+			// The exits' doing, not the task's: counted apart.
+			next.Attempt, next.Waits = t.Attempt, t.Waits+1
+		}
 		if reason := w.exhausted(next); reason != "" {
 			metrics.Tasks.WithLabelValues(name, lane, "failed").Inc()
 			slog.Warn("task failed after retries", "stage", name, "job", t.JobId, "task", t.TaskId,
@@ -176,6 +185,9 @@ func stallsAfter(prev uint32, progressed, waiting bool) uint32 {
 	return prev + 1
 }
 
+// defaultMaxWaits is crawler.max_waits when unset: 4 hours of 30s waits.
+const defaultMaxWaits = 480
+
 // exhausted returns the dead-letter reason for a task about to be retried,
 // or "" while it may retry.
 func (w *Worker) exhausted(next *taskv1.Task) string {
@@ -188,6 +200,8 @@ func (w *Worker) exhausted(next *taskv1.Task) string {
 		return "max_attempts"
 	case next.Attempt >= total:
 		return "max_total_attempts"
+	case next.Waits >= cmp.Or(w.MaxWaits, defaultMaxWaits):
+		return "max_waits"
 	}
 	return ""
 }

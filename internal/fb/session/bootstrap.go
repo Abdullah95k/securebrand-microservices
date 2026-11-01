@@ -9,6 +9,7 @@ import (
 
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/detect"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/htmlx"
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/proxy"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/transport"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/metrics"
 )
@@ -54,7 +55,26 @@ type Loader struct {
 	// Browser, when set, bootstraps identities whose HTML carries no
 	// tokens (fb.browser).
 	Browser BrowserFallback
+	// Gate, when set, paces page loads per exit (proxy.Pool): every page
+	// load takes a slot from it, except a new identity's first one, which
+	// was reserved when its exit was chosen.
+	Gate PageGate
 }
+
+// PageGate paces page loads per exit.
+type PageGate interface {
+	// PageLoad takes a slot for a page load on ep's exit, or says why
+	// not: "paced" (the interval) or "backoff" (after a walled one).
+	PageLoad(ep proxy.Endpoint) (ok bool, why string)
+}
+
+// ErrPaced means the identity's exit may not load a page now: it paces
+// its page loads. ErrExitPaused (which wraps it) means it backs off after
+// a walled page load, for 15 minutes or more.
+var (
+	ErrPaced      = errors.New("session: page loads paced on this exit")
+	ErrExitPaused = fmt.Errorf("%w (backing off after a walled page load)", ErrPaced)
+)
 
 // NavHeaders are Chrome's top-level navigation headers, in wire order.
 func NavHeaders(fp Fingerprint, acceptLanguage, secFetchSite string) [][2]string {
@@ -79,6 +99,20 @@ func NavHeaders(fp Fingerprint, acceptLanguage, secFetchSite string) [][2]string
 // accepts the cookie-consent wall if shown, and installs the tokens found in
 // the HTML on id.
 func (l *Loader) Load(ctx context.Context, id *Identity, rawURL string) (*PageLoad, error) {
+	if l.Gate != nil && !id.TakeReservation() {
+		if ok, why := l.Gate.PageLoad(id.Endpoint); !ok {
+			if !id.Bootstrapped() {
+				// Without tokens the identity is good for nothing but a page
+				// load on its exit, which can't load one now: retire it, so
+				// the next task gets a fresh identity on an exit that can.
+				id.markRetired("paced")
+			}
+			if why == "backoff" {
+				return nil, ErrExitPaused
+			}
+			return nil, ErrPaced
+		}
+	}
 	target := rawURL
 	site := "none"
 	var total int64
