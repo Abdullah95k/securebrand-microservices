@@ -147,22 +147,32 @@ func (j *Janitor) delete(ctx context.Context, mediaID string, reason fbv1.Delete
 			return err
 		}
 	}
-	status := "deleted"
-	if reason == fbv1.DeleteReason_DELETE_REASON_TTL_EXPIRED {
-		status = "expired"
-	}
-	if _, err := j.DB.Exec(ctx, `UPDATE media SET status = $2, deleted_at = now(),
-		processed_at = CASE WHEN $2 = 'deleted' THEN now() ELSE processed_at END WHERE media_id = $1`, mediaID, status); err != nil {
-		return err
-	}
+	// The event goes out before the row changes: a failure in between
+	// leaves the row as it was, and the retry (redelivery, next sweep)
+	// removes the object again (a no-op) and sends the event.
 	name := strings.ToLower(strings.TrimPrefix(reason.String(), "DELETE_REASON_"))
-	metrics.MediaDeleted.WithLabelValues(name).Inc()
 	b := j.Producer.NewBatch()
 	if err := b.AddProto(ctx, topics.MediaDeleted, mediaID, &fbv1.MediaDeleted{EventId: mediaID + ":" + name, MediaId: mediaID,
 		Object: &fbv1.S3Object{Bucket: deref(bucket), Key: deref(key)}, Reason: reason, DeletedAt: timestamppb.Now()}); err != nil {
 		return err
 	}
-	return b.Wait(ctx)
+	if err := b.Wait(ctx); err != nil {
+		return err
+	}
+	status := "deleted"
+	if reason == fbv1.DeleteReason_DELETE_REASON_TTL_EXPIRED {
+		status = "expired"
+	}
+	tag, err := j.DB.Exec(ctx, `UPDATE media SET status = $2, deleted_at = now(),
+		processed_at = CASE WHEN $2 = 'deleted' THEN now() ELSE processed_at END WHERE media_id = $1 AND status IN ('stored','ready')`,
+		mediaID, status)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() > 0 {
+		metrics.MediaDeleted.WithLabelValues(name).Inc()
+	}
+	return nil
 }
 
 // Sweep deletes ready objects past delete_after (no ack in time).

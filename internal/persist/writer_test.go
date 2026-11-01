@@ -2,6 +2,7 @@ package persist
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	fbv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fb/v1"
+	"github.com/abdullah95k/securebrand-microservices/internal/gdpr"
 	"github.com/abdullah95k/securebrand-microservices/internal/store"
 	"github.com/abdullah95k/securebrand-microservices/internal/testenv"
 	"github.com/abdullah95k/securebrand-microservices/internal/topics"
@@ -493,5 +495,102 @@ func TestCommentsPastRetentionAreNotWritten(t *testing.T) {
 	rows.Close()
 	if len(ids) != 1 || ids[0] != 2 {
 		t.Fatalf("comments stored: %v, want only the recent post's", ids)
+	}
+}
+
+// A vanity moves to the page that holds it now, instead of failing the
+// unique index; a record that breaks a constraint (a post without its
+// observation has no content hash) is skipped like a refused value; and a
+// record that doesn't decode is not written as far as it decoded.
+func TestRecordsThatBreakConstraints(t *testing.T) {
+	db := testenv.Postgres(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := store.EnsurePartitionFor(ctx, db, "posts", now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	w := &Writer{DB: db}
+	if err := w.Pages(ctx, []*fbv1.Page{{Obs: obs(now.Add(-time.Hour), "a"), PageId: 1, Vanity: "acme", Name: "A"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Pages(ctx, []*fbv1.Page{{Obs: obs(now, "b"), PageId: 2, Vanity: "Acme", Name: "B"}}); err != nil {
+		t.Fatalf("a page taking another page's vanity: %v", err)
+	}
+	var holder int64
+	if err := db.QueryRow(ctx, `SELECT page_id FROM pages WHERE lower(vanity) = 'acme'`).Scan(&holder); err != nil || holder != 2 {
+		t.Fatalf("vanity held by %d (%v), want page 2", holder, err)
+	}
+
+	c := &Consumer{w: w, prefix: "t."}
+	created := timestamppb.New(now.Add(-time.Hour))
+	rec := func(m proto.Message) *kgo.Record {
+		b, err := proto.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &kgo.Record{Topic: "t." + topics.Post, Value: b}
+	}
+	truncated := rec(&fbv1.Post{Obs: obs(now, "t"), PostId: 7, PageId: 9, CreatedAt: created, Text: "a text cut short in transit"})
+	truncated.Value = truncated.Value[:len(truncated.Value)-5]
+	recs := []*kgo.Record{
+		rec(&fbv1.Post{PostId: 5, PageId: 9, CreatedAt: created, Text: "no observation"}),
+		rec(&fbv1.Post{Obs: obs(now, "k"), PostId: 6, PageId: 9, CreatedAt: created, Text: "kept"}),
+		truncated,
+	}
+	if err := c.flushSkipping(ctx, recs); err != nil {
+		t.Fatalf("flushSkipping: %v", err)
+	}
+	var ids []int64
+	rows, _ := db.Query(ctx, `SELECT post_id FROM posts ORDER BY 1`)
+	for rows.Next() {
+		var id int64
+		_ = rows.Scan(&id)
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if len(ids) != 1 || ids[0] != 6 {
+		t.Fatalf("posts stored: %v, want only the decodable one with its observation", ids)
+	}
+}
+
+// Mentions of an erased author in comments and posts written after the
+// erasure (crawlers learn of it up to a minute late) are cleared; other
+// people's stay.
+func TestErasedAuthorsMentionsAreNotWritten(t *testing.T) {
+	db := testenv.Postgres(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, table := range []string{"posts", "comments"} {
+		if err := store.EnsurePartitionFor(ctx, db, table, now.Add(-time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	key := []byte("secret")
+	if _, err := db.Exec(ctx, `INSERT INTO suppression (subject_type, subject_key) VALUES ('author', $1)`,
+		hex.EncodeToString(gdpr.AuthorKey(key, "100001"))); err != nil {
+		t.Fatal(err)
+	}
+	mentions := func() []*fbv1.TextRange {
+		return []*fbv1.TextRange{{EntityType: "User", EntityId: "100001", Name: "Erased", Url: "u1"},
+			{EntityType: "User", EntityId: "100002", Name: "Kept", Url: "u2"}}
+	}
+	w := &Writer{DB: db, HMACKey: key}
+	created := timestamppb.New(now.Add(-time.Hour))
+	if err := w.Posts(ctx, []*fbv1.Post{{Obs: obs(now, "p"), PostId: 1, PageId: 9, CreatedAt: created, TextRanges: mentions()}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Comments(ctx, []*fbv1.Comment{{Obs: obs(now, "c"), CommentId: 2, PostId: 1, PageId: 9, PostCreatedAt: created,
+		Text: "Erased Kept", TextRanges: mentions(), Author: &fbv1.Author{Id: "100003", AuthorKey: gdpr.AuthorKey(key, "100003")}}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"posts", "comments"} {
+		var erased, kept string
+		if err := db.QueryRow(ctx, `SELECT coalesce(text_ranges->0->>'entity_id', '') || coalesce(text_ranges->0->>'name', ''),
+			text_ranges->1->>'entity_id' FROM `+table).Scan(&erased, &kept); err != nil {
+			t.Fatal(err)
+		}
+		if erased != "" || kept != "100002" {
+			t.Errorf("%s: erased mention %q, other %q", table, erased, kept)
+		}
 	}
 }

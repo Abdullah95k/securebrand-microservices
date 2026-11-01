@@ -34,7 +34,8 @@ func main() {
 		os.Exit(1)
 	}
 	c, err := persist.NewConsumer(kcfg, &persist.Writer{DB: db,
-		CommentsRetention: time.Duration(cfg.Privacy.Retention.CommentsDays) * 24 * time.Hour}, 2000, 250*time.Millisecond)
+		CommentsRetention: time.Duration(cfg.Privacy.Retention.CommentsDays) * 24 * time.Hour,
+		HMACKey:           []byte(cfg.Privacy.AuthorHMACKey)}, 2000, 250*time.Millisecond)
 	if err != nil {
 		slog.Error("kafka", "err", err)
 		os.Exit(1)

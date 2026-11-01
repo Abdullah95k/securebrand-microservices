@@ -200,7 +200,13 @@ func (e *Eraser) process(ctx context.Context, r request) (map[string]int64, erro
 				{"post_index", `DELETE FROM post_index WHERE page_id = $1`},
 				{"page_snapshots", `DELETE FROM page_snapshots WHERE page_id = $1`},
 				{"crawl_cursors", `DELETE FROM crawl_cursors WHERE scope_type = 'page_timeline' AND scope_id = $1`},
-				{"schedule", `UPDATE page_schedule SET enabled = false WHERE page_id = $1`},
+				// Every schedule of the page, also one registered by its
+				// vanity before its id was known; and jobs keep its id, not
+				// its vanity. Both read the vanity before "pages" clears it.
+				{"schedule", `UPDATE page_schedule SET enabled = false WHERE page_id = $1 OR page_ref = 'id:' || $1::bigint::text
+					OR page_ref = (SELECT 'v:' || lower(vanity) FROM pages WHERE page_id = $1)`},
+				{"jobs", `UPDATE jobs SET page_ref = 'id:' || $1::bigint::text WHERE page_ref <> 'id:' || $1::bigint::text
+					AND (page_id = $1 OR page_ref = (SELECT 'v:' || lower(vanity) FROM pages WHERE page_id = $1))`},
 				{"pages", `UPDATE pages SET status = 'suppressed', vanity = NULL, url = NULL, name = NULL, categories = NULL,
 					intro = NULL, followers_count = NULL, likes_count = NULL, profile_pic_url = NULL, cover_url = NULL,
 					contact = NULL, extra = NULL WHERE page_id = $1`},
@@ -269,6 +275,9 @@ func (e *Eraser) deleteMedia(ctx context.Context, where string, args ...any) (in
 	if err != nil {
 		return 0, err
 	}
+	// Objects first, then the events, then the rows: until the events are
+	// out, the rows stay stored or ready, so a retried erasure finds them
+	// again and sends the events it couldn't.
 	b := e.Producer.NewBatch()
 	for _, o := range objs {
 		if e.S3 != nil {
@@ -276,16 +285,20 @@ func (e *Eraser) deleteMedia(ctx context.Context, where string, args ...any) (in
 				return 0, err
 			}
 		}
-		if _, err := e.DB.Exec(ctx, `UPDATE media SET status = 'deleted', deleted_at = now() WHERE media_id = $1`, o.id); err != nil {
+		if err := b.AddProto(ctx, topics.MediaDeleted, o.id, &fbv1.MediaDeleted{EventId: o.id + ":erasure", MediaId: o.id,
+			Object: &fbv1.S3Object{Bucket: o.bucket, Key: o.key}, Reason: fbv1.DeleteReason_DELETE_REASON_ERASURE,
+			DeletedAt: timestamppb.Now()}); err != nil {
 			return 0, err
 		}
-		_ = b.AddProto(ctx, topics.MediaDeleted, o.id, &fbv1.MediaDeleted{EventId: o.id + ":erasure", MediaId: o.id,
-			Object: &fbv1.S3Object{Bucket: o.bucket, Key: o.key}, Reason: fbv1.DeleteReason_DELETE_REASON_ERASURE, DeletedAt: timestamppb.Now()})
-		metrics.MediaDeleted.WithLabelValues("erasure").Inc()
 	}
-	if _, err := e.DB.Exec(ctx, `UPDATE media SET status = 'deleted', deleted_at = now(), source_url = NULL WHERE `+where+
-		` AND status NOT IN ('deleted')`, args...); err != nil {
+	if err := b.Wait(ctx); err != nil {
 		return 0, err
 	}
-	return int64(len(objs)), b.Wait(ctx)
+	metrics.MediaDeleted.WithLabelValues("erasure").Add(float64(len(objs)))
+	// Every matching row, stored or not, keeps no URL or description.
+	if _, err := e.DB.Exec(ctx, `UPDATE media SET status = 'deleted', deleted_at = coalesce(deleted_at, now()), source_url = NULL,
+		alt_text = NULL WHERE `+where, args...); err != nil {
+		return 0, err
+	}
+	return int64(len(objs)), nil
 }

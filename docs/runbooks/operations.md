@@ -165,12 +165,16 @@ Symptom: `fbs_parse_total{outcome="drift"}` (alert `FbsSchemaDrift`), or a field
 * `fbs_media_deleted_total{reason="ttl_expired"}` rising: the analysis service
   is not acking in time. Fix the consumer or raise `media.ttl`.
 * `fbs_media_download_total{outcome="expired"}` rising: downloads lag behind
-  discovery; scale `media-downloader`.
+  discovery; scale `media-downloader`. Such media is `source_expired`, and is
+  downloaded when a later scrape brings a fresh URL.
 * A downloaded object is `stored` until its `fb.media.ready.v1` event is
   acknowledged by Kafka, then `ready`; a record redelivered in between sends
-  the event without downloading again. Rows never downloaded (variants the
-  video policy leaves out, jobs without media) are purged after
-  `privacy.retention.media_rows_days`, with the other finished rows.
+  the event without downloading again. Rows never handed over (variants the
+  video policy leaves out, jobs without media, failed or expired downloads)
+  are purged after `privacy.retention.media_rows_days`. Rows of media handed
+  over (`deleted`, `expired`) stay then, as the record that it was, so a later
+  scrape doesn't download and announce it again; they lose the URL, the alt
+  text, the comment and the author key.
 
 ## Erasure requests
 
