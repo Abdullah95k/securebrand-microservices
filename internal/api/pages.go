@@ -238,6 +238,21 @@ func (s *Server) updatePage(w http.ResponseWriter, r *http.Request) {
 		problem(w, http.StatusBadRequest, "invalid body", err.Error())
 		return
 	}
+	// The schedule is shared by every client registered to the page: only
+	// a registered client (or an admin) may change it.
+	c := clientFrom(r.Context())
+	if !c.Has(ScopeAdmin) {
+		var mine bool
+		if err := s.DB.QueryRow(r.Context(), `SELECT EXISTS (SELECT 1 FROM page_registrations WHERE api_client_id = $1 AND page_ref = $2)`,
+			c.ID, ref).Scan(&mine); err != nil {
+			serverError(w, err)
+			return
+		}
+		if !mine {
+			problem(w, http.StatusNotFound, "not registered", "page is not registered")
+			return
+		}
+	}
 	var interval *int
 	if req.IntervalHours != nil {
 		if *req.IntervalHours < 1 || *req.IntervalHours > 720 {
@@ -276,6 +291,11 @@ func (s *Server) deletePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c := clientFrom(r.Context())
+	purge := boolParam(r, "purge")
+	if purge && !c.Has(ScopeAdmin) {
+		problem(w, http.StatusForbidden, "forbidden", "purge requires the admin scope")
+		return
+	}
 	if _, err := s.DB.Exec(r.Context(), `DELETE FROM page_registrations WHERE api_client_id = $1 AND page_ref = $2`, c.ID, ref); err != nil {
 		serverError(w, err)
 		return
@@ -286,11 +306,7 @@ func (s *Server) deletePage(w http.ResponseWriter, r *http.Request) {
 		serverError(w, err)
 		return
 	}
-	if boolParam(r, "purge") {
-		if !c.Has(ScopeAdmin) {
-			problem(w, http.StatusForbidden, "forbidden", "purge requires the admin scope")
-			return
-		}
+	if purge {
 		id, ok := s.Dispatch.ResolvePageID(r.Context(), ref)
 		if !ok {
 			problem(w, http.StatusNotFound, "unknown page", "page id unknown")

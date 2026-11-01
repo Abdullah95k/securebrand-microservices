@@ -3,11 +3,13 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	taskv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fbs/task/v1"
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/task"
@@ -133,14 +135,35 @@ func (s *Server) jobID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool)
 	return id, true
 }
 
-func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
+// ownJob loads job id if the caller may see it: its creator, a client
+// registered to the page of a scheduled job, or an admin. Any other job is
+// reported as not found.
+func (s *Server) ownJob(w http.ResponseWriter, r *http.Request) (*dispatch.Job, bool) {
 	id, ok := s.jobID(w, r)
 	if !ok {
-		return
+		return nil, false
 	}
 	j, err := s.Dispatch.Get(r.Context(), id)
 	if err != nil {
 		serverError(w, err)
+		return nil, false
+	}
+	if c := clientFrom(r.Context()); !c.Has(ScopeAdmin) {
+		ok, err := s.Dispatch.VisibleTo(r.Context(), id, c.ID)
+		if err == nil && !ok {
+			err = pgx.ErrNoRows // someone else's job reads as missing
+		}
+		if err != nil {
+			serverError(w, err)
+			return nil, false
+		}
+	}
+	return j, true
+}
+
+func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
+	j, ok := s.ownJob(w, r)
+	if !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, j)
@@ -178,10 +201,11 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.jobID(w, r)
+	j, ok := s.ownJob(w, r)
 	if !ok {
 		return
 	}
+	id := j.ID
 	if err := s.Dispatch.Cancel(r.Context(), id); err != nil {
 		serverError(w, err)
 		return
@@ -193,13 +217,8 @@ func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) {
 // then posts seen during the job, each followed by its comments when
 // include=comments.
 func (s *Server) jobResults(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.jobID(w, r)
+	j, ok := s.ownJob(w, r)
 	if !ok {
-		return
-	}
-	j, err := s.Dispatch.Get(r.Context(), id)
-	if err != nil {
-		serverError(w, err)
 		return
 	}
 	if j.PageID == nil {
@@ -218,22 +237,53 @@ func (s *Server) jobResults(w http.ResponseWriter, r *http.Request) {
 	if p, err := s.pageByID(r.Context(), *j.PageID); err == nil {
 		_ = enc.Encode(map[string]any{"type": "page", "page": p})
 	}
-	posts, err := s.queryPosts(r.Context(), *j.PageID, j.CreatedAt.Add(-time.Minute), time.Time{}, nil, 100000, true)
-	if err != nil {
-		serverError(w, err)
-		return
+	// Posts and comments are read and written in batches, so a large page
+	// streams instead of filling memory. The last line says whether the
+	// stream is whole: {"type":"end"}, or {"type":"error"} after a failure.
+	const batch = 500
+	fail := func(err error) {
+		slog.Error("api: job results", "job", j.ID, "err", err)
+		_ = enc.Encode(map[string]any{"type": "error", "error": "the results stopped early; retry the request"})
 	}
-	for _, p := range posts {
-		_ = enc.Encode(map[string]any{"type": "post", "post": p})
-		if withComments {
-			cs, err := s.queryComments(r.Context(), p.PostID, p.CreatedAt, nil, nil, "", nil, 1_000_000, pii)
-			if err != nil {
-				return
-			}
-			for _, c := range cs {
-				_ = enc.Encode(map[string]any{"type": "comment", "comment": c})
-			}
+	var cur *cursorPos
+	for {
+		posts, err := s.queryPosts(r.Context(), *j.PageID, j.CreatedAt.Add(-time.Minute), time.Time{}, cur, batch, true, "")
+		if err != nil {
+			fail(err)
+			return
 		}
-		flush()
+		for _, p := range posts {
+			scrubPost(&p, pii)
+			_ = enc.Encode(map[string]any{"type": "post", "post": p})
+			if withComments {
+				var ccur *cursorPos
+				for {
+					cs, err := s.queryComments(r.Context(), p.PostID, p.CreatedAt, nil, nil, "", ccur, batch, pii)
+					if err != nil {
+						fail(err)
+						return
+					}
+					for _, c := range cs {
+						_ = enc.Encode(map[string]any{"type": "comment", "comment": c})
+					}
+					if len(cs) < batch {
+						break
+					}
+					last := cs[len(cs)-1]
+					ts := time.Unix(0, 0).UTC() // an undated comment sorts as 'epoch'
+					if last.CreatedAt != nil {
+						ts = *last.CreatedAt
+					}
+					ccur = &cursorPos{T: ts, ID: last.CommentID}
+				}
+			}
+			flush()
+		}
+		if len(posts) < batch {
+			break
+		}
+		last := posts[len(posts)-1]
+		cur = &cursorPos{T: last.CreatedAt, ID: last.PostID}
 	}
+	_ = enc.Encode(map[string]any{"type": "end"})
 }

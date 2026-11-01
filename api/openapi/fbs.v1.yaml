@@ -39,7 +39,7 @@ paths:
             Retry-After: {schema: {type: integer}}
           content: {application/problem+json: {schema: {$ref: '#/components/schemas/Problem'}}}
     get:
-      summary: List jobs (own jobs; all jobs with admin)
+      summary: List jobs (own jobs and the scheduled jobs of registered pages; all jobs with admin)
       parameters:
         - {in: query, name: page, schema: {type: string}, description: Filter by page (URL, vanity or id)}
         - {in: query, name: status, schema: {$ref: '#/components/schemas/JobStatus'}}
@@ -72,7 +72,11 @@ paths:
   /jobs/{id}/results:
     get:
       summary: Stream the job's data as NDJSON
-      description: One `{"type":"page"}` line, then one `{"type":"post"}` line per post seen during the job, each followed by its `{"type":"comment"}` lines when `include=comments`.
+      description: >-
+        One `{"type":"page"}` line, then one `{"type":"post"}` line per post seen during the job, each
+        followed by its `{"type":"comment"}` lines when `include=comments`. The last line is
+        `{"type":"end"}` when the stream is whole, or `{"type":"error"}` when it stopped early: a client
+        that sees neither lost the connection. Only the job's creator, a client registered to the page of a scheduled job, or an admin can read it.
       parameters:
         - {$ref: '#/components/parameters/JobID'}
         - {in: query, name: include, schema: {type: string, enum: [comments]}}

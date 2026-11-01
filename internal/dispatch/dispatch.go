@@ -312,7 +312,7 @@ func (d *Dispatcher) List(ctx context.Context, client *uuid.UUID, pageRef, statu
 	args := []any{before}
 	if client != nil {
 		args = append(args, *client)
-		q += fmt.Sprintf(" AND api_client_id = $%d", len(args))
+		q += " AND " + visibleTo(len(args))
 	}
 	if pageRef != "" {
 		args = append(args, pageRef)
@@ -329,6 +329,22 @@ func (d *Dispatcher) List(ctx context.Context, client *uuid.UUID, pageRef, statu
 		return nil, err
 	}
 	return pgx.CollectRows(rows, scanJob)
+}
+
+// visibleTo is the condition on a jobs row that the client in parameter n
+// may see it: the client made the job, or it is a scheduled job of a page
+// the client registered.
+func visibleTo(n int) string {
+	return fmt.Sprintf(`(api_client_id = $%[1]d OR (api_client_id IS NULL AND EXISTS (
+		SELECT 1 FROM page_registrations r JOIN page_schedule s ON s.page_ref = r.page_ref
+		WHERE r.api_client_id = $%[1]d AND (s.page_ref = jobs.page_ref OR s.page_id = jobs.page_id))))`, n)
+}
+
+// VisibleTo reports whether client may see job id (see visibleTo).
+func (d *Dispatcher) VisibleTo(ctx context.Context, id, client uuid.UUID) (bool, error) {
+	var ok bool
+	err := d.DB.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM jobs WHERE job_id = $1 AND `+visibleTo(2)+`)`, id, client).Scan(&ok)
+	return ok, err
 }
 
 // Cancel flags a running job.

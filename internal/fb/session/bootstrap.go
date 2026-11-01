@@ -99,6 +99,13 @@ func NavHeaders(fp Fingerprint, acceptLanguage, secFetchSite string) [][2]string
 // accepts the cookie-consent wall if shown, and installs the tokens found in
 // the HTML on id.
 func (l *Loader) Load(ctx context.Context, id *Identity, rawURL string) (*PageLoad, error) {
+	if id.Base != nil {
+		// Only Facebook's own pages: a page reference must never turn into
+		// a request to another host through the proxies.
+		if u, err := url.Parse(rawURL); err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") || !sameSite(id.Base, u) {
+			return nil, fmt.Errorf("session: refusing to load a page outside %s", id.Base.Host)
+		}
+	}
 	if l.Gate != nil && !id.TakeReservation() {
 		if ok, why := l.Gate.PageLoad(id.Endpoint); !ok {
 			if !id.Bootstrapped() {

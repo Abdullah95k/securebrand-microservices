@@ -2,6 +2,7 @@ package persist
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	fbv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fb/v1"
+	"github.com/abdullah95k/securebrand-microservices/internal/gdpr"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/metrics"
 	"github.com/abdullah95k/securebrand-microservices/internal/store"
 )
@@ -20,6 +22,51 @@ import (
 // Writer performs batched upserts.
 type Writer struct {
 	DB *pgxpool.Pool
+}
+
+// suppression is the subset of the given authors and pages that an
+// erasure suppressed. The crawlers drop suppressed data too, but only from
+// their last reload of the list: data crawled before it and still in flight
+// is caught here, so it never lands after the erasure.
+type suppression struct {
+	authors map[string]bool // hex author key
+	pages   map[int64]bool
+}
+
+func (w *Writer) suppressed(ctx context.Context, authorKeys [][]byte, pageIDs []int64) (suppression, error) {
+	sup := suppression{authors: map[string]bool{}, pages: map[int64]bool{}}
+	authors := make([]string, 0, len(authorKeys))
+	for _, k := range authorKeys {
+		if len(k) > 0 {
+			authors = append(authors, hex.EncodeToString(k))
+		}
+	}
+	pages := make([]string, 0, len(pageIDs))
+	for _, id := range pageIDs {
+		pages = append(pages, strconv.FormatInt(id, 10))
+	}
+	rows, err := w.DB.Query(ctx, `SELECT subject_type, subject_key FROM suppression
+		WHERE (subject_type = 'author' AND subject_key = ANY($1)) OR (subject_type = 'page' AND subject_key = ANY($2))`, authors, pages)
+	if err != nil {
+		return sup, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var typ, key string
+		if err := rows.Scan(&typ, &key); err != nil {
+			return sup, err
+		}
+		if typ == "author" {
+			sup.authors[key] = true
+		} else if id, err := strconv.ParseInt(key, 10, 64); err == nil {
+			sup.pages[id] = true
+		}
+	}
+	return sup, rows.Err()
+}
+
+func (s suppression) author(key []byte) bool {
+	return len(key) > 0 && s.authors[hex.EncodeToString(key)]
 }
 
 // latest keeps the most recently observed message per key.
@@ -75,14 +122,28 @@ func (w *Writer) Posts(ctx context.Context, posts []*fbv1.Post) error {
 		return nil
 	}
 	start := time.Now()
-	rows := make([][]any, len(posts))
-	var months []time.Time
+	pageIDs := make([]int64, len(posts))
 	for i, p := range posts {
-		rows[i] = postRow(p)
+		pageIDs[i] = p.PageId
+	}
+	sup, err := w.suppressed(ctx, nil, pageIDs)
+	if err != nil {
+		return err
+	}
+	rows := make([][]any, 0, len(posts))
+	var months []time.Time
+	for _, p := range posts {
+		if sup.pages[p.PageId] {
+			continue
+		}
+		rows = append(rows, postRow(p))
 		months = append(months, p.CreatedAt.AsTime())
 	}
+	if len(rows) == 0 {
+		return nil
+	}
 	var written int64
-	err := w.withPartitions(ctx, "posts", months, func() error {
+	err = w.withPartitions(ctx, "posts", months, func() error {
 		written = 0
 		return pgx.BeginFunc(ctx, w.DB, func(tx pgx.Tx) error {
 			if err := copyTemp(ctx, tx, "tmp_posts", "posts", postCols, rows); err != nil {
@@ -181,13 +242,27 @@ func (w *Writer) Comments(ctx context.Context, cs []*fbv1.Comment) error {
 		return nil
 	}
 	start := time.Now()
+	keys := make([][]byte, 0, len(cs))
+	pageIDs := make([]int64, 0, len(cs))
+	for _, c := range cs {
+		keys = append(keys, c.GetAuthor().GetAuthorKey())
+		pageIDs = append(pageIDs, c.PageId)
+	}
+	sup, err := w.suppressed(ctx, keys, pageIDs)
+	if err != nil {
+		return err
+	}
 	rows := make([][]any, 0, len(cs))
 	var dels []*fbv1.Comment
 	var months []time.Time
 	authors := map[string][]any{}
 	for _, c := range cs {
-		if c.PostCreatedAt == nil {
+		if c.PostCreatedAt == nil || sup.pages[c.PageId] {
 			continue
+		}
+		if !c.Redacted && sup.author(c.GetAuthor().GetAuthorKey()) {
+			gdpr.Redact(c)
+			metrics.PersistRows.WithLabelValues("comment", "redacted").Inc()
 		}
 		months = append(months, c.PostCreatedAt.AsTime())
 		if c.Status == fbv1.CommentStatus_COMMENT_STATUS_DELETED {
@@ -202,7 +277,7 @@ func (w *Writer) Comments(ctx context.Context, cs []*fbv1.Comment) error {
 		}
 	}
 	var written, edited, restored int64
-	err := w.withPartitions(ctx, "comments", months, func() error {
+	err = w.withPartitions(ctx, "comments", months, func() error {
 		written, edited, restored = 0, 0, 0
 		return pgx.BeginFunc(ctx, w.DB, func(tx pgx.Tx) error {
 			if len(rows) > 0 {
@@ -372,7 +447,8 @@ func (w *Writer) Pages(ctx context.Context, ps []*fbv1.Page) error {
 		err := pgx.BeginFunc(ctx, w.DB, func(tx pgx.Tx) error {
 			if p.Status == fbv1.PageStatus_PAGE_STATUS_UNAVAILABLE {
 				_, err := tx.Exec(ctx, `INSERT INTO pages (page_id, status, last_scraped_at) VALUES ($1, 'unavailable', $2)
-					ON CONFLICT (page_id) DO UPDATE SET status = 'unavailable', last_scraped_at = $2`, p.PageId, seen)
+					ON CONFLICT (page_id) DO UPDATE SET status = 'unavailable', last_scraped_at = $2
+					WHERE pages.status <> 'suppressed'`, p.PageId, seen)
 				return err
 			}
 			vanity := p.Vanity
@@ -402,10 +478,14 @@ func (w *Writer) Pages(ctx context.Context, ps []*fbv1.Page) error {
 					verified = EXCLUDED.verified, profile_pic_url = EXCLUDED.profile_pic_url, cover_url = EXCLUDED.cover_url,
 					contact = EXCLUDED.contact, extra = EXCLUDED.extra, status = 'active',
 					content_hash = EXCLUDED.content_hash, last_scraped_at = EXCLUDED.last_scraped_at
+				WHERE t.status <> 'suppressed'
 				RETURNING old.page_id IS NULL OR old.followers_count IS DISTINCT FROM new.followers_count
 					OR old.likes_count IS DISTINCT FROM new.likes_count OR old.name IS DISTINCT FROM new.name`,
 				p.PageId, vanity, p.Url, p.Name, p.Categories, p.Intro, p.FollowersCount, p.LikesCount, p.Verified,
 				pic, cover, jsonOf(p.Contact), extraJSON(p.ExtraJson), hash, seen).Scan(&changed)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil // an erased page stays erased
+			}
 			if err != nil {
 				return err
 			}
@@ -445,11 +525,26 @@ func (w *Writer) Media(ctx context.Context, ms []*fbv1.Media) error {
 		return nil
 	}
 	start := time.Now()
-	rows := make([][]any, len(ms))
-	for i, m := range ms {
-		rows[i] = mediaRow(m)
+	pageIDs := make([]int64, 0, len(ms))
+	for _, m := range ms {
+		if m.PageId != 0 {
+			pageIDs = append(pageIDs, m.PageId)
+		}
 	}
-	err := pgx.BeginFunc(ctx, w.DB, func(tx pgx.Tx) error {
+	sup, err := w.suppressed(ctx, nil, pageIDs)
+	if err != nil {
+		return err
+	}
+	rows := make([][]any, 0, len(ms))
+	for _, m := range ms {
+		if !sup.pages[m.PageId] {
+			rows = append(rows, mediaRow(m))
+		}
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	err = pgx.BeginFunc(ctx, w.DB, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `CREATE TEMP TABLE tmp_media ON COMMIT DROP AS
 			SELECT `+strings.Join(mediaCols, ",")+` FROM media WITH NO DATA`); err != nil {
 			return err
@@ -463,7 +558,7 @@ func (w *Writer) Media(ctx context.Context, ms []*fbv1.Media) error {
 				source_expires_at = EXCLUDED.source_expires_at, width = COALESCE(EXCLUDED.width, t.width),
 				height = COALESCE(EXCLUDED.height, t.height), duration_ms = COALESCE(EXCLUDED.duration_ms, t.duration_ms),
 				alt_text = COALESCE(EXCLUDED.alt_text, t.alt_text)
-			WHERE t.source_url IS DISTINCT FROM EXCLUDED.source_url`)
+			WHERE t.source_url IS DISTINCT FROM EXCLUDED.source_url AND t.status <> 'deleted'`)
 		return err
 	})
 	if err != nil {

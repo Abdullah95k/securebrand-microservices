@@ -165,8 +165,23 @@ func NormalizeRef(in string) (string, error) {
 	if s == "" {
 		return "", fmt.Errorf("empty page reference")
 	}
-	if strings.HasPrefix(s, "id:") || strings.HasPrefix(s, "v:") {
+	// Already canonical: still check it, since it becomes a URL path.
+	if rest, ok := strings.CutPrefix(s, "id:"); ok {
+		if id, err := strconv.ParseInt(rest, 10, 64); err != nil || id <= 0 {
+			return "", fmt.Errorf("invalid page reference %q", in)
+		}
 		return s, nil
+	}
+	if rest, ok := strings.CutPrefix(s, "v:"); ok {
+		if rest == "" || strings.Trim(rest, ".") == "" {
+			return "", fmt.Errorf("invalid page reference %q", in)
+		}
+		for _, r := range rest {
+			if !validVanityRune(r) {
+				return "", fmt.Errorf("invalid page reference %q", in)
+			}
+		}
+		return "v:" + strings.ToLower(rest), nil
 	}
 	if i := strings.Index(s, "facebook.com/"); i >= 0 {
 		s = s[i+len("facebook.com/"):]
@@ -199,7 +214,7 @@ func NormalizeRef(in string) (string, error) {
 	if j := strings.IndexAny(s, "/?#"); j >= 0 {
 		s = s[:j]
 	}
-	if s == "" {
+	if strings.Trim(s, ".") == "" {
 		return "", fmt.Errorf("invalid page reference %q", in)
 	}
 	if _, err := strconv.ParseInt(s, 10, 64); err == nil {

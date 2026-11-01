@@ -57,6 +57,42 @@ func TestAdaptiveScheduleAndPostRefresh(t *testing.T) {
 	if r := decodeBody[again](t, s.Do(t, key, "POST", "/v1/pages", []byte(fmt.Sprintf(`{"page":%q}`, page.Vanity))), http.StatusCreated); r.Created || r.Backfill != nil {
 		t.Fatalf("second registration: %+v", r)
 	}
+	// Only a client registered to the page may change its schedule, and
+	// only an admin may purge it; a refused purge changes nothing.
+	stranger := s.Key(t, api.ScopePagesWrite)
+	for _, c := range []struct {
+		method, path, body string
+		want               int
+	}{
+		{"PATCH", "/v1/pages/" + page.Vanity, `{"enabled":false}`, http.StatusNotFound},
+		{"DELETE", "/v1/pages/" + page.Vanity + "?purge=true", "", http.StatusForbidden},
+	} {
+		var body []byte
+		if c.body != "" {
+			body = []byte(c.body)
+		}
+		for _, k := range []string{stranger, key} {
+			resp := s.Do(t, k, c.method, c.path, body)
+			_ = resp.Body.Close()
+			if resp.StatusCode != c.want {
+				t.Fatalf("%s %s = %d, want %d", c.method, c.path, resp.StatusCode, c.want)
+			}
+			if c.method == "PATCH" {
+				break // the registered client may; checked below
+			}
+		}
+	}
+	if n := count(t, s, `SELECT count(*) FROM page_registrations WHERE page_ref = $1`, "v:"+page.Vanity); n != 1 {
+		t.Fatalf("a refused purge removed the registration (%d left)", n)
+	}
+	if n := count(t, s, `SELECT count(*) FROM page_schedule WHERE page_id = $1 AND enabled`, page.ID); n != 1 {
+		t.Fatal("a stranger disabled the schedule")
+	}
+	resp := s.Do(t, key, "PATCH", "/v1/pages/"+page.Vanity, []byte(`{"enabled":true}`))
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("the registered client's PATCH = %d", resp.StatusCode)
+	}
 
 	// 8 posts 20h apart: 1.2 posts a day is tier T1, crawled every 3h like
 	// every tier.
@@ -120,6 +156,25 @@ func TestAdaptiveScheduleAndPostRefresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	j := s.waitJob(t, key, jobID, 3*time.Minute)
+	// A scheduled job shows to the clients registered to its page, and to
+	// no other client.
+	type jobList struct {
+		Jobs []jobView `json:"jobs"`
+	}
+	listed := func(k string) bool {
+		for _, v := range decodeBody[jobList](t, s.Do(t, k, "GET", "/v1/jobs?limit=100", nil), http.StatusOK).Jobs {
+			if v.ID == jobID {
+				return true
+			}
+		}
+		return false
+	}
+	outsider := s.Key(t, api.ScopeDataRead)
+	resp = s.Do(t, outsider, "GET", "/v1/jobs/"+jobID, nil)
+	_ = resp.Body.Close()
+	if !listed(key) || listed(outsider) || resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("scheduled job visibility: registered %v, outsider listed %v / read %d", listed(key), listed(outsider), resp.StatusCode)
+	}
 	after := count(t, s, `SELECT count(*) FROM comments WHERE post_id = $1`, target.ID)
 	var refreshes int
 	if err := s.DB.QueryRow(ctx, `SELECT refreshes FROM post_refresh WHERE post_id = $1`, target.ID).Scan(&refreshes); err != nil {

@@ -160,6 +160,38 @@ func TestLoadPagesThatNameNothing(t *testing.T) {
 	}
 }
 
+func TestLoadRefusesOtherSites(t *testing.T) {
+	base, _ := url.Parse("https://www.facebook.com")
+	l := &Loader{Rules: detect.DefaultRules()}
+	for _, raw := range []string{
+		"https://attacker.example/x",
+		"https://facebook.com.attacker.example/x",
+		"https://notfacebook.com/x",
+		"ftp://www.facebook.com/x",
+		"/relative",
+		"://bad",
+	} {
+		id := newIdentity("a", proxy.Endpoint{Tier: "isp"}, Fingerprint{}, failDoer{transport.NewStd(time.Second)}, base, 1000, 10, 0)
+		if _, err := l.Load(context.Background(), id, raw); err == nil || id.RetireReason() != "" {
+			t.Errorf("%s: loaded (err %v, retired %q)", raw, err, id.RetireReason())
+		}
+	}
+	const tokens = `<script>{"define":[["LSD",[],{"token":"AVq"},323]]}</script>`
+	for _, raw := range []string{"https://www.facebook.com/nike", "https://m.facebook.com/nike"} {
+		id := newIdentity("b", proxy.Endpoint{Tier: "isp"}, Fingerprint{}, serves{Doer: transport.NewStd(time.Second), body: tokens}, base, 1000, 10, 0)
+		if _, err := l.Load(context.Background(), id, raw); err != nil {
+			t.Errorf("%s: %v", raw, err)
+		}
+	}
+}
+
+// failDoer fails the test if a request is sent.
+type failDoer struct{ transport.Doer }
+
+func (failDoer) Do(context.Context, *transport.Request) (*transport.Response, error) {
+	panic("a request was sent")
+}
+
 // Walls on page loads pause the exit's page loads but leave its breaker
 // alone, so identities that already have tokens keep serving GraphQL there;
 // GraphQL blocks still open it.

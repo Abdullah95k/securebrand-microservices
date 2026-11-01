@@ -72,6 +72,9 @@ func (e *Emitter) Page(ctx context.Context, b *kafka.Batch, src Source, p *fbv1.
 
 // Post publishes a post and an engagement sample.
 func (e *Emitter) Post(ctx context.Context, b *kafka.Batch, src Source, p *fbv1.Post) error {
+	if e.Pseudonymize {
+		gdpr.ScrubMentions(p.TextRanges)
+	}
 	e.stamp(src, "post:"+strconv.FormatInt(p.PostId, 10), p, func(o *fbv1.Observation) { p.Obs = o })
 	key := strconv.FormatInt(p.PostId, 10)
 	if err := b.AddProto(ctx, topics.Post, key, p); err != nil {
@@ -106,14 +109,15 @@ func (e *Emitter) CommentDeleted(ctx context.Context, b *kafka.Batch, src Source
 // Privatize sets the author key, applies pseudonymisation and redacts
 // suppressed authors. It returns false if the comment was redacted.
 func (e *Emitter) Privatize(c *fbv1.Comment) bool {
+	if e.Pseudonymize {
+		gdpr.ScrubMentions(c.TextRanges)
+	}
 	if c.Author == nil {
 		return true
 	}
 	c.Author.AuthorKey = gdpr.AuthorKey(e.HMACKey, c.Author.Id)
 	if e.Suppression.AuthorSuppressed(c.Author.AuthorKey) {
-		c.Author = &fbv1.Author{AuthorKey: c.Author.AuthorKey}
-		c.Text, c.TextRanges, c.Attachments, c.Url = "", nil, nil, ""
-		c.Redacted = true
+		gdpr.Redact(c)
 		return false
 	}
 	if e.Pseudonymize {

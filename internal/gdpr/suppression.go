@@ -8,12 +8,15 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"log/slog"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	fbv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fb/v1"
 )
 
 // AuthorKey is the stable pseudonymous key of a Facebook author id.
@@ -121,4 +124,56 @@ func (s *Suppression) Run(ctx context.Context, every time.Duration) error {
 			}
 		}
 	}
+}
+
+// Redact strips a comment by a suppressed author down to its ids and the
+// author key, as an erasure leaves the stored row.
+func Redact(c *fbv1.Comment) {
+	c.Author = &fbv1.Author{AuthorKey: c.GetAuthor().GetAuthorKey()}
+	c.Text, c.TextRanges, c.Attachments, c.Url, c.ExtraJson = "", nil, nil, "", ""
+	c.Redacted = true
+}
+
+// nonPersonEntities are the text-range entity types that never name a
+// person. Any other type (User, and types Facebook may add) is treated as
+// a person.
+var nonPersonEntities = map[string]bool{"Hashtag": true, "Page": true, "ExternalUrl": true, "Group": true, "Event": true}
+
+// PersonEntity reports whether a text-range entity type may name a person.
+func PersonEntity(entityType string) bool { return !nonPersonEntities[entityType] }
+
+// ScrubMentions clears the id, profile URL and name of person mentions in
+// text ranges (replies tag the person they answer). The offsets stay, so
+// the text still reads the same.
+func ScrubMentions(rs []*fbv1.TextRange) {
+	for _, r := range rs {
+		if PersonEntity(r.EntityType) {
+			r.EntityId, r.Url, r.Name = "", "", ""
+		}
+	}
+}
+
+// ScrubMentionsJSON is ScrubMentions for text ranges stored as JSON (proto
+// field names). Anything it cannot read comes back as nil.
+func ScrubMentionsJSON(raw []byte) []byte {
+	if len(raw) == 0 {
+		return raw
+	}
+	var rs []map[string]any
+	if err := json.Unmarshal(raw, &rs); err != nil {
+		return nil
+	}
+	for _, r := range rs {
+		t, _ := r["entity_type"].(string)
+		if PersonEntity(t) {
+			delete(r, "entity_id")
+			delete(r, "url")
+			delete(r, "name")
+		}
+	}
+	out, err := json.Marshal(rs)
+	if err != nil {
+		return nil
+	}
+	return out
 }
