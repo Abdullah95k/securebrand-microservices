@@ -142,20 +142,26 @@ type Stage interface {
 	Run(ctx context.Context, t *taskv1.Task) Outcome
 }
 
-// identity acquires an identity for a query class, escalating tiers on
-// retries (cheapest first) and skipping tiers whose exits are all cooling
-// down behind their breakers.
-func (d *Deps) identity(ctx context.Context, class string, attempt uint32) (*session.Identity, error) {
+// identity acquires an identity for a query class, on the tier tierFor
+// picks.
+func (d *Deps) identity(ctx context.Context, class string, stalls uint32) (*session.Identity, error) {
+	return d.Pool.Acquire(ctx, d.tierFor(class, stalls))
+}
+
+// tierFor picks the tier for a task's next attempt: cheapest first,
+// escalating one tier per stall (a retry without progress that the task
+// caused: blocks, walls, errors), and skipping tiers whose exits are all
+// cooling down. Waits for exits are not stalls, so a task waiting for its
+// tier's exits stays on that tier instead of moving to a dearer one.
+func (d *Deps) tierFor(class string, stalls uint32) string {
 	tiers := d.Proxies.TiersFor(class)
-	from := min(int(attempt), len(tiers)-1)
-	tier := tiers[from]
+	from := min(int(stalls), len(tiers)-1)
 	for _, t := range tiers[from:] {
 		if d.Proxies.Available(t) {
-			tier = t
-			break
+			return t
 		}
 	}
-	return d.Pool.Acquire(ctx, tier)
+	return tiers[from]
 }
 
 // ensureBootstrapped loads a page on a fresh identity to obtain tokens.

@@ -40,7 +40,7 @@ func (s *PostStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	if sc == nil {
 		return Outcome{Result: Fail, Reason: "post task without post scope"}
 	}
-	id, err := d.identity(ctx, "comments", t.Attempt)
+	id, err := d.identity(ctx, "comments", t.Stalls)
 	if err != nil {
 		return noIdentity(t, err, c)
 	}
@@ -340,7 +340,7 @@ func (s *ThreadStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	if sc == nil {
 		return Outcome{Result: Fail, Reason: "thread task without thread scope"}
 	}
-	id, err := d.identity(ctx, "replies", t.Attempt)
+	id, err := d.identity(ctx, "replies", t.Stalls)
 	if err != nil {
 		return noIdentity(t, err, c)
 	}

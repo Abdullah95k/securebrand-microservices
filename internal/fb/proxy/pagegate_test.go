@@ -87,6 +87,15 @@ func TestPageLoadWallsBackOffWithoutOpeningTheExit(t *testing.T) {
 	if p.IsOpen(ep) || !p.Available("isp") {
 		t.Fatal("page-load walls must not open the exit")
 	}
+	// With every exit backing off after walls, a new identity waits as long
+	// as for an open breaker (ErrTierOpen), not the short pacing wait.
+	other, _ := p.Next("isp")
+	p.ObservePageLoad(other, detect.LoginWall)
+	p.ObservePageLoad(ep, detect.LoginWall)
+	if _, err := p.Next("isp"); !errors.Is(err, ErrTierOpen) || errors.Is(err, ErrExitsPaced) {
+		t.Fatalf("every exit backing off: %v", err)
+	}
+	c.add(2 * time.Hour)
 	p.ObservePageLoad(ep, detect.OK)
 	p.ObservePageLoad(ep, detect.LoginWall)
 	c.add(15 * time.Minute)

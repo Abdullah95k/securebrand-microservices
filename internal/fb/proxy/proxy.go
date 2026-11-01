@@ -127,21 +127,22 @@ func (p *Pool) TiersFor(class string) []string {
 // Next returns a fresh endpoint from tier for a new identity, skipping
 // buckets whose breaker is open or whose page-load gate is closed: a new
 // identity starts with a page load, which Next reserves. In a half-open
-// bucket the endpoint is the probe. When every closed bucket is only
-// waiting on its gate, the error is ErrExitsPaced.
+// bucket the endpoint is the probe. When an exit is only waiting out its
+// page-load interval the error is ErrExitsPaced (a short wait); when every
+// exit is open or backing off after walls, ErrTierOpen.
 func (p *Pool) Next(tier string) (Endpoint, error) {
 	t, ok := p.tiers[tier]
 	if !ok {
 		return Endpoint{}, fmt.Errorf("proxy: unknown tier %s", tier)
 	}
-	why := ""
+	paced, backoff := false, false
 	ep, err := t.Next(func(b string) bool {
 		if p.breakers.IsOpen(b) {
 			return false
 		}
-		ok, w, restore := p.pages.take(b)
+		ok, why, restore := p.pages.take(b)
 		if !ok {
-			why = w
+			paced, backoff = paced || why == "paced", backoff || why == "backoff"
 			return false
 		}
 		if !p.breakers.Allow(b) {
@@ -150,9 +151,17 @@ func (p *Pool) Next(tier string) (Endpoint, error) {
 		}
 		return true
 	})
-	if errors.Is(err, ErrTierOpen) && why != "" {
-		deferred(tier, why)
-		return Endpoint{}, ErrExitsPaced
+	if errors.Is(err, ErrTierOpen) {
+		switch {
+		case paced:
+			// An exit loads a page again within the interval.
+			deferred(tier, "paced")
+			return Endpoint{}, ErrExitsPaced
+		case backoff:
+			// Every waiting exit backs off after walls (15m and up): as
+			// long a wait as an open breaker.
+			deferred(tier, "backoff")
+		}
 	}
 	return ep, err
 }

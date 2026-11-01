@@ -44,7 +44,7 @@ func (s *PageStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	if sc == nil {
 		return Outcome{Result: Fail, Reason: "page task without page scope"}
 	}
-	id, err := d.identity(ctx, "timeline", t.Attempt)
+	id, err := d.identity(ctx, "timeline", t.Stalls)
 	if err != nil {
 		return noIdentity(t, err, c)
 	}

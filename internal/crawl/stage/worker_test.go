@@ -10,9 +10,11 @@ import (
 	taskv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fbs/task/v1"
 	"github.com/abdullah95k/securebrand-microservices/internal/config"
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/checkpoint"
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/detect"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/htmlx"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/proxy"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/session"
+	"github.com/abdullah95k/securebrand-microservices/internal/platform/breaker"
 )
 
 // Only a saved checkpoint that moved counts as progress.
@@ -173,5 +175,38 @@ func TestReadProfile(t *testing.T) {
 	}
 	if !d.readProfile(first, stale, &session.Identity{Endpoint: ep}, c) {
 		t.Fatal("an identity without tokens loads the page anyway")
+	}
+}
+
+// A task escalates one tier per stall; waits for exits are not stalls, so a
+// waiting task stays on the cheap tier. Tiers whose exits are all cooling
+// down are skipped.
+func TestTierForEscalatesByStalls(t *testing.T) {
+	pool, err := proxy.New(config.Proxy{
+		Tiers: []config.ProxyTier{
+			{Name: "isp", Kind: "static_list", Endpoints: []string{"http://isp.proxy.example:10001"}},
+			{Name: "res", Kind: "gateway", Gateway: "http://gw.example:7777", Country: "us"},
+		},
+		Routing: map[string][]string{"default": {"isp", "res"}},
+		Breaker: breaker.Config{MinEvents: 2, OpenRate: 0.5, Cooldown: time.Hour},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Deps{Proxies: pool}
+	if got := d.tierFor("comments", 0); got != "isp" {
+		t.Fatalf("no stalls: %s", got)
+	}
+	if got := d.tierFor("comments", 1); got != "res" {
+		t.Fatalf("one stall: %s", got)
+	}
+	if got := d.tierFor("comments", 9); got != "res" {
+		t.Fatalf("past the last tier: %s", got)
+	}
+	ep := proxy.Endpoint{Tier: "isp", Bucket: "isp|isp.proxy.example:10001"}
+	pool.Observe(ep, detect.RateLimited)
+	pool.Observe(ep, detect.RateLimited)
+	if got := d.tierFor("comments", 0); got != "res" {
+		t.Fatalf("isp cooling down: %s", got)
 	}
 }
