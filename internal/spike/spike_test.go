@@ -3,8 +3,10 @@ package spike
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,5 +79,37 @@ func TestSamplePosts(t *testing.T) {
 	}
 	if got := ids(SamplePosts(posts, 2, 0)); fmt.Sprint(got) != "[5000 900]" {
 		t.Fatal(got)
+	}
+}
+
+// max_pages means stopped with more to read: a timeline whose last page
+// falls exactly on the limit ended.
+func TestMaxPagesOnlyWithMoreToRead(t *testing.T) {
+	timeline := func(limit int) Record {
+		t.Helper()
+		r, env, out := runner(t, fakefb.Faults{})
+		r.Opt.Orderings, r.Opt.MediaSamples, r.Opt.PostsPerPage = []string{"comments"}, 0, 0
+		if limit > 0 {
+			r.Opt.MaxTimelinePages = limit
+		}
+		r.Run(context.Background(), []PageRef{{Ref: env.World.Pages()[0].Vanity}})
+		for _, line := range strings.Split(out.String(), "\n") {
+			var rec Record
+			if json.Unmarshal([]byte(line), &rec) == nil && rec.Type == "timeline" {
+				return rec
+			}
+		}
+		t.Fatal("no timeline record")
+		return Record{}
+	}
+	whole := timeline(0)
+	if whole.EndReason != "end" || whole.PagesRead < 2 {
+		t.Fatalf("unlimited read: %+v", whole)
+	}
+	if exact := timeline(whole.PagesRead); exact.EndReason != "end" {
+		t.Fatalf("limit = its length: %q, want end", exact.EndReason)
+	}
+	if short := timeline(whole.PagesRead - 1); short.EndReason != "max_pages" {
+		t.Fatalf("limit one page short: %q, want max_pages", short.EndReason)
 	}
 }

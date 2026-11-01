@@ -95,6 +95,10 @@ type Record struct {
 	// Capped means the spike's own limits (--comment-pages,
 	// --threads-per-post) stopped the measurement, not Facebook.
 	Capped bool `json:"capped,omitempty"`
+	// ThreadEnd is why a reply thread of the post stopped early (wall,
+	// error, blocked:<class>, drift): the post was not read whole, whatever
+	// the ordering.
+	ThreadEnd string `json:"thread_end,omitempty"`
 
 	ExpiresInH float64  `json:"expires_in_h,omitempty"`
 	MissingOpt []string `json:"missing_optional,omitempty"`
@@ -266,7 +270,7 @@ func (r *Runner) page(ctx context.Context, p PageRef) error {
 	// Timeline depth.
 	var posts []*parse.PostBundle
 	var cursors []string
-	cursor, pagesRead, end := "", 0, "end"
+	cursor, pagesRead, end, more := "", 0, "end", false
 	var newest, oldest time.Time
 	for pagesRead < r.Opt.MaxTimelinePages {
 		vars := map[string]any{"page_id": strconv.FormatInt(pageID, 10), "count": 10}
@@ -307,13 +311,16 @@ func (r *Runner) page(ctx context.Context, p PageRef) error {
 				oldest = c
 			}
 		}
-		if !tl.PageInfo.HasNext || tl.PageInfo.EndCursor == "" {
+		more = tl.PageInfo.HasNext && tl.PageInfo.EndCursor != ""
+		if !more {
 			break
 		}
 		cursor = tl.PageInfo.EndCursor
 		cursors = append(cursors, cursor)
 	}
-	if pagesRead == r.Opt.MaxTimelinePages {
+	// Stopped by the page limit with more to read; any other end keeps its
+	// reason (a drift on the last allowed page is still a drift).
+	if end == "end" && more {
 		end = "max_pages"
 	}
 	days := 0.0
@@ -384,7 +391,7 @@ func (r *Runner) comments(ctx context.Context, ref string, id *session.Identity,
 	seen := map[int64]bool{}
 	top, replies := 0, 0
 	var threads []parse.ThreadRef
-	cursor, pages, end := "", 0, "end"
+	cursor, pages, end, more := "", 0, "end", false
 	for pages < r.Opt.MaxCommentPages {
 		vars := map[string]any{"feedback_id": feedbackID}
 		if cursor != "" {
@@ -420,17 +427,19 @@ func (r *Runner) comments(ctx context.Context, ref string, id *session.Identity,
 			}
 		}
 		threads = append(threads, res.Threads...)
-		if !res.PageInfo.HasNext || res.PageInfo.EndCursor == "" {
+		more = res.PageInfo.HasNext && res.PageInfo.EndCursor != ""
+		if !more {
 			break
 		}
 		cursor = res.PageInfo.EndCursor
 	}
-	if pages == r.Opt.MaxCommentPages {
+	if end == "end" && more {
 		end = "max_pages"
 	}
 	// Follow reply threads (nested ones included) up to ThreadsPerPost.
-	capped := pages == r.Opt.MaxCommentPages
-	for followed := 0; len(threads) > 0; followed++ {
+	capped := end == "max_pages"
+	threadEnd := ""
+	for followed := 0; len(threads) > 0 && threadEnd == ""; followed++ {
 		if followed >= r.Opt.ThreadsPerPost {
 			capped = true
 			break
@@ -448,11 +457,23 @@ func (r *Runner) comments(ctx context.Context, ref string, id *session.Identity,
 				vars["cursor"] = c
 			}
 			resp, err := r.do(ctx, ref, id, graphql.Request{Query: "replies", Vars: vars})
-			if err != nil || resp.Class != detect.OK {
+			switch {
+			case err != nil:
+				threadEnd = "error"
+			case resp.Class == detect.LoginWall:
+				threadEnd = "wall"
+			case resp.Class != detect.OK:
+				threadEnd = "blocked:" + resp.Class.String()
+			}
+			if threadEnd != "" {
 				break
 			}
-			res, _ := parse.Comments(resp.Parts, parse.CommentContext{PostID: postID, PageID: pageID,
+			res, rep := parse.Comments(resp.Parts, parse.CommentContext{PostID: postID, PageID: pageID,
 				BaseDepth: th.Depth + 1, ParentCommentID: th.CommentID, RootCommentID: th.RootCommentID, Replies: true})
+			if !rep.OK() {
+				threadEnd = "drift"
+				break
+			}
 			for _, x := range res.Comments {
 				if !seen[x.Comment.CommentId] {
 					seen[x.Comment.CommentId] = true
@@ -467,7 +488,7 @@ func (r *Runner) comments(ctx context.Context, ref string, id *session.Identity,
 		}
 	}
 	r.emit(Record{Type: "comments", Page: ref, PostID: postID, Ordering: ordering, Reported: reported,
-		TopLevel: top, Replies: replies, Collected: len(seen), EndReason: end, PagesRead: pages, Capped: capped})
+		TopLevel: top, Replies: replies, Collected: len(seen), EndReason: end, PagesRead: pages, Capped: capped, ThreadEnd: threadEnd})
 }
 
 func (r *Runner) media(ctx context.Context, ref, rawURL string, expires time.Time) {

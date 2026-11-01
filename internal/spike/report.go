@@ -165,7 +165,37 @@ func readRecords(ins ...io.Reader) ([]Record, error) {
 			return nil, err
 		}
 	}
-	return out, nil
+	return latestAttempts(out), nil
+}
+
+// latestAttempts keeps, of each page, the records of its last attempt, and
+// only if that attempt finished (page_done). A page interrupted by shutdown
+// leaves records of requests the shutdown cut (transport errors, failed
+// loads) and is measured again on resume: its earlier records would count
+// it twice and the interruption as blocks. Records written before pages
+// were recorded (no "page" record) are all kept.
+func latestAttempts(recs []Record) []Record {
+	type key struct{ tier, page string }
+	start := map[key]int{} // index of the page's last "page" record
+	done := map[key]bool{} // a page_done after it
+	for i, r := range recs {
+		k := key{r.Tier, r.Page}
+		switch r.Type {
+		case "page":
+			start[k], done[k] = i, false
+		case "page_done":
+			done[k] = true
+		}
+	}
+	out := recs[:0:0]
+	for i, r := range recs {
+		k := key{r.Tier, r.Page}
+		if s, ok := start[k]; ok && r.Page != "" && (i < s || !done[k]) {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 // Report aggregates every record into one summary, whatever its tier.
@@ -337,13 +367,15 @@ func summarize(tier string, recs []Record, opt ReportOptions) Summary {
 				ratio = math.Min(1, float64(r.Collected)/float64(r.Reported))
 			}
 			allRatios[r.Ordering] = append(allRatios[r.Ordering], ratio)
-			if r.Capped {
+			// A post not read whole, by the limits or a reply thread that
+			// stopped early, says nothing about the ordering.
+			if r.Capped || r.ThreadEnd != "" {
 				capped[r.Ordering]++
 			} else {
 				ratios[r.Ordering] = append(ratios[r.Ordering], ratio)
 				a.ratiosByOrdering[r.Ordering] = append(a.ratiosByOrdering[r.Ordering], ratio)
 			}
-			if r.EndReason == "wall" {
+			if r.EndReason == "wall" || r.ThreadEnd == "wall" {
 				walls[r.Ordering]++
 			}
 		case "portability":
@@ -438,12 +470,21 @@ func summarize(tier string, recs []Record, opt ReportOptions) Summary {
 	check(CheckBootstrap, s.BootstrapSuccess >= th.MinBootstrapSuccess,
 		fmt.Sprintf("HTTP bootstrap success %.2f >= %.2f", s.BootstrapSuccess, th.MinBootstrapSuccess))
 	check(CheckBlockRate, s.BlockRate < th.MaxBlockRate, fmt.Sprintf("block rate %.3f < %.3f", s.BlockRate, th.MaxBlockRate))
+	// A shallow median passes only if every timeline really ended (no next
+	// page, or no feed at all): one stopped by a wall, a block, an error, a
+	// drift or the page limit says nothing about older posts.
+	ended := true
+	for reason, n := range s.TimelineEnd {
+		if n > 0 && reason != "end" && reason != "no_feed" && reason != "unavailable" {
+			ended = false
+		}
+	}
 	depthMsg := fmt.Sprintf("median timeline depth %.0f days >= %.0f", s.MedianDays, th.MinMedianDays)
-	if s.MedianDays < th.MinMedianDays && s.TimelineEnd["wall"] == 0 {
-		depthMsg = fmt.Sprintf("timeline depth: median %.0f days, below %.0f, but no timeline hit a login wall: the pages have no older posts",
+	if s.MedianDays < th.MinMedianDays && ended {
+		depthMsg = fmt.Sprintf("timeline depth: median %.0f days, below %.0f, but every timeline reached its end: the pages have no older posts",
 			s.MedianDays, th.MinMedianDays)
 	}
-	check(CheckDepth, s.MedianDays >= th.MinMedianDays || s.TimelineEnd["wall"] == 0, depthMsg)
+	check(CheckDepth, s.MedianDays >= th.MinMedianDays || ended, depthMsg)
 
 	s.Strata = strata(pages, s.BestOrdering)
 	return s

@@ -1,9 +1,13 @@
 package fixtures
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf16"
@@ -96,19 +100,21 @@ func TestScrubReplacesWholeIDsOnly(t *testing.T) {
 // Signed URLs are found however they are escaped or quoted, and nothing
 // after them is lost.
 func TestScrubSignedURLContexts(t *testing.T) {
+	// File names become pseudonyms (they are the object's ids).
+	a, b := pseudo("a.jpg", "file")+".jpg", pseudo("b.jpg", "file")+".jpg"
 	for _, tc := range []struct{ name, in, want string }{
 		{"json in a js string",
 			`"{\"u\":\"https:\\\/\\\/scontent.xx.fbcdn.net\\\/v\\\/b.jpg?oh=SECRET\\u0026oe=1\"}"`,
-			`"{\"u\":\"https://scontent.xx.fbcdn.net/scrubbed/b.jpg\"}"`},
+			`"{\"u\":\"https://scontent.xx.fbcdn.net/scrubbed/` + b + `\"}"`},
 		{"unquoted attribute",
 			`<img src=https://scontent.xx.fbcdn.net/v/a.jpg?oh=SECRET&oe=2><b>x</b>`,
-			`<img src=https://scontent.xx.fbcdn.net/scrubbed/a.jpg><b>x</b>`},
+			`<img src=https://scontent.xx.fbcdn.net/scrubbed/` + a + `><b>x</b>`},
 		{"entity-encoded json",
 			`<i data-store="{&quot;src&quot;:&quot;https:\/\/scontent.xx.fbcdn.net\/a.jpg?oh=SECRET&amp;oe=1&quot;}">`,
-			`<i data-store="{&quot;src&quot;:&quot;https://scontent.xx.fbcdn.net/scrubbed/a.jpg&quot;}">`},
+			`<i data-store="{&quot;src&quot;:&quot;https://scontent.xx.fbcdn.net/scrubbed/` + a + `&quot;}">`},
 		{"single quotes",
 			`f('https://scontent.xx.fbcdn.net/a.jpg?_nc_cat=1&oh=SECRET')`,
-			`f('https://scontent.xx.fbcdn.net/scrubbed/a.jpg')`},
+			`f('https://scontent.xx.fbcdn.net/scrubbed/` + a + `')`},
 	} {
 		if got := string(Scrub([]byte(tc.in), nil)); got != tc.want {
 			t.Errorf("%s:\n got %s\nwant %s", tc.name, got, tc.want)
@@ -222,7 +228,7 @@ func TestScrubDirRescrubsOlderVersions(t *testing.T) {
 		t.Fatalf("not scrubbed again: %s", once)
 	}
 	meta, _ := os.ReadFile(filepath.Join(dir, "meta.json"))
-	if !strings.Contains(string(meta), `"__scrubber": 3`) {
+	if !strings.Contains(string(meta), fmt.Sprintf(`"__scrubber": %d`, scrubVersion)) {
 		t.Fatalf("meta: %s", meta)
 	}
 	if err := ScrubDir(dir, nil); err != nil {
@@ -300,5 +306,29 @@ func TestScrubCommentBodies(t *testing.T) {
 	}
 	if !strings.Contains(out, `"text":"Photos"`) {
 		t.Errorf("UI text lost: %s", out)
+	}
+}
+
+// Pseudonyms are keyed with a secret of the run: the same person gets the
+// same one within a run, and nobody can hash a known id to find it.
+func TestPseudonymsAreKeyed(t *testing.T) {
+	const id = "100055512345678"
+	h := sha256.Sum256([]byte("id" + id))
+	unkeyed := strconv.FormatUint(binary.BigEndian.Uint64(h[:8])%9_000_000_000_000+100_000_000_000, 10)
+	if got := pseudo(id, "id"); got == unkeyed || got != pseudo(id, "id") {
+		t.Fatalf("pseudo(%s) = %s (unkeyed %s)", id, got, unkeyed)
+	}
+}
+
+// In script that isn't JSON, what people wrote, captions and profile links
+// (slashes escaped or not, any host) are scrubbed too.
+func TestScrubScriptThatIsNotJSON(t *testing.T) {
+	in := `<html><script>require("X",{"text":"my secret comment","accessibility_caption":"Photo of Jane Doe",` +
+		`"url":"https:\/\/www.facebook.com\/jane.doe\"","m":"https://m.facebook.com/profile.php?id=100055512345678?x"});</script></html>`
+	out := string(Scrub([]byte(in), nil))
+	for _, leak := range []string{"my secret comment", "Jane Doe", "jane.doe", "100055512345678"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("%q left in %s", leak, out)
+		}
 	}
 }

@@ -44,6 +44,12 @@ func TestFormatProjects(t *testing.T) {
 	if out := Format(r, Projection{}); !strings.Contains(out, "over 2.0 days): 160 requests") {
 		t.Fatalf("clamped span:\n%s", out)
 	}
+	// A report run after the pilot stopped: the steady state ends with the
+	// last scheduled job, not spread over the idle hours since.
+	r.Until, r.SteadyUntil = since.Add(5*24*time.Hour), since.Add(48*time.Hour)
+	if d := r.SteadyDays(); d != 2 {
+		t.Fatalf("steady days after the pilot stopped: %v, want 2", d)
+	}
 	if !strings.Contains(Format(Report{Since: since, Until: since.Add(time.Hour)}, Projection{}), "no scheduled jobs yet") {
 		t.Fatal("an empty pilot says why")
 	}
