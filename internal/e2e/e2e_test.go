@@ -197,6 +197,29 @@ func TestEndToEnd(t *testing.T) {
 	if ev.Status != fbv1.JobStatus_JOB_STATUS_COMPLETED || ev.Completeness.GetCommentsCollected() != int64(wantComments) {
 		t.Fatalf("job event = %+v", &ev)
 	}
+	// Comment media carry their author's key, so an erasure can find them
+	// still in flight.
+	mc, _ := kgo.NewClient(kgo.SeedBrokers(s.Cfg.Kafka.Brokers...), kgo.ConsumeTopics(s.Producer.Topic(topics.Media)),
+		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()))
+	defer mc.Close()
+	var commentMedia, keyed int
+	waitFor(t, "comment media", 20*time.Second, func() bool {
+		pctx, cancel := context.WithTimeout(ctx, time.Second)
+		defer cancel()
+		for _, r := range mc.PollFetches(pctx).Records() {
+			var m fbv1.Media
+			if proto.Unmarshal(r.Value, &m) == nil && m.OwnerType == "comment" {
+				commentMedia++
+				if len(m.AuthorKey) == 32 {
+					keyed++
+				}
+			}
+		}
+		return commentMedia > 0
+	})
+	if keyed != commentMedia {
+		t.Fatalf("%d of %d comment media carry an author key", keyed, commentMedia)
+	}
 
 	// 3. API reads; author identity only with pii:read.
 	type postsResp struct {

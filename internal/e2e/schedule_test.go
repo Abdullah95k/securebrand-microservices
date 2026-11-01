@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strconv"
 	"testing"
 	"time"
 
@@ -88,10 +89,14 @@ func TestAdaptiveScheduleAndPostRefresh(t *testing.T) {
 	if n := count(t, s, `SELECT count(*) FROM page_schedule WHERE page_id = $1 AND enabled`, page.ID); n != 1 {
 		t.Fatal("a stranger disabled the schedule")
 	}
-	resp := s.Do(t, key, "PATCH", "/v1/pages/"+page.Vanity, []byte(`{"enabled":true}`))
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("the registered client's PATCH = %d", resp.StatusCode)
+	// The registered client may, by vanity or by page id.
+	var resp *http.Response
+	for _, ref := range []string{page.Vanity, "id:" + strconv.FormatInt(page.ID, 10)} {
+		resp = s.Do(t, key, "PATCH", "/v1/pages/"+ref, []byte(`{"enabled":true}`))
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("the registered client's PATCH %s = %d", ref, resp.StatusCode)
+		}
 	}
 
 	// 8 posts 20h apart: 1.2 posts a day is tier T1, crawled every 3h like
@@ -174,6 +179,21 @@ func TestAdaptiveScheduleAndPostRefresh(t *testing.T) {
 	_ = resp.Body.Close()
 	if !listed(key) || listed(outsider) || resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("scheduled job visibility: registered %v, outsider listed %v / read %d", listed(key), listed(outsider), resp.StatusCode)
+	}
+	// Every registered client shares a scheduled job: none of them alone may
+	// cancel it, even while it runs.
+	var status string
+	if err := s.DB.QueryRow(ctx, `UPDATE jobs SET status = 'running' WHERE job_id = $1 RETURNING (SELECT status FROM jobs WHERE job_id = $1)`,
+		jobID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	resp = s.Do(t, key, "POST", "/v1/jobs/"+jobID+"/cancel", nil)
+	_ = resp.Body.Close()
+	if n := count(t, s, `SELECT count(*) FROM jobs WHERE job_id = $1 AND status = 'running'`, jobID); resp.StatusCode != http.StatusNotFound || n != 1 {
+		t.Fatalf("a registered client cancelling a scheduled job = %d (still running: %d)", resp.StatusCode, n)
+	}
+	if _, err := s.DB.Exec(ctx, `UPDATE jobs SET status = $2 WHERE job_id = $1`, jobID, status); err != nil {
+		t.Fatal(err)
 	}
 	after := count(t, s, `SELECT count(*) FROM comments WHERE post_id = $1`, target.ID)
 	var refreshes int

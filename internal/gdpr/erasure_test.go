@@ -99,3 +99,54 @@ func TestErasureRetries(t *testing.T) {
 		t.Fatalf("after the last attempt: %s, %d", s, n)
 	}
 }
+
+// A writer's Guard waits for an erasure that holds the lock, and then sees
+// its suppression entry: it can't check before the erasure commits and
+// write after.
+func TestGuardWaitsForErasure(t *testing.T) {
+	db := testenv.Postgres(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	erasure, err := db.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = erasure.Rollback(ctx) }()
+	if err := lockExclusive(ctx, erasure); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := erasure.Exec(ctx, `INSERT INTO suppression (subject_type, subject_key) VALUES ('author', 'abcd'), ('page', '7')`); err != nil {
+		t.Fatal(err)
+	}
+
+	type result struct {
+		author, page bool
+		err          error
+	}
+	got := make(chan result, 1)
+	go func() {
+		writer, err := db.Begin(ctx)
+		if err != nil {
+			got <- result{err: err}
+			return
+		}
+		defer func() { _ = writer.Rollback(ctx) }()
+		sup, err := Guard(ctx, writer, [][]byte{{0xab, 0xcd}}, []int64{7})
+		if err != nil {
+			got <- result{err: err}
+			return
+		}
+		got <- result{author: sup.AuthorSuppressed([]byte{0xab, 0xcd}), page: sup.PageSuppressed(7)}
+	}()
+	select {
+	case r := <-got:
+		t.Fatalf("the writer did not wait for the erasure: %+v", r)
+	case <-time.After(500 * time.Millisecond):
+	}
+	if err := erasure.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if r := <-got; r.err != nil || !r.author || !r.page {
+		t.Fatalf("after the erasure: %+v", r)
+	}
+}

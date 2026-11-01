@@ -9,7 +9,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 
 	taskv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fbs/task/v1"
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/task"
@@ -135,34 +134,28 @@ func (s *Server) jobID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool)
 	return id, true
 }
 
-// ownJob loads job id if the caller may see it: its creator, a client
-// registered to the page of a scheduled job, or an admin. Any other job is
-// reported as not found.
-func (s *Server) ownJob(w http.ResponseWriter, r *http.Request) (*dispatch.Job, bool) {
+// ownJob loads job id if the caller may access it as asked (see
+// dispatch.Access); admins may do anything. Any other job is reported as
+// not found.
+func (s *Server) ownJob(w http.ResponseWriter, r *http.Request, a dispatch.Access) (*dispatch.Job, bool) {
 	id, ok := s.jobID(w, r)
 	if !ok {
 		return nil, false
 	}
-	j, err := s.Dispatch.Get(r.Context(), id)
+	var client *uuid.UUID
+	if c := clientFrom(r.Context()); !c.Has(ScopeAdmin) {
+		client = &c.ID
+	}
+	j, err := s.Dispatch.GetFor(r.Context(), id, client, a)
 	if err != nil {
 		serverError(w, err)
 		return nil, false
-	}
-	if c := clientFrom(r.Context()); !c.Has(ScopeAdmin) {
-		ok, err := s.Dispatch.VisibleTo(r.Context(), id, c.ID)
-		if err == nil && !ok {
-			err = pgx.ErrNoRows // someone else's job reads as missing
-		}
-		if err != nil {
-			serverError(w, err)
-			return nil, false
-		}
 	}
 	return j, true
 }
 
 func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
-	j, ok := s.ownJob(w, r)
+	j, ok := s.ownJob(w, r, dispatch.Read)
 	if !ok {
 		return
 	}
@@ -201,7 +194,7 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) {
-	j, ok := s.ownJob(w, r)
+	j, ok := s.ownJob(w, r, dispatch.Write)
 	if !ok {
 		return
 	}
@@ -217,7 +210,7 @@ func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) {
 // then posts seen during the job, each followed by its comments when
 // include=comments.
 func (s *Server) jobResults(w http.ResponseWriter, r *http.Request) {
-	j, ok := s.ownJob(w, r)
+	j, ok := s.ownJob(w, r, dispatch.Read)
 	if !ok {
 		return
 	}
@@ -229,13 +222,26 @@ func (s *Server) jobResults(w http.ResponseWriter, r *http.Request) {
 	pii := clientFrom(r.Context()).Has(ScopePIIRead)
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	enc := json.NewEncoder(w)
-	flush := func() {
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
+	// The stream has no overall timeout, but each post (with its comments)
+	// must reach the client within the request timeout: one that stops
+	// reading is cut off instead of holding the handler forever.
+	rc := http.NewResponseController(w)
+	timeout := s.requestTimeout()
+	broken := false
+	send := func(v any) bool {
+		if !broken && enc.Encode(v) != nil {
+			broken = true
 		}
+		return !broken
 	}
+	next := func() bool {
+		_ = rc.Flush()
+		_ = rc.SetWriteDeadline(time.Now().Add(timeout))
+		return !broken && r.Context().Err() == nil
+	}
+	next()
 	if p, err := s.pageByID(r.Context(), *j.PageID); err == nil {
-		_ = enc.Encode(map[string]any{"type": "page", "page": p})
+		send(map[string]any{"type": "page", "page": p})
 	}
 	// Posts and comments are read and written in batches, so a large page
 	// streams instead of filling memory. The last line says whether the
@@ -243,7 +249,7 @@ func (s *Server) jobResults(w http.ResponseWriter, r *http.Request) {
 	const batch = 500
 	fail := func(err error) {
 		slog.Error("api: job results", "job", j.ID, "err", err)
-		_ = enc.Encode(map[string]any{"type": "error", "error": "the results stopped early; retry the request"})
+		send(map[string]any{"type": "error", "error": "the results stopped early; retry the request"})
 	}
 	var cur *cursorPos
 	for {
@@ -253,8 +259,11 @@ func (s *Server) jobResults(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for _, p := range posts {
+			if !next() {
+				return
+			}
 			scrubPost(&p, pii)
-			_ = enc.Encode(map[string]any{"type": "post", "post": p})
+			send(map[string]any{"type": "post", "post": p})
 			if withComments {
 				var ccur *cursorPos
 				for {
@@ -264,9 +273,9 @@ func (s *Server) jobResults(w http.ResponseWriter, r *http.Request) {
 						return
 					}
 					for _, c := range cs {
-						_ = enc.Encode(map[string]any{"type": "comment", "comment": c})
+						send(map[string]any{"type": "comment", "comment": c})
 					}
-					if len(cs) < batch {
+					if len(cs) < batch || !next() {
 						break
 					}
 					last := cs[len(cs)-1]
@@ -277,7 +286,6 @@ func (s *Server) jobResults(w http.ResponseWriter, r *http.Request) {
 					ccur = &cursorPos{T: ts, ID: last.CommentID}
 				}
 			}
-			flush()
 		}
 		if len(posts) < batch {
 			break
@@ -285,5 +293,5 @@ func (s *Server) jobResults(w http.ResponseWriter, r *http.Request) {
 		last := posts[len(posts)-1]
 		cur = &cursorPos{T: last.CreatedAt, ID: last.PostID}
 	}
-	_ = enc.Encode(map[string]any{"type": "end"})
+	send(map[string]any{"type": "end"})
 }

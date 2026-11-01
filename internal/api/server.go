@@ -44,10 +44,7 @@ func (s *Server) Handler() http.Handler {
 	}
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID, middleware.Recoverer, requestLog)
-	timeout := s.Cfg.HTTP.WriteTimeout
-	if timeout <= 0 {
-		timeout = 60 * time.Second
-	}
+	timeout := s.requestTimeout()
 	r.Route("/v1", func(r chi.Router) {
 		r.Use(auth.middleware)
 		// Results stream for as long as the job's data takes; every other
@@ -59,6 +56,14 @@ func (s *Server) Handler() http.Handler {
 		})
 	})
 	return r
+}
+
+// requestTimeout bounds an API request (http.write_timeout, 60s if unset).
+func (s *Server) requestTimeout() time.Duration {
+	if s.Cfg != nil && s.Cfg.HTTP.WriteTimeout > 0 {
+		return s.Cfg.HTTP.WriteTimeout
+	}
+	return 60 * time.Second
 }
 
 // routes are the API routes under the request timeout.
@@ -96,6 +101,9 @@ type statusWriter struct {
 }
 
 func (w *statusWriter) WriteHeader(c int) { w.code = c; w.ResponseWriter.WriteHeader(c) }
+
+// Unwrap lets http.ResponseController reach the connection's deadlines.
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 func (w *statusWriter) Flush() {
 	if f, ok := w.ResponseWriter.(http.Flusher); ok {

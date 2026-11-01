@@ -64,7 +64,7 @@ paths:
         "404": {$ref: '#/components/responses/Problem'}
   /jobs/{id}/cancel:
     post:
-      summary: Cancel a running job
+      summary: Cancel a running job (its creator or an admin; a scheduled job only an admin)
       parameters: [{$ref: '#/components/parameters/JobID'}]
       responses:
         "202": {description: Cancelling}

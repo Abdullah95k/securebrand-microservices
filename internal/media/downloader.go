@@ -25,6 +25,7 @@ import (
 
 	fbv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fb/v1"
 	taskv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fbs/task/v1"
+	"github.com/abdullah95k/securebrand-microservices/internal/gdpr"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/kafka"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/metrics"
 	"github.com/abdullah95k/securebrand-microservices/internal/topics"
@@ -95,6 +96,14 @@ func (d *Downloader) Handle(ctx context.Context, rec *kgo.Record) error {
 		metrics.MediaOutcome.WithLabelValues(kind, "skipped").Inc()
 		return nil
 	}
+	// Media of an erased page or author is never downloaded (checked again
+	// under the erasure lock when stored).
+	if sup, err := gdpr.Lookup(ctx, d.DB, [][]byte{m.AuthorKey}, []int64{m.PageId}); err != nil {
+		return err
+	} else if sup.PageSuppressed(m.PageId) || sup.AuthorSuppressed(m.AuthorKey) {
+		metrics.MediaOutcome.WithLabelValues(kind, "suppressed").Inc()
+		return nil
+	}
 	if exp := m.SourceExpiresAt; exp != nil && exp.AsTime().Before(time.Now()) {
 		return d.markFailed(ctx, m, "expired", "source url expired before download")
 	}
@@ -115,7 +124,16 @@ func (d *Downloader) Handle(ctx context.Context, rec *kgo.Record) error {
 	}
 	now := time.Now().UTC()
 	deleteAfter := now.Add(d.TTL)
-	_, err = d.DB.Exec(ctx, `
+	var suppressed bool
+	err = pgx.BeginFunc(ctx, d.DB, func(tx pgx.Tx) error {
+		sup, err := gdpr.Guard(ctx, tx, [][]byte{m.AuthorKey}, []int64{m.PageId})
+		if err != nil {
+			return err
+		}
+		if suppressed = sup.PageSuppressed(m.PageId) || sup.AuthorSuppressed(m.AuthorKey); suppressed {
+			return nil
+		}
+		_, err = tx.Exec(ctx, `
 		INSERT INTO media (media_id, fb_media_id, variant, kind, owner_type, owner_id, post_id, page_id, comment_id, source_url,
 			width, height, duration_ms, mime, alt_text, status, s3_bucket, s3_key, size_bytes, sha256, attempts,
 			delete_after, stored_at, ready_at)
@@ -123,10 +141,20 @@ func (d *Downloader) Handle(ctx context.Context, rec *kgo.Record) error {
 		ON CONFLICT (media_id) DO UPDATE SET status = 'ready', s3_bucket = EXCLUDED.s3_bucket, s3_key = EXCLUDED.s3_key,
 			size_bytes = EXCLUDED.size_bytes, sha256 = EXCLUDED.sha256, mime = EXCLUDED.mime, attempts = media.attempts + 1,
 			delete_after = EXCLUDED.delete_after, stored_at = EXCLUDED.stored_at, ready_at = EXCLUDED.ready_at, last_error = NULL`,
-		m.MediaId, m.FbMediaId, m.Variant, kind, m.OwnerType, nz(m.OwnerId), nz(m.PostId), nz(m.PageId), m.CommentId, m.SourceUrl,
-		m.Width, m.Height, m.DurationMs, obj.ContentType, m.AltText, obj.Bucket, obj.Key, obj.Size, obj.Sha256, deleteAfter, now)
+			m.MediaId, m.FbMediaId, m.Variant, kind, m.OwnerType, nz(m.OwnerId), nz(m.PostId), nz(m.PageId), m.CommentId, m.SourceUrl,
+			m.Width, m.Height, m.DurationMs, obj.ContentType, m.AltText, obj.Bucket, obj.Key, obj.Size, obj.Sha256, deleteAfter, now)
+		return err
+	})
 	if err != nil {
 		return err
+	}
+	if suppressed {
+		// Erased while it downloaded: the object must not stay.
+		if err := d.S3.RemoveObject(ctx, obj.Bucket, obj.Key, minio.RemoveObjectOptions{}); err != nil {
+			return err
+		}
+		metrics.MediaOutcome.WithLabelValues(kind, "suppressed").Inc()
+		return nil
 	}
 	ready := &fbv1.MediaReady{
 		EventId: m.MediaId + ":ready:1", MediaId: m.MediaId, FbMediaId: m.FbMediaId, Kind: m.Kind, Variant: m.Variant,

@@ -2,7 +2,6 @@ package persist
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"strconv"
@@ -22,51 +21,6 @@ import (
 // Writer performs batched upserts.
 type Writer struct {
 	DB *pgxpool.Pool
-}
-
-// suppression is the subset of the given authors and pages that an
-// erasure suppressed. The crawlers drop suppressed data too, but only from
-// their last reload of the list: data crawled before it and still in flight
-// is caught here, so it never lands after the erasure.
-type suppression struct {
-	authors map[string]bool // hex author key
-	pages   map[int64]bool
-}
-
-func (w *Writer) suppressed(ctx context.Context, authorKeys [][]byte, pageIDs []int64) (suppression, error) {
-	sup := suppression{authors: map[string]bool{}, pages: map[int64]bool{}}
-	authors := make([]string, 0, len(authorKeys))
-	for _, k := range authorKeys {
-		if len(k) > 0 {
-			authors = append(authors, hex.EncodeToString(k))
-		}
-	}
-	pages := make([]string, 0, len(pageIDs))
-	for _, id := range pageIDs {
-		pages = append(pages, strconv.FormatInt(id, 10))
-	}
-	rows, err := w.DB.Query(ctx, `SELECT subject_type, subject_key FROM suppression
-		WHERE (subject_type = 'author' AND subject_key = ANY($1)) OR (subject_type = 'page' AND subject_key = ANY($2))`, authors, pages)
-	if err != nil {
-		return sup, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var typ, key string
-		if err := rows.Scan(&typ, &key); err != nil {
-			return sup, err
-		}
-		if typ == "author" {
-			sup.authors[key] = true
-		} else if id, err := strconv.ParseInt(key, 10, 64); err == nil {
-			sup.pages[id] = true
-		}
-	}
-	return sup, rows.Err()
-}
-
-func (s suppression) author(key []byte) bool {
-	return len(key) > 0 && s.authors[hex.EncodeToString(key)]
 }
 
 // latest keeps the most recently observed message per key.
@@ -123,29 +77,28 @@ func (w *Writer) Posts(ctx context.Context, posts []*fbv1.Post) error {
 	}
 	start := time.Now()
 	pageIDs := make([]int64, len(posts))
+	months := make([]time.Time, len(posts))
 	for i, p := range posts {
-		pageIDs[i] = p.PageId
-	}
-	sup, err := w.suppressed(ctx, nil, pageIDs)
-	if err != nil {
-		return err
-	}
-	rows := make([][]any, 0, len(posts))
-	var months []time.Time
-	for _, p := range posts {
-		if sup.pages[p.PageId] {
-			continue
-		}
-		rows = append(rows, postRow(p))
-		months = append(months, p.CreatedAt.AsTime())
-	}
-	if len(rows) == 0 {
-		return nil
+		pageIDs[i], months[i] = p.PageId, p.CreatedAt.AsTime()
 	}
 	var written int64
-	err = w.withPartitions(ctx, "posts", months, func() error {
+	err := w.withPartitions(ctx, "posts", months, func() error {
 		written = 0
 		return pgx.BeginFunc(ctx, w.DB, func(tx pgx.Tx) error {
+			// Posts of an erased page still in flight are dropped.
+			sup, err := gdpr.Guard(ctx, tx, nil, pageIDs)
+			if err != nil {
+				return err
+			}
+			rows := make([][]any, 0, len(posts))
+			for _, p := range posts {
+				if !sup.PageSuppressed(p.PageId) {
+					rows = append(rows, postRow(p))
+				}
+			}
+			if len(rows) == 0 {
+				return nil
+			}
 			if err := copyTemp(ctx, tx, "tmp_posts", "posts", postCols, rows); err != nil {
 				return err
 			}
@@ -244,42 +197,46 @@ func (w *Writer) Comments(ctx context.Context, cs []*fbv1.Comment) error {
 	start := time.Now()
 	keys := make([][]byte, 0, len(cs))
 	pageIDs := make([]int64, 0, len(cs))
+	var months []time.Time
 	for _, c := range cs {
 		keys = append(keys, c.GetAuthor().GetAuthorKey())
 		pageIDs = append(pageIDs, c.PageId)
-	}
-	sup, err := w.suppressed(ctx, keys, pageIDs)
-	if err != nil {
-		return err
-	}
-	rows := make([][]any, 0, len(cs))
-	var dels []*fbv1.Comment
-	var months []time.Time
-	authors := map[string][]any{}
-	for _, c := range cs {
-		if c.PostCreatedAt == nil || sup.pages[c.PageId] {
-			continue
-		}
-		if !c.Redacted && sup.author(c.GetAuthor().GetAuthorKey()) {
-			gdpr.Redact(c)
-			metrics.PersistRows.WithLabelValues("comment", "redacted").Inc()
-		}
-		months = append(months, c.PostCreatedAt.AsTime())
-		if c.Status == fbv1.CommentStatus_COMMENT_STATUS_DELETED {
-			dels = append(dels, c)
-			continue
-		}
-		rows = append(rows, commentRow(c))
-		if a := c.Author; a != nil && len(a.AuthorKey) > 0 && !c.Redacted {
-			seen := observed(c.Obs)
-			authors[string(a.AuthorKey)] = []any{a.AuthorKey, nilIfEmpty(a.Id), nilIfEmpty(a.Name), nilIfEmpty(a.Url),
-				nilIfEmpty(a.AvatarUrl), nilIfEmpty(a.Type), a.Verified, seen, seen}
+		if c.PostCreatedAt != nil {
+			months = append(months, c.PostCreatedAt.AsTime())
 		}
 	}
-	var written, edited, restored int64
-	err = w.withPartitions(ctx, "comments", months, func() error {
+	var written, edited, restored, upserted int64
+	err := w.withPartitions(ctx, "comments", months, func() error {
 		written, edited, restored = 0, 0, 0
 		return pgx.BeginFunc(ctx, w.DB, func(tx pgx.Tx) error {
+			// Comments of an erased page still in flight are dropped, and an
+			// erased author's are stored redacted, without an author row.
+			sup, err := gdpr.Guard(ctx, tx, keys, pageIDs)
+			if err != nil {
+				return err
+			}
+			rows := make([][]any, 0, len(cs))
+			var dels []*fbv1.Comment
+			authors := map[string][]any{}
+			for _, c := range cs {
+				if c.PostCreatedAt == nil || sup.PageSuppressed(c.PageId) {
+					continue
+				}
+				if !c.Redacted && sup.AuthorSuppressed(c.GetAuthor().GetAuthorKey()) {
+					gdpr.Redact(c)
+				}
+				if c.Status == fbv1.CommentStatus_COMMENT_STATUS_DELETED {
+					dels = append(dels, c)
+					continue
+				}
+				rows = append(rows, commentRow(c))
+				if a := c.Author; a != nil && len(a.AuthorKey) > 0 && !c.Redacted {
+					seen := observed(c.Obs)
+					authors[string(a.AuthorKey)] = []any{a.AuthorKey, nilIfEmpty(a.Id), nilIfEmpty(a.Name), nilIfEmpty(a.Url),
+						nilIfEmpty(a.AvatarUrl), nilIfEmpty(a.Type), a.Verified, seen, seen}
+				}
+			}
+			upserted = int64(len(rows))
 			if len(rows) > 0 {
 				if err := upsertComments(ctx, tx, rows, &written, &edited, &restored); err != nil {
 					return err
@@ -301,7 +258,7 @@ func (w *Writer) Comments(ctx context.Context, cs []*fbv1.Comment) error {
 			if err := copyTemp(ctx, tx, "tmp_authors", "comment_authors", acols, arows); err != nil {
 				return err
 			}
-			_, err := tx.Exec(ctx, `INSERT INTO comment_authors AS a SELECT * FROM tmp_authors
+			_, err = tx.Exec(ctx, `INSERT INTO comment_authors AS a SELECT * FROM tmp_authors
 				ON CONFLICT (author_key) DO UPDATE SET author_id = EXCLUDED.author_id, name = EXCLUDED.name,
 					profile_url = EXCLUDED.profile_url, avatar_url = EXCLUDED.avatar_url,
 					author_type = EXCLUDED.author_type, verified = EXCLUDED.verified,
@@ -315,7 +272,7 @@ func (w *Writer) Comments(ctx context.Context, cs []*fbv1.Comment) error {
 		return fmt.Errorf("persist: comments: %w", err)
 	}
 	metrics.PersistRows.WithLabelValues("comment", "written").Add(float64(written))
-	metrics.PersistRows.WithLabelValues("comment", "unchanged").Add(float64(int64(len(rows)) - written))
+	metrics.PersistRows.WithLabelValues("comment", "unchanged").Add(float64(upserted - written))
 	metrics.CommentChanges.WithLabelValues("edited").Add(float64(edited))
 	metrics.CommentChanges.WithLabelValues("restored").Add(float64(restored))
 	metrics.PersistBatch.WithLabelValues("comment").Observe(time.Since(start).Seconds())
@@ -445,6 +402,10 @@ func (w *Writer) Pages(ctx context.Context, ps []*fbv1.Page) error {
 	for _, p := range ps {
 		seen := observed(p.Obs)
 		err := pgx.BeginFunc(ctx, w.DB, func(tx pgx.Tx) error {
+			// An erased page stays erased, with or without a row yet.
+			if sup, err := gdpr.Guard(ctx, tx, nil, []int64{p.PageId}); err != nil || sup.PageSuppressed(p.PageId) {
+				return err
+			}
 			if p.Status == fbv1.PageStatus_PAGE_STATUS_UNAVAILABLE {
 				_, err := tx.Exec(ctx, `INSERT INTO pages (page_id, status, last_scraped_at) VALUES ($1, 'unavailable', $2)
 					ON CONFLICT (page_id) DO UPDATE SET status = 'unavailable', last_scraped_at = $2
@@ -525,26 +486,26 @@ func (w *Writer) Media(ctx context.Context, ms []*fbv1.Media) error {
 		return nil
 	}
 	start := time.Now()
-	pageIDs := make([]int64, 0, len(ms))
-	for _, m := range ms {
-		if m.PageId != 0 {
-			pageIDs = append(pageIDs, m.PageId)
+	pageIDs := make([]int64, len(ms))
+	keys := make([][]byte, len(ms))
+	for i, m := range ms {
+		pageIDs[i], keys[i] = m.PageId, m.AuthorKey
+	}
+	err := pgx.BeginFunc(ctx, w.DB, func(tx pgx.Tx) error {
+		// Media of an erased page or author still in flight are dropped.
+		sup, err := gdpr.Guard(ctx, tx, keys, pageIDs)
+		if err != nil {
+			return err
 		}
-	}
-	sup, err := w.suppressed(ctx, nil, pageIDs)
-	if err != nil {
-		return err
-	}
-	rows := make([][]any, 0, len(ms))
-	for _, m := range ms {
-		if !sup.pages[m.PageId] {
-			rows = append(rows, mediaRow(m))
+		rows := make([][]any, 0, len(ms))
+		for _, m := range ms {
+			if !sup.PageSuppressed(m.PageId) && !sup.AuthorSuppressed(m.AuthorKey) {
+				rows = append(rows, mediaRow(m))
+			}
 		}
-	}
-	if len(rows) == 0 {
-		return nil
-	}
-	err = pgx.BeginFunc(ctx, w.DB, func(tx pgx.Tx) error {
+		if len(rows) == 0 {
+			return nil
+		}
 		if _, err := tx.Exec(ctx, `CREATE TEMP TABLE tmp_media ON COMMIT DROP AS
 			SELECT `+strings.Join(mediaCols, ",")+` FROM media WITH NO DATA`); err != nil {
 			return err
@@ -552,7 +513,7 @@ func (w *Writer) Media(ctx context.Context, ms []*fbv1.Media) error {
 		if _, err := tx.CopyFrom(ctx, pgx.Identifier{"tmp_media"}, mediaCols, pgx.CopyFromRows(rows)); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, `INSERT INTO media AS t (`+strings.Join(mediaCols, ",")+`)
+		_, err = tx.Exec(ctx, `INSERT INTO media AS t (`+strings.Join(mediaCols, ",")+`)
 			SELECT `+strings.Join(mediaCols, ",")+` FROM tmp_media
 			ON CONFLICT (media_id) DO UPDATE SET source_url = EXCLUDED.source_url,
 				source_expires_at = EXCLUDED.source_expires_at, width = COALESCE(EXCLUDED.width, t.width),

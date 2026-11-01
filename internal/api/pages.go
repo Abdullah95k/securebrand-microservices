@@ -243,8 +243,12 @@ func (s *Server) updatePage(w http.ResponseWriter, r *http.Request) {
 	c := clientFrom(r.Context())
 	if !c.Has(ScopeAdmin) {
 		var mine bool
-		if err := s.DB.QueryRow(r.Context(), `SELECT EXISTS (SELECT 1 FROM page_registrations WHERE api_client_id = $1 AND page_ref = $2)`,
-			c.ID, ref).Scan(&mine); err != nil {
+		// The same rows the update below matches: by reference, or by page
+		// id for a page registered under its vanity.
+		if err := s.DB.QueryRow(r.Context(), `SELECT EXISTS (SELECT 1 FROM page_registrations g
+			JOIN page_schedule p ON p.page_ref = g.page_ref
+			WHERE g.api_client_id = $1 AND (p.page_ref = $2 OR p.page_id::text = $3))`,
+			c.ID, ref, strings.TrimPrefix(ref, "id:")).Scan(&mine); err != nil {
 			serverError(w, err)
 			return
 		}

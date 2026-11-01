@@ -143,8 +143,9 @@ var nonPersonEntities = map[string]bool{"Hashtag": true, "Page": true, "External
 func PersonEntity(entityType string) bool { return !nonPersonEntities[entityType] }
 
 // ScrubMentions clears the id, profile URL and name of person mentions in
-// text ranges (replies tag the person they answer). The offsets stay, so
-// the text still reads the same.
+// text ranges (replies tag the person they answer): what links a mention
+// to a Facebook profile. The text is content and stays as written, so the
+// name as typed is still in it; the offsets stay too.
 func ScrubMentions(rs []*fbv1.TextRange) {
 	for _, r := range rs {
 		if PersonEntity(r.EntityType) {

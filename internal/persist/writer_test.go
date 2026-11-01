@@ -330,6 +330,8 @@ func TestSuppressedDataInFlight(t *testing.T) {
 	if err := w.Media(ctx, []*fbv1.Media{
 		{Obs: obs(now, "m7"), MediaId: "00000000-0000-0000-0000-000000000007", Variant: "orig", OwnerType: "post", PostId: 70, PageId: 7, SourceUrl: "https://cdn.example/7"},
 		{Obs: obs(now, "m8"), MediaId: "00000000-0000-0000-0000-000000000008", Variant: "orig", OwnerType: "post", PostId: 80, PageId: 8, SourceUrl: "https://cdn.example/8"},
+		{Obs: obs(now, "m9"), MediaId: "00000000-0000-0000-0000-000000000009", Variant: "orig", OwnerType: "comment", PostId: 80, PageId: 8,
+			SourceUrl: "https://cdn.example/9", AuthorKey: erasedAuthor},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -337,6 +339,13 @@ func TestSuppressedDataInFlight(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := w.Pages(ctx, []*fbv1.Page{{Obs: obs(now, "pg7u"), PageId: 7, Status: fbv1.PageStatus_PAGE_STATUS_UNAVAILABLE}}); err != nil {
+		t.Fatal(err)
+	}
+	// Page 6 was erased before its profile was ever stored.
+	if _, err := db.Exec(ctx, `INSERT INTO suppression (subject_type, subject_key) VALUES ('page', '6')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Pages(ctx, []*fbv1.Page{{Obs: obs(now, "pg6"), PageId: 6, Name: "Never stored", FollowersCount: &f}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -353,6 +362,8 @@ func TestSuppressedDataInFlight(t *testing.T) {
 		`SELECT count(*) FROM media WHERE page_id = 8`:                                            1,
 		`SELECT count(*) FROM pages WHERE page_id = 7 AND status = 'suppressed' AND name IS NULL`: 1,
 		`SELECT count(*) FROM page_snapshots WHERE page_id = 7`:                                   0,
+		`SELECT count(*) FROM pages WHERE page_id = 6`:                                            0,
+		`SELECT count(*) FROM media WHERE media_id = '00000000-0000-0000-0000-000000000009'`:      0,
 	} {
 		var n int
 		if err := db.QueryRow(ctx, q).Scan(&n); err != nil {
