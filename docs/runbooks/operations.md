@@ -344,10 +344,10 @@ The mentions flow finds every account (page or profile) our posts and comments m
    - A private or unavailable account keeps its result for `recheck_after` (about 6 months): a mention within that time only counts; the first mention after it brings a new check.
    - **Daily add cap** (`max_new_per_day`, 50): a public account past it stays `public` without `added_at` and is added on a later day (highest priority first), without another check.
 
-**Intake from other tools.** `POST /v1/discovery/candidates` with `{"ref", "source", "evidence_url", "keyword"}` and a key with only `discovery:write`:
+**Intake from other tools.** No tool sends candidates yet: the endpoint stays unused until a key with `discovery:write` is created, and the flow runs on the mentions in our own data alone. For a tool later: `POST /v1/discovery/candidates` with `{"ref", "source", "evidence_url", "keyword"}` and a key with only `discovery:write` (replace `TOOL` with the tool's name):
 
 ```bash
-docker compose -f deploy/compose/docker-compose.yml run --rm --entrypoint /usr/local/bin/fbctl api apikey create --name google-search --scopes discovery:write
+docker compose -f deploy/compose/docker-compose.yml run --rm --entrypoint /usr/local/bin/fbctl api apikey create --name TOOL --scopes discovery:write
 ```
 
 A candidate is one more mention of its account and goes through the same checks, caps and lists. Its keyword and evidence are kept until a check finds the account not public (and on its schedule entry when it is added). An erased person or page is answered `ignored`.

@@ -430,7 +430,7 @@ paths:
               required: [ref, source]
               properties:
                 ref: {type: string, description: 'A facebook.com link to a page or profile (or one of its posts), a vanity name, or id:<n>'}
-                source: {type: string, pattern: '^[a-z0-9][a-z0-9_.-]{0,31}$', description: 'The tool, e.g. google_search (not api, discovery or mention)'}
+                source: {type: string, pattern: '^[a-z0-9][a-z0-9_.-]{0,31}$', description: 'The name of the tool sending it (not api, discovery or mention)'}
                 evidence_url: {type: string, format: uri, maxLength: 2048, description: Where the tool found it}
                 keyword: {type: string, maxLength: 200, description: What the tool searched for}
       responses:
