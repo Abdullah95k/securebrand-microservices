@@ -28,7 +28,15 @@ type PoolConfig struct {
 	MaxPerTier int
 	// Store, when set, keeps sessions across a restart (Save, Resume).
 	Store Store
+	// PacedWait is how long Acquire waits for an identity of the tier to be
+	// released when no exit can start a new one (they pace or back off
+	// their page loads) before it gives up (default 30s).
+	PacedWait time.Duration
 }
+
+// pacedCreateEvery is how often a waiting Acquire tries again to start a
+// new identity, between releases.
+const pacedCreateEvery = 5 * time.Second
 
 // DoerFactory builds a transport for an identity (swappable in tests).
 type DoerFactory func(o transport.Options) (transport.Doer, error)
@@ -61,6 +69,9 @@ func NewPool(cfg PoolConfig, proxies *proxy.Pool, fps map[string]Fingerprint, f 
 	if cfg.MaxPerTier <= 0 {
 		cfg.MaxPerTier = 512
 	}
+	if cfg.PacedWait <= 0 {
+		cfg.PacedWait = 30 * time.Second
+	}
 	p := &Pool{cfg: cfg, base: base, proxies: proxies, fps: fps, newDoer: f,
 		idle: map[string][]*Identity{}, live: map[string]int{}}
 	p.cond = sync.NewCond(&p.mu)
@@ -72,9 +83,17 @@ func (p *Pool) Base() *url.URL { return p.base }
 
 // Acquire returns an identity on tier for exclusive use. Fresh identities
 // are not bootstrapped yet; the caller bootstraps them on first use.
+//
+// When no exit can start a new identity (they pace or back off their page
+// loads) while identities of the tier are at work, Acquire waits up to
+// PacedWait for one of them to be released: the task holds its slot rather
+// than going round the retry topics, which under load turns into a hot loop
+// of millions of retries.
 func (p *Pool) Acquire(ctx context.Context, tier string) (*Identity, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	var waitUntil, createAt time.Time
+	var pacedErr error
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -97,21 +116,38 @@ func (p *Pool) Acquire(ctx context.Context, tier string) (*Identity, error) {
 			p.idle[tier] = append(list[:i], list[i+1:]...)
 			return id, nil
 		}
-		if p.live[tier] < p.cfg.MaxPerTier {
+		if p.live[tier] < p.cfg.MaxPerTier && !time.Now().Before(createAt) {
 			p.live[tier]++
 			p.mu.Unlock()
 			id, err := p.create(tier)
 			p.mu.Lock()
-			if err != nil {
-				p.live[tier]--
-				return nil, err
+			if err == nil {
+				metrics.IdentityActive.WithLabelValues(tier).Set(float64(p.live[tier]))
+				return id, nil
 			}
-			metrics.IdentityActive.WithLabelValues(tier).Set(float64(p.live[tier]))
-			return id, nil
+			p.live[tier]--
+			waitable := errors.Is(err, proxy.ErrExitsPaced) || errors.Is(err, proxy.ErrTierOpen)
+			if !waitable || p.live[tier] == 0 {
+				return nil, err // nothing to wait for
+			}
+			now := time.Now()
+			if waitUntil.IsZero() {
+				waitUntil = now.Add(p.cfg.PacedWait)
+			}
+			createAt, pacedErr = now.Add(pacedCreateEvery), err
 		}
-		// At the cap: wait for a release (or a cooldown to end).
+		// At the cap, or no exit can start an identity: wait for a release
+		// (or a cooldown to end).
+		wake := time.Second
+		if !waitUntil.IsZero() {
+			left := time.Until(waitUntil)
+			if left <= 0 {
+				return nil, pacedErr
+			}
+			wake = min(wake, left)
+		}
 		stop := context.AfterFunc(ctx, func() { p.mu.Lock(); p.cond.Broadcast(); p.mu.Unlock() })
-		timer := time.AfterFunc(time.Second, func() { p.mu.Lock(); p.cond.Broadcast(); p.mu.Unlock() })
+		timer := time.AfterFunc(wake, func() { p.mu.Lock(); p.cond.Broadcast(); p.mu.Unlock() })
 		p.cond.Wait()
 		stop()
 		timer.Stop()

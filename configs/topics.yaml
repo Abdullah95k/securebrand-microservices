@@ -14,9 +14,11 @@ topics:
   - {name: fbs.task.thread.p1, partitions: 48, retention: 72h}
   - {name: fbs.task.thread.p2, partitions: 48, retention: 72h}
   - {name: fbs.task.media,     partitions: 24, retention: 72h}
-  - {name: fbs.task.retry.30s, partitions: 12, retention: 48h}
-  - {name: fbs.task.retry.5m,  partitions: 12, retention: 48h}
-  - {name: fbs.task.retry.1h,  partitions: 12, retention: 48h}
+  # A retry waits its delay in the relay, which forwards it within minutes:
+  # a short retention bounds the disk a burst of retries takes.
+  - {name: fbs.task.retry.30s, partitions: 12, retention: 6h}
+  - {name: fbs.task.retry.5m,  partitions: 12, retention: 6h}
+  - {name: fbs.task.retry.1h,  partitions: 12, retention: 12h}
   - {name: fbs.task.dlq,       partitions: 6,  retention: 336h}
   # Public contract (securebrand.fb.v1 protobuf). PII topics use delete
   # retention, never compaction, so erased data ages out.

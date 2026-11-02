@@ -310,3 +310,66 @@ func TestSoftErrorsRefreshThenRetireAnIdentity(t *testing.T) {
 		t.Fatalf("after %d soft errors in a row: retire=%v reason=%q", MaxSoftErrors, retire, reason)
 	}
 }
+
+// When no exit can start a new identity (they pace their page loads) while
+// identities of the tier are at work, Acquire waits for one to be released
+// instead of failing at once, which sends the task round the retry topics:
+// up to PacedWait. With none at work there is nothing to wait for.
+func TestAcquireWaitsForAReleaseWhileExitsArePaced(t *testing.T) {
+	proxies, err := proxy.New(config.Proxy{
+		Tiers:     []config.ProxyTier{{Name: "isp", Kind: "static_list", Endpoints: []string{"http://203.0.113.10:8000"}}},
+		PageLoads: config.PageLoads{Interval: time.Hour, Backoff: time.Hour, MaxBackoff: time.Hour},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fpBytes, _ := configs.FS.ReadFile("fingerprints.yaml")
+	fps, _ := LoadFingerprints(fpBytes)
+	pool, err := NewPool(PoolConfig{BaseURL: "https://www.facebook.com", Profile: "chrome_146", IdentityRPS: 1, IdentityBurst: 1,
+		MaxPerTier: 4, PacedWait: 300 * time.Millisecond}, proxies,
+		fps, func(transport.Options) (transport.Doer, error) { return transport.NewStd(time.Second), nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	a, err := pool.Acquire(ctx, "isp") // takes the exit's page load
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { time.Sleep(50 * time.Millisecond); pool.Release(a) }()
+	start := time.Now()
+	b, err := pool.Acquire(ctx, "isp")
+	if err != nil || b != a {
+		t.Fatalf("got %v, %v: want the identity released while waiting", b, err)
+	}
+	if time.Since(start) > 250*time.Millisecond {
+		t.Fatalf("waited %s for a release 50ms away", time.Since(start))
+	}
+
+	// The same when the exit backs off after a walled page load.
+	proxies.ObservePageLoad(b.Endpoint, detect.LoginWall)
+	go func() { time.Sleep(50 * time.Millisecond); pool.Release(b) }()
+	start = time.Now()
+	if c, err := pool.Acquire(ctx, "isp"); err != nil || c != b || time.Since(start) > 250*time.Millisecond {
+		t.Fatalf("got %v, %v after %s: want the identity released while waiting", c, err, time.Since(start))
+	}
+
+	// b is held and never released: the wait gives up after PacedWait.
+	start = time.Now()
+	if _, err := pool.Acquire(ctx, "isp"); !errors.Is(err, proxy.ErrTierOpen) {
+		t.Fatalf("%v, want ErrTierOpen", err)
+	}
+	if d := time.Since(start); d < 300*time.Millisecond || d > 900*time.Millisecond {
+		t.Fatalf("gave up after %s, want PacedWait (300ms)", d)
+	}
+	if pool.live["isp"] != 1 {
+		t.Fatalf("live %d", pool.live["isp"])
+	}
+
+	// With no identity at work, there is nothing to wait for.
+	pool.Retire(b, "test")
+	start = time.Now()
+	if _, err := pool.Acquire(ctx, "isp"); !errors.Is(err, proxy.ErrTierOpen) || time.Since(start) > 100*time.Millisecond {
+		t.Fatalf("%v after %s, want ErrTierOpen at once", err, time.Since(start))
+	}
+}
