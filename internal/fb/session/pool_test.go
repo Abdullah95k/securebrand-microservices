@@ -373,3 +373,32 @@ func TestAcquireWaitsForAReleaseWhileExitsArePaced(t *testing.T) {
 		t.Fatalf("%v after %s, want ErrTierOpen at once", err, time.Since(start))
 	}
 }
+
+// With every breaker of the tier open, an identity released there would be
+// retired: Acquire does not wait for one.
+func TestAcquireDoesNotWaitWhenEveryBreakerIsOpen(t *testing.T) {
+	proxies, err := proxy.New(config.Proxy{
+		Tiers:   []config.ProxyTier{{Name: "isp", Kind: "static_list", Endpoints: []string{"http://203.0.113.10:8000"}}},
+		Breaker: breaker.Config{MinEvents: 1, OpenRate: 0.5, Cooldown: time.Hour},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fpBytes, _ := configs.FS.ReadFile("fingerprints.yaml")
+	fps, _ := LoadFingerprints(fpBytes)
+	pool, err := NewPool(PoolConfig{BaseURL: "https://www.facebook.com", Profile: "chrome_146", IdentityRPS: 1, IdentityBurst: 1,
+		MaxPerTier: 4, PacedWait: time.Minute}, proxies,
+		fps, func(transport.Options) (transport.Doer, error) { return transport.NewStd(time.Second), nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := pool.Acquire(context.Background(), "isp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxies.Observe(a.Endpoint, detect.LoginWall)
+	start := time.Now()
+	if _, err := pool.Acquire(context.Background(), "isp"); !errors.Is(err, proxy.ErrTierOpen) || time.Since(start) > time.Second {
+		t.Fatalf("%v after %s, want ErrTierOpen at once", err, time.Since(start))
+	}
+}

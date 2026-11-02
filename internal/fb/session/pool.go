@@ -126,7 +126,10 @@ func (p *Pool) Acquire(ctx context.Context, tier string) (*Identity, error) {
 				return id, nil
 			}
 			p.live[tier]--
-			waitable := errors.Is(err, proxy.ErrExitsPaced) || errors.Is(err, proxy.ErrTierOpen)
+			// Exits that pace or back off their page loads still serve the
+			// identities at work; with every breaker open, a released one
+			// would be retired, so there is nothing to wait for.
+			waitable := errors.Is(err, proxy.ErrExitsPaced) || (errors.Is(err, proxy.ErrTierOpen) && p.proxies.Available(tier))
 			if !waitable || p.live[tier] == 0 {
 				return nil, err // nothing to wait for
 			}
