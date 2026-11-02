@@ -42,6 +42,10 @@ func ScopeKey(t *taskv1.Task) string {
 		// One search per keyword and window: a run queued twice for the
 		// same window is one task.
 		return "search:" + strconv.FormatInt(s.Search.KeywordId, 10) + ":" + strconv.FormatInt(s.Search.GetUntil().GetSeconds(), 10)
+	case *taskv1.Task_Check:
+		// One task per queueing: a recheck months later is a task of its
+		// own, not one already done.
+		return "check:" + s.Check.AccountRef + ":" + strconv.FormatInt(s.Check.GetQueuedAt().AsTime().UnixMicro(), 10)
 	}
 	return "unknown"
 }
@@ -93,6 +97,10 @@ func cloneShallow(t *taskv1.Task) *taskv1.Task {
 		c.Scope = &taskv1.Task_Thread{Thread: proto.Clone(s.Thread).(*taskv1.ThreadScope)}
 	case *taskv1.Task_Media:
 		c.Scope = s
+	case *taskv1.Task_Search:
+		c.Scope = &taskv1.Task_Search{Search: proto.Clone(s.Search).(*taskv1.SearchScope)}
+	case *taskv1.Task_Check:
+		c.Scope = &taskv1.Task_Check{Check: proto.Clone(s.Check).(*taskv1.CheckScope)}
 	}
 	return c
 }
@@ -127,6 +135,15 @@ func NewMedia(jobID string, m *fbv1.Media) *taskv1.Task {
 	return Finalize(&taskv1.Task{
 		JobId: jobID, Kind: taskv1.Kind_KIND_MEDIA, Lane: taskv1.Lane_LANE_P1,
 		Scope: &taskv1.Task_Media{Media: &taskv1.MediaScope{Media: m}},
+	})
+}
+
+// NewCheck creates the check of an account (mentions), queued at
+// queuedAt. Checks are not part of any job.
+func NewCheck(ref string, id int64, queuedAt time.Time) *taskv1.Task {
+	return Finalize(&taskv1.Task{
+		Kind: taskv1.Kind_KIND_CHECK, Lane: taskv1.Lane_LANE_P1,
+		Scope: &taskv1.Task_Check{Check: &taskv1.CheckScope{AccountRef: ref, AccountId: id, QueuedAt: timestamppb.New(queuedAt)}},
 	})
 }
 

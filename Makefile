@@ -163,6 +163,9 @@ PILOT_COST_PER_GB ?= 4
 # minutes. Read from the environment by pilot-up, never pasted into a command.
 PILOT_RPS ?=
 export PILOT_RPS
+# Mention checks (mentions.enabled): on or off (the default). Written to
+# pilot-run.yaml by every pilot-up, so leaving it out turns them off.
+PILOT_MENTIONS ?=
 PILOT_FBCTL = $(PILOT_COMPOSE) run --rm --no-deps -T --entrypoint /usr/local/bin/fbctl api
 # pilot.yml mounts the run file pilot-up writes; without it Docker would
 # create a directory in its place.
@@ -176,12 +179,15 @@ pilot-up:
 	@command -v docker >/dev/null || { echo "Docker is not installed: docs/runbooks/pilot.md, step 1"; exit 2; }
 	@rps=$$(awk 'BEGIN { r = ENVIRON["PILOT_RPS"]; if (r == "") exit 0; if (r !~ /^[0-9]*\.?[0-9]+$$/ || r + 0 <= 0 || r + 0 > 2) exit 1; printf "%g", r + 0 }') \
 	  || { echo "PILOT_RPS must be requests per second above 0 and at most 2, e.g. 0.5"; exit 2; }; \
+	case "$(PILOT_MENTIONS)" in ""|off|0|false) mentions=false ;; on|1|true) mentions=true ;; \
+	  *) echo "PILOT_MENTIONS must be on or off"; exit 2 ;; esac; \
 	{ test -z "$$rps" || printf 'fb:\n  identity_rps: %s\n' "$$rps"; \
+	  printf 'mentions:\n  enabled: %s\n' "$$mentions"; \
 	  printf 'registry_sync:\n  canary_pages: [%s]\n' \
 	    "$$(grep -v '^#' $(PHASE0_PAGES) | grep -v '^[[:space:]]*$$' \
 	      | awk -F, 'NR == 1 && tolower($$1) == "page" { next } c < 3 { print $$1; c++ }' | sed 's/.*/"&"/' | paste -sd, -)"; \
 	} > $(PILOT_OUT)/pilot-run.yaml; \
-	echo "requests/s per IP: $${rps:-the default of configs/default.yaml}"
+	echo "requests/s per IP: $${rps:-the default of configs/default.yaml}; mention checks: $$mentions"
 	$(MAKE) docker
 	$(PILOT_COMPOSE) up -d --force-recreate
 	@# Old images and build cache would fill the disk over restarts.

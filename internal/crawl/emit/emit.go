@@ -77,6 +77,7 @@ func (e *Emitter) Post(ctx context.Context, b *kafka.Batch, src Source, p *fbv1.
 		return nil
 	}
 	e.scrubMentions(p.TextRanges)
+	e.scrubSharedOwner(p)
 	e.stamp(src, "post:"+strconv.FormatInt(p.PostId, 10), p, func(o *fbv1.Observation) { p.Obs = o })
 	key := strconv.FormatInt(p.PostId, 10)
 	if err := b.AddProto(ctx, topics.Post, key, p); err != nil {
@@ -120,6 +121,18 @@ func (e *Emitter) scrubMentions(rs []*fbv1.TextRange) {
 		return
 	}
 	gdpr.ScrubSuppressedMentions(e.Suppression, rs, gdpr.MentionedKeys(e.HMACKey, rs))
+}
+
+// scrubSharedOwner clears the owner of a shared post as a person mention
+// is cleared: always when pseudonymising, else when erased. A Page's
+// stays.
+func (e *Emitter) scrubSharedOwner(p *fbv1.Post) {
+	if (p.SharedOwnerId == "" && p.SharedOwnerUrl == "") || !gdpr.PersonEntity(p.SharedOwnerType) {
+		return
+	}
+	if e.Pseudonymize || e.Suppression.AuthorSuppressed(gdpr.AuthorKey(e.HMACKey, p.SharedOwnerId)) {
+		p.SharedOwnerId, p.SharedOwnerUrl = "", ""
+	}
 }
 
 // Privatize sets the author key, applies pseudonymisation and redacts

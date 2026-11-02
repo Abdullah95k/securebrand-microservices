@@ -26,6 +26,9 @@ enum Kind {
   KIND_MEDIA = 4;
   // A keyword search for new mentions (discovery).
   KIND_SEARCH = 5;
+  // Whether an account mentioned in crawled data (or proposed by another
+  // tool) is public: one page load and a timeline read (mentions).
+  KIND_CHECK = 6;
 }
 
 enum VideoPolicy {
@@ -110,6 +113,18 @@ message SearchScope {
   google.protobuf.Timestamp until = 5;
 }
 
+// CheckScope is one account to check: is it public to logged-out
+// visitors?
+message CheckScope {
+  // id:<n> or v:<vanity>, as in checked_accounts.
+  string account_ref = 1;
+  // The numeric id when known (0 = resolved by the check).
+  int64 account_id = 2;
+  // When the scheduler queued this check (checked_accounts.queued_at): a
+  // copy whose stamp the row no longer holds is stale and does nothing.
+  google.protobuf.Timestamp queued_at = 3;
+}
+
 // SessionSnapshot carries a serialised identity when cursors turn out to be
 // bound to a session (decided in Phase 0).
 message SessionSnapshot {
@@ -136,6 +151,7 @@ message Task {
     ThreadScope thread = 12;
     MediaScope media = 13;
     SearchScope search = 21;
+    CheckScope check = 22;
   }
   SessionSnapshot affinity = 14;
   uint32 attempt = 15;

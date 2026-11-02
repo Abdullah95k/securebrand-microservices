@@ -147,3 +147,30 @@ func TestErasedPageIsNotPublished(t *testing.T) {
 		t.Fatal("another page's comment was redacted")
 	}
 }
+
+// A shared post's owner is a mention like any other: a person is cleared
+// when pseudonymising or erased; a Page stays.
+func TestSharedOwnerScrubbed(t *testing.T) {
+	key := []byte("secret")
+	erased := gdpr.NewSuppression(nil)
+	erased.Add(gdpr.AuthorKey(key, "100009"), 0)
+	cases := []struct {
+		name    string
+		e       *Emitter
+		id, typ string
+		cleared bool
+	}{
+		{"person kept", &Emitter{HMACKey: key}, "100001", "User", false},
+		{"person pseudonymized", &Emitter{HMACKey: key, Pseudonymize: true}, "100001", "User", true},
+		{"page kept when pseudonymized", &Emitter{HMACKey: key, Pseudonymize: true}, "100002", "Page", false},
+		{"erased person", &Emitter{HMACKey: key, Suppression: erased}, "100009", "User", true},
+		{"other person beside an erasure", &Emitter{HMACKey: key, Suppression: erased}, "100001", "User", false},
+	}
+	for _, c := range cases {
+		p := &fbv1.Post{SharedOwnerId: c.id, SharedOwnerUrl: "https://www.facebook.com/x", SharedOwnerType: c.typ}
+		c.e.scrubSharedOwner(p)
+		if cleared := p.SharedOwnerId == "" && p.SharedOwnerUrl == ""; cleared != c.cleared {
+			t.Errorf("%s: %+v", c.name, p)
+		}
+	}
+}

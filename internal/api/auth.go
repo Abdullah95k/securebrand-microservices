@@ -24,6 +24,9 @@ const (
 	ScopeDataRead   = "data:read"
 	ScopePIIRead    = "pii:read"
 	ScopeAdmin      = "admin"
+	// ScopeDiscoveryWrite lets another tool send candidate accounts
+	// (POST /v1/discovery/candidates), and nothing else.
+	ScopeDiscoveryWrite = "discovery:write"
 )
 
 // Client is an authenticated API client.

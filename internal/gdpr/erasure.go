@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -27,6 +28,10 @@ type Eraser struct {
 	DB       *pgxpool.Pool
 	S3       *minio.Client
 	Producer *kafka.Producer
+	// HMACKey (privacy.author_hmac_key) records an erased person's vanity
+	// names in the suppression list, so links to them are never checked
+	// again (mentions).
+	HMACKey []byte
 }
 
 type request struct {
@@ -37,6 +42,9 @@ type request struct {
 	created   time.Time
 	attempts  int
 	authorID  string // the Facebook id, when the request named it
+	// accountRef is the person's profile as a mention reference (v:<name>
+	// or id:<n>), when the request named a profile link.
+	accountRef string
 }
 
 // MaxErasureAttempts is how many times a request is tried before it is
@@ -56,7 +64,8 @@ func retryAfter(n int) time.Duration {
 // erasure is idempotent, so a request that fails part-way is retried from
 // the start.
 func (e *Eraser) Tick(ctx context.Context) error {
-	rows, err := e.DB.Query(ctx, `SELECT id, subject_type, author_key, page_id, created_at, attempts, coalesce(input->>'author_id', '')
+	rows, err := e.DB.Query(ctx, `SELECT id, subject_type, author_key, page_id, created_at, attempts, coalesce(input->>'author_id', ''),
+			coalesce(input->>'account_ref', '')
 		FROM erasure_requests
 		WHERE status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= now()) ORDER BY created_at LIMIT 10`)
 	if err != nil {
@@ -64,7 +73,7 @@ func (e *Eraser) Tick(ctx context.Context) error {
 	}
 	reqs, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (request, error) {
 		var q request
-		return q, r.Scan(&q.id, &q.subject, &q.authorKey, &q.pageID, &q.created, &q.attempts, &q.authorID)
+		return q, r.Scan(&q.id, &q.subject, &q.authorKey, &q.pageID, &q.created, &q.attempts, &q.authorID, &q.accountRef)
 	})
 	if err != nil {
 		return err
@@ -89,7 +98,7 @@ func (e *Eraser) Tick(ctx context.Context) error {
 		sb, _ := json.Marshal(stats)
 		// Done: the request keeps no trace of who was erased.
 		if _, err := e.DB.Exec(ctx, `UPDATE erasure_requests SET status = 'done', stats = $2, completed_at = now(),
-			input = input - 'author_id' - 'profile_url' WHERE id = $1`, r.id, sb); err != nil {
+			input = input - 'author_id' - 'profile_url' - 'account_ref' WHERE id = $1`, r.id, sb); err != nil {
 			return err
 		}
 		slog.Info("erasure done", "request", r.id, "subject", r.subject, "stats", stats)
@@ -147,7 +156,10 @@ func (e *Eraser) process(ctx context.Context, r request) (map[string]int64, erro
 			}
 			tag, err := tx.Exec(ctx, `DELETE FROM comment_authors WHERE author_key = $1`, r.authorKey)
 			stats["authors_deleted"] = tag.RowsAffected()
-			return err
+			if err != nil {
+				return err
+			}
+			return e.eraseMentionedPerson(ctx, tx, fbID, r, stats)
 		})
 		if err != nil {
 			return nil, err
@@ -200,6 +212,15 @@ func (e *Eraser) process(ctx context.Context, r request) (map[string]int64, erro
 				{"post_index", `DELETE FROM post_index WHERE page_id = $1`},
 				{"page_snapshots", `DELETE FROM page_snapshots WHERE page_id = $1`},
 				{"crawl_cursors", `DELETE FROM crawl_cursors WHERE scope_type = 'page_timeline' AND scope_id = $1`},
+				// The page in the checked-accounts list, its mentions of
+				// others, and the counts it is in (before "pages" clears the
+				// vanity it may be named by).
+				{"mention_accounts", `DELETE FROM checked_accounts WHERE account_id = $1 OR account_ref = 'id:' || $1::bigint::text
+					OR account_ref = (SELECT 'v:' || lower(vanity) FROM pages WHERE page_id = $1)`},
+				{"mention_pages", `DELETE FROM mention_pages WHERE page_id = $1 OR account_ref = 'id:' || $1::bigint::text
+					OR account_ref = (SELECT 'v:' || lower(vanity) FROM pages WHERE page_id = $1)`},
+				{"mention_events", `DELETE FROM mention_events WHERE page_id = $1 OR account_id = $1
+					OR account_ref = (SELECT 'v:' || lower(vanity) FROM pages WHERE page_id = $1)`},
 				// Discovery's record of the page's posts (before "pages"
 				// clears the vanity it may be named by).
 				{"discovery_mentions", `DELETE FROM discovery_mentions WHERE owner_id = $1 OR page_ref = 'id:' || $1::bigint::text
@@ -238,6 +259,97 @@ func (e *Eraser) process(ctx context.Context, r request) (map[string]int64, erro
 		return nil, err
 	}
 	return stats, b.Wait(ctx)
+}
+
+// eraseMentionedPerson removes an erased person from the mentions flow,
+// in the erasure's transaction (under its lock, so a writer either
+// committed before, and its rows go here, or sees the suppression entry):
+// their checked-accounts rows, per-page counts and pending events, by id
+// and by every reference the list knew them by. Those vanity names go into
+// the suppression list (keyed, as author keys are), so a link to them is
+// never checked again. A profile of theirs the flow added to the schedule
+// is erased as a page (a page erasure request): its posts are theirs.
+func (e *Eraser) eraseMentionedPerson(ctx context.Context, tx pgx.Tx, fbID string, r request, stats map[string]int64) error {
+	var id int64
+	if fbID != "" {
+		id, _ = strconv.ParseInt(fbID, 10, 64)
+	}
+	refs := []string{}
+	if id != 0 {
+		refs = append(refs, "id:"+strconv.FormatInt(id, 10))
+	}
+	if r.accountRef != "" {
+		refs = append(refs, r.accountRef)
+	}
+	rows, err := tx.Query(ctx, `SELECT account_ref FROM checked_accounts WHERE ($1::bigint <> 0 AND account_id = $1) OR account_ref = ANY($2)
+		UNION SELECT page_ref FROM page_schedule WHERE source = 'mention' AND page_ref LIKE 'v:%' AND $1::bigint <> 0 AND page_id = $1`, id, refs)
+	if err != nil {
+		return err
+	}
+	known, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return err
+	}
+	refs = append(refs, known...)
+	if len(e.HMACKey) > 0 {
+		for _, ref := range refs {
+			if !strings.HasPrefix(ref, "v:") {
+				continue // an id is suppressed by its author key already
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO suppression (subject_type, subject_key) VALUES ('author', $1) ON CONFLICT DO NOTHING`,
+				hex.EncodeToString(RefKey(e.HMACKey, ref))); err != nil {
+				return err
+			}
+		}
+	}
+	tag, err := tx.Exec(ctx, `DELETE FROM checked_accounts WHERE ($1::bigint <> 0 AND account_id = $1) OR account_ref = ANY($2)`, id, refs)
+	if err != nil {
+		return err
+	}
+	stats["mention_accounts_deleted"] = tag.RowsAffected()
+	if _, err := tx.Exec(ctx, `DELETE FROM mention_pages WHERE account_ref = ANY($1)`, refs); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM mention_events WHERE ($1::bigint <> 0 AND account_id = $1) OR account_ref = ANY($2)`, id, refs); err != nil {
+		return err
+	}
+	// Profiles of theirs the flow added: erased as pages when crawled
+	// (page id known), else their schedule entry goes.
+	rows, err = tx.Query(ctx, `SELECT page_ref, coalesce(page_id, nullif($1::bigint, 0)) FROM page_schedule
+		WHERE source = 'mention' AND (page_ref = ANY($2) OR ($1::bigint <> 0 AND page_id = $1))`, id, refs)
+	if err != nil {
+		return err
+	}
+	type sched struct {
+		ref string
+		id  *int64
+	}
+	scheds, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (sched, error) {
+		var x sched
+		return x, r.Scan(&x.ref, &x.id)
+	})
+	if err != nil {
+		return err
+	}
+	for _, x := range scheds {
+		if x.id == nil {
+			if _, err := tx.Exec(ctx, `DELETE FROM page_schedule WHERE page_ref = $1`, x.ref); err != nil {
+				return err
+			}
+			stats["mention_schedules_deleted"]++
+			continue
+		}
+		rid, _ := uuid.NewV7()
+		in, _ := json.Marshal(map[string]any{"page_id": *x.id, "reason": "author erasure"})
+		if _, err := tx.Exec(ctx, `INSERT INTO erasure_requests (id, subject_type, page_id, input, status, created_at)
+			SELECT $1, 'page', $2, $3, 'pending', now()
+			WHERE NOT EXISTS (SELECT 1 FROM erasure_requests WHERE subject_type = 'page' AND page_id = $2 AND status = 'pending')`,
+			rid, *x.id, in); err != nil {
+			return err
+		}
+		stats["mention_profiles_erased"]++
+	}
+	return nil
 }
 
 // scrubMentions clears the id, profile URL and name of the mentions of a

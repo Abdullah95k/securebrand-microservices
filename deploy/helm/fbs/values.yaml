@@ -201,6 +201,15 @@ components:
     replicas: 1
     terminationGracePeriodSeconds: 90
     resources: {requests: {cpu: 200m, memory: 256Mi}, limits: {memory: 512Mi}}
+  # Mention checks: enable with config.mentions.enabled. Each check loads
+  # one page through the proxies (the crawlers' egress). The page-load gate
+  # is per process, so keep one replica.
+  crawler-check:
+    enabled: false
+    command: ["/usr/local/bin/fbs-crawler", "--stages", "check"]
+    replicas: 1
+    terminationGracePeriodSeconds: 90
+    resources: {requests: {cpu: 200m, memory: 256Mi}, limits: {memory: 512Mi}}
   persister:
     enabled: true
     command: ["/usr/local/bin/fbs-persister"]

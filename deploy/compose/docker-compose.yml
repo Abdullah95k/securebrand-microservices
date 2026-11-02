@@ -104,8 +104,10 @@ services:
 
   crawler:
     <<: *fbs
-    # search runs discovery's keyword searches (idle while discovery.enabled is false).
-    entrypoint: ["/usr/local/bin/fbs-crawler", "--stages", "page,post,thread,retry,search"]
+    # search runs discovery's keyword searches (idle while discovery.enabled
+    # is false); check runs the mention checks (idle while mentions.enabled
+    # is false). Both share this process's identities and page-load gate.
+    entrypoint: ["/usr/local/bin/fbs-crawler", "--stages", "page,post,thread,retry,search,check"]
 
   persister:
     <<: *fbs

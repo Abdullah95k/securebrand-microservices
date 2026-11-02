@@ -13,6 +13,7 @@ import (
 
 	fbv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fb/v1"
 	"github.com/abdullah95k/securebrand-microservices/internal/gdpr"
+	"github.com/abdullah95k/securebrand-microservices/internal/mentions"
 	"github.com/abdullah95k/securebrand-microservices/internal/store"
 	"github.com/abdullah95k/securebrand-microservices/internal/testenv"
 	"github.com/abdullah95k/securebrand-microservices/internal/topics"
@@ -597,5 +598,102 @@ func TestErasedAuthorsMentionsAreNotWritten(t *testing.T) {
 		if erased != "" || kept != "100002" {
 			t.Errorf("%s: erased mention %q, other %q", table, erased, kept)
 		}
+	}
+}
+
+// Mentions are recorded once per post or comment, when it is first stored:
+// a later scrape of the same items records nothing again. Comment authors
+// count only with the switch on; erased people and pages, and redacted
+// comments, are never recorded; old items are left out.
+func TestMentionsRecordedOncePerNewItem(t *testing.T) {
+	db := testenv.Postgres(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	if _, err := store.EnsurePartitions(ctx, db, now, store.PartitionWindow{MonthsBack: 2, MonthsAhead: 1, DaysBack: 1, DaysAhead: 1}); err != nil {
+		t.Fatal(err)
+	}
+	key := []byte("secret")
+	// An erased person (by id), an erased person's vanity, an erased page.
+	for _, s := range [][2]string{
+		{"author", hex.EncodeToString(gdpr.AuthorKey(key, "100000000000666"))},
+		{"author", hex.EncodeToString(gdpr.RefKey(key, "v:erased.vanity"))},
+		{"page", "100064000000777"},
+	} {
+		if _, err := db.Exec(ctx, `INSERT INTO suppression (subject_type, subject_key) VALUES ($1, $2)`, s[0], s[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := &Writer{DB: db, HMACKey: key, Mentions: &mentions.Options{CommentAuthors: true}, MentionsMaxAge: 180 * 24 * time.Hour}
+	created := now.Add(-time.Hour)
+	post := &fbv1.Post{Obs: obs(now, "p1"), PostId: 1, PageId: 9, CreatedAt: timestamppb.New(created),
+		Text:          "facebook.com/linked.page facebook.com/erased.vanity facebook.com/100064000000777",
+		SharedOwnerId: "100064000000888", SharedOwnerType: "Page"}
+	oldPost := &fbv1.Post{Obs: obs(now, "p2"), PostId: 2, PageId: 9, CreatedAt: timestamppb.New(now.AddDate(0, 0, -200)),
+		Text: "facebook.com/too.old.page"}
+	cm := func(id int64, author, text string) *fbv1.Comment {
+		return &fbv1.Comment{Obs: obs(now, fmt.Sprint(id)), CommentId: id, PostId: 1, PageId: 9, PostCreatedAt: timestamppb.New(created),
+			CreatedAt: timestamppb.New(now), Text: text, Author: &fbv1.Author{Id: author, Type: "User", AuthorKey: gdpr.AuthorKey(key, author)}}
+	}
+	comments := []*fbv1.Comment{
+		cm(10, "100000000000111", "hello facebook.com/linked.page"),
+		cm(11, "100000000000666", "an erased author's comment facebook.com/some.page"),
+		cm(12, "100000000000222", "nothing"),
+	}
+	count := func(q string, args ...any) int {
+		t.Helper()
+		var n int
+		if err := db.QueryRow(ctx, q, args...).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	write := func() {
+		t.Helper()
+		if err := w.Posts(ctx, []*fbv1.Post{post, oldPost}); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Comments(ctx, comments); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write()
+	got := map[string]int{}
+	rows, _ := db.Query(ctx, `SELECT account_ref || '/' || via || '/' || coalesce(comment_id, 0), count(*) FROM mention_events GROUP BY 1`)
+	for rows.Next() {
+		var k string
+		var n int
+		_ = rows.Scan(&k, &n)
+		got[k] = n
+	}
+	rows.Close()
+	want := map[string]int{
+		"v:linked.page/link/0": 1, "id:100064000000888/share/0": 1,
+		"v:linked.page/link/10": 1, "id:100000000000111/author/10": 1,
+		"id:100000000000222/author/12": 1,
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("events\n got %v\nwant %v", got, want)
+	}
+	// The same items again (a later scrape, a redelivered batch): nothing
+	// new, even with other content.
+	post.Obs, comments[0].Obs = obs(now.Add(time.Minute), "p1b"), obs(now.Add(time.Minute), "c10b")
+	comments[0].Text = "edited facebook.com/another.page"
+	write()
+	if n := count(`SELECT count(*) FROM mention_events`); n != 5 {
+		t.Fatalf("%d events after the second scrape", n)
+	}
+	// Without the switch, a new comment's author is no mention.
+	w.Mentions.CommentAuthors = false
+	comments = []*fbv1.Comment{cm(13, "100000000000333", "hi")}
+	write()
+	if n := count(`SELECT count(*) FROM mention_events WHERE comment_id = 13`); n != 0 {
+		t.Fatalf("author recorded with the switch off: %d", n)
+	}
+	// Off: nothing at all.
+	w.Mentions = nil
+	comments = []*fbv1.Comment{cm(14, "100000000000444", "facebook.com/linked.page")}
+	write()
+	if n := count(`SELECT count(*) FROM mention_events WHERE comment_id = 14`); n != 0 {
+		t.Fatalf("recorded while off: %d", n)
 	}
 }

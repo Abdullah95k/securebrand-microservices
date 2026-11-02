@@ -5,7 +5,8 @@ info:
   description: |
     On-demand and scheduled scraping of public Facebook pages (logged out).
     All endpoints require `Authorization: Bearer fbs_<prefix>_<secret>`.
-    Scopes: `jobs:write`, `pages:write`, `data:read`, `pii:read`, `admin` (implies all).
+    Scopes: `jobs:write`, `pages:write`, `data:read`, `pii:read`, `discovery:write` (sending candidate
+    accounts only), `admin` (implies all).
     Errors use RFC 9457 problem documents (`application/problem+json`).
 servers:
   - url: /v1
@@ -112,9 +113,13 @@ paths:
       summary: List registered pages and their schedules
       description: >-
         Each schedule carries `source`: `api` for a page a client registered, `discovery` for one a
-        keyword search added (with `discovered_at` and `discovered_by_keyword_id`). Discovered pages have
-        no registering client, so only `admin` keys list them here.
-      parameters: [{$ref: '#/components/parameters/Limit'}]
+        keyword search added (with `discovered_at` and `discovered_by_keyword_id`), `mention` for one
+        the mentions flow added (with `discovered_at` and `discovered_via`, why: see
+        MentionVia). Discovered and mentioned pages have no registering client, so only `admin` keys
+        list them here.
+      parameters:
+        - {in: query, name: source, schema: {type: string, enum: [api, discovery, mention]}}
+        - {$ref: '#/components/parameters/Limit'}
       responses:
         "200": {description: Pages}
   /pages/{page}:
@@ -322,9 +327,138 @@ paths:
                 properties:
                   mentions: {type: array, items: {$ref: '#/components/schemas/Mention'}}
                   next_before: {type: string, format: date-time, description: Set when more mentions follow}
+  /discovery/accounts:
+    get:
+      summary: The checked-accounts list (mentions)
+      description: >-
+        Requires `data:read`. Every account (page or profile) our posts and comments mention, or that
+        another tool proposed: how often and by how many of our pages it was mentioned, and for one
+        not on our main list whether a check found it public. `status`: `unchecked` (waiting for its
+        first check), `listed` (on the main list: only counted), `public` (added to the main list,
+        `added_at`, or waiting for the daily cap), `private` (exists, but logged-out visitors see no
+        posts, or it is restricted to logged-in viewers), `unavailable` (not found or removed). A
+        private or unavailable account is checked again when mentioned after `recheck_at`
+        (`mentions.recheck_after`, about 6 months). A failed check (a wall, a rate limit, a proxy error)
+        records nothing about the account: `failures`, `last_error` and `retry_at` say when it is tried
+        again. Accounts that may be people (any `kind` but `page`) show their `account_ref`,
+        `account_id`, `page_ref`, `first_comment_id` and `evidence_url` only with `pii:read`. The list
+        keeps no names, text or pictures; erasure requests remove a person's or a page's rows, and
+        `mentions.retention_days` removes accounts nobody mentioned or checked for that long.
+      parameters:
+        - {in: query, name: status, schema: {type: string, enum: [unchecked, listed, public, private, unavailable]}}
+        - {in: query, name: source, schema: {type: string}, description: '`mention`, or the source a candidate came with'}
+        - {in: query, name: kind, schema: {type: string, enum: [page, profile, unknown]}}
+        - {in: query, name: checked_after, schema: {type: string, format: date-time}, description: Last conclusive check at or after}
+        - {in: query, name: checked_before, schema: {type: string, format: date-time}, description: Last conclusive check before}
+        - {in: query, name: added, schema: {type: boolean}, description: 'Only accounts the flow added to the main list: what was added and why'}
+        - {in: query, name: order, schema: {type: string, enum: [priority, last_seen, checked], default: priority},
+           description: 'priority: the check order (mentioned most, by most pages, most recently); last_seen; checked (newest first, checked accounts only)'}
+        - {in: query, name: after, schema: {type: string}, description: Cursor from next_after}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        "200":
+          description: Accounts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accounts: {type: array, items: {$ref: '#/components/schemas/CheckedAccount'}}
+                  next_after: {type: string, description: Set when more accounts follow}
+        "400": {$ref: '#/components/responses/Problem'}
+  /discovery/accounts/{ref}:
+    parameters:
+      - {$ref: '#/components/parameters/AccountRef'}
+    get:
+      summary: One account, its mention counts and the pages of ours that mention it most
+      description: >-
+        Requires `data:read`, and `pii:read` for an account that may be a person (any `kind` but `page`).
+      responses:
+        "200":
+          description: Account
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  account: {$ref: '#/components/schemas/CheckedAccount'}
+                  pages:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        page_id: {type: integer, format: int64}
+                        mentions: {type: integer, format: int64}
+                        last_seen_at: {type: string, format: date-time}
+        "400": {$ref: '#/components/responses/Problem'}
+        "403": {$ref: '#/components/responses/Problem'}
+        "404": {$ref: '#/components/responses/Problem'}
+  /discovery/accounts/{ref}/recheck:
+    parameters:
+      - {$ref: '#/components/parameters/AccountRef'}
+    post:
+      summary: Check an account again, ahead of the queue
+      description: >-
+        Requires `pages:write`. Whatever its last check found, the account is checked next (rechecks
+        come before the priority order). It still counts toward `mentions.max_checks_per_day`.
+        `409` when it is on the main list already; `503` while `mentions.enabled` is false.
+      responses:
+        "202": {description: Queued, content: {application/json: {schema: {type: object, properties: {account: {$ref: '#/components/schemas/CheckedAccount'}}}}}}
+        "404": {$ref: '#/components/responses/Problem'}
+        "409": {$ref: '#/components/responses/Problem'}
+        "503": {$ref: '#/components/responses/Problem'}
+  /discovery/candidates:
+    post:
+      summary: Send an account another tool found into the checks
+      description: >-
+        Requires `discovery:write` (a key that can do nothing else: `fbctl apikey create --scopes
+        discovery:write`). The candidate counts as one more mention of its account and goes through
+        the same checks, caps and lists as the accounts our own data mentions: a new account waits
+        for its check (candidates start with priority `mentions.candidate_weight`), one on the main
+        list is only counted, one checked within `mentions.recheck_after` and found not public is
+        only counted, one checked before that is checked again. `keyword` and `evidence_url` are kept
+        while the account may yet be added (and on its schedule entry when it is), and dropped once a
+        check finds it not public. An erased person or page is never taken in (`result: ignored`).
+        `503` while `mentions.enabled` is false.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ref, source]
+              properties:
+                ref: {type: string, description: 'A facebook.com link to a page or profile (or one of its posts), a vanity name, or id:<n>'}
+                source: {type: string, pattern: '^[a-z0-9][a-z0-9_.-]{0,31}$', description: 'The tool, e.g. google_search (not api, discovery or mention)'}
+                evidence_url: {type: string, format: uri, maxLength: 2048, description: Where the tool found it}
+                keyword: {type: string, maxLength: 200, description: What the tool searched for}
+      responses:
+        "202":
+          description: Taken in
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  account_ref: {type: string, description: 'The account as the list names it: id:<n> or v:<name>'}
+                  created: {type: boolean, description: The account was new to the list}
+                  result:
+                    type: string
+                    enum: [queued, on_list, added, public_waiting, checked_recently, ignored]
+                    description: >-
+                      queued: waits for its check; on_list: on the main list; added: the flow added it;
+                      public_waiting: public, waiting for the daily add cap; checked_recently: checked
+                      within mentions.recheck_after and not public, only counted; ignored: not taken in.
+        "400": {$ref: '#/components/responses/Problem'}
+        "503": {$ref: '#/components/responses/Problem'}
   /erasure-requests:
     post:
       summary: GDPR erasure of an author or a page (admin)
+      description: >-
+        An author erasure also removes the person from the checked-accounts list (by id, and by every
+        vanity name the list or the profile link knew them by, which are suppressed so links to them are
+        never checked again), and erases as a page any profile of theirs the mentions flow added. A page
+        erasure removes the page from the list, with its mentions of others.
       requestBody:
         required: true
         content:
@@ -335,7 +469,7 @@ paths:
               properties:
                 subject_type: {type: string, enum: [author, page]}
                 author_id: {type: string}
-                profile_url: {type: string}
+                profile_url: {type: string, description: 'Also a person known to the mentions flow by this link only (checked accounts)'}
                 page_id: {type: integer, format: int64}
       responses:
         "202": {description: Queued, content: {application/json: {schema: {$ref: '#/components/schemas/Erasure'}}}}
@@ -400,6 +534,8 @@ components:
     Post: {in: path, name: post, required: true, schema: {type: integer, format: int64}}
     Limit: {in: query, name: limit, schema: {type: integer, default: 50, maximum: 500}}
     Cursor: {in: query, name: cursor, schema: {type: string}, description: Opaque keyset cursor from next_cursor}
+    AccountRef: {in: path, name: ref, required: true, schema: {type: string},
+      description: 'id:<n>, v:<name>, a vanity name, an id, or a URL-escaped facebook.com link'}
   responses:
     Problem:
       description: Error
@@ -438,6 +574,59 @@ components:
         post_time: {type: string, format: date-time}
         found_at: {type: string, format: date-time}
         matched_existing: {type: boolean, description: The poster was scheduled before}
+    CheckedAccount:
+      type: object
+      description: An account in the checked-accounts list. No names, text or pictures.
+      properties:
+        account_ref: {type: string, description: 'id:<n> or v:<name> (pii:read for a possible person)'}
+        account_id: {type: integer, format: int64, description: 'Known from the mention or resolved by a check (pii:read for a possible person)'}
+        kind: {type: string, enum: [page, profile, unknown], description: A hint until a check decides}
+        source: {type: string, description: '`mention`, or the source a candidate came with'}
+        status: {type: string, enum: [unchecked, listed, public, private, unavailable]}
+        reason:
+          type: string
+          description: >-
+            Why the last check decided: posts_visible, page (public); no_public_posts, timeline_hidden,
+            restricted (private); not_found (unavailable)
+        vias: {type: array, items: {type: string, enum: [tag, link, share, author, candidate]}, description: How it was mentioned}
+        mentions: {type: integer, format: int64, description: Mentions counted (each post or comment once)}
+        pages: {type: integer, description: Distinct pages of ours that mention it}
+        priority: {type: number, description: 'Check order: ln(1+mentions) + 2 ln(1+pages) + weeks of recency (+ a candidate''s weight)'}
+        first_seen_at: {type: string, format: date-time}
+        last_seen_at: {type: string, format: date-time, description: When the latest mention was written}
+        in_queue: {type: boolean, description: Waits for a check}
+        retry_at: {type: string, format: date-time, description: After a failed check, not before}
+        queued_at: {type: string, format: date-time, description: A check is under way}
+        requested_at: {type: string, format: date-time, description: A recheck was asked for}
+        checks: {type: integer, description: Page loads spent on it}
+        failures: {type: integer, description: Failed checks in a row}
+        last_error: {type: string, description: 'Why the last check failed: login_wall, rate_limited, checkpoint, soft_error, transport, drift, names_nothing (confirmed by a second load)'}
+        checked_at: {type: string, format: date-time, description: The last conclusive check}
+        recheck_at: {type: string, format: date-time, description: Not public until a mention after this brings a new check}
+        added_at: {type: string, format: date-time, description: The flow added it to the main list}
+        page_ref: {type: string, description: Its main-list entry}
+        first_page_id: {type: integer, format: int64, description: 'What first mentioned it (dropped when found not public)'}
+        first_post_id: {type: integer, format: int64}
+        first_comment_id: {type: integer, format: int64}
+        keyword: {type: string, description: "A candidate's keyword (dropped when found not public)"}
+        evidence_url: {type: string, description: "A candidate's evidence (dropped when found not public)"}
+    MentionVia:
+      type: object
+      description: Why the mentions flow added a page (page_schedule.discovered_via)
+      properties:
+        account_ref: {type: string}
+        source: {type: string}
+        vias: {type: array, items: {type: string}}
+        mentions: {type: integer, format: int64}
+        pages: {type: integer}
+        reason: {type: string}
+        first_seen_at: {type: string, format: date-time}
+        checked_at: {type: string, format: date-time}
+        first_page_id: {type: integer, format: int64}
+        first_post_id: {type: integer, format: int64}
+        first_comment_id: {type: integer, format: int64}
+        keyword: {type: string}
+        evidence_url: {type: string}
     Problem:
       type: object
       properties:

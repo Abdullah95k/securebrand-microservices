@@ -70,6 +70,17 @@ type Comment struct {
 	Hidden bool
 	IsOP   bool
 	Edited bool
+	// Tags are the pages and people the text tags (entity ranges).
+	Tags []Tag
+}
+
+// Tag is an entity range: a page or person tagged in a text, or a link.
+type Tag struct {
+	Offset, Length int
+	Type           string // Page, User or ExternalUrl
+	ID             string
+	URL            string
+	Name           string
 }
 
 type Post struct {
@@ -87,6 +98,7 @@ type Post struct {
 	Views      int64
 	Pinned     bool
 	Comments   []*Comment // top-level, oldest first
+	Tags       []Tag
 }
 
 type Page struct {
@@ -103,6 +115,14 @@ type Page struct {
 	// new-style page's profile (ID), as Facebook's new Pages experience
 	// has it. Only the profile has a timeline.
 	DelegateID int64
+	// Accounts outside the world's brand pages (AddAccount), for mention
+	// checks. Profile: a person's profile (no category, no Page object).
+	// Private: logged-out visitors get its HTML but an empty timeline.
+	// Restricted: its HTML names nothing (restricted to logged-in
+	// viewers).
+	Profile    bool
+	Private    bool
+	Restricted bool
 }
 
 // delegate returns the id the page's Page object has.
@@ -550,4 +570,69 @@ func countAll(cs []*Comment) int {
 		}
 	}
 	return n
+}
+
+// AccountSpec describes an account AddAccount creates.
+type AccountSpec struct {
+	Vanity     string
+	Name       string
+	Profile    bool // a person's profile, not a page
+	Private    bool // its timeline shows nothing logged out
+	Restricted bool // its HTML names nothing
+	Posts      int  // posts it has (visible unless Private)
+}
+
+// AddAccount adds a page or profile outside the brand pages, as an account
+// the brand pages' posts and comments can mention.
+func (w *World) AddAccount(a AccountSpec) *Page {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	p := &Page{ID: 100_070_000_000_000 + int64(len(w.pages))*1_009 + int64(len(a.Vanity)), Vanity: a.Vanity, Name: a.Name,
+		Followers: 100, Likes: 80, Intro: "Hello.", Profile: a.Profile, Private: a.Private, Restricted: a.Restricted}
+	if !a.Profile {
+		p.Category = "Local business"
+	}
+	w.pages[p.ID] = p
+	w.byVanity[strings.ToLower(p.Vanity)] = p
+	for j := 0; j < a.Posts; j++ {
+		post := w.addPostLocked(p, w.spec.Now.Add(-time.Duration(j+1)*time.Hour), false)
+		post.Type = "status"
+	}
+	return p
+}
+
+// AddMentionPost publishes a post on page pageID tagging tags and, when
+// shareOf is set, sharing that post (of any page).
+func (w *World) AddMentionPost(pageID int64, text string, at time.Time, tags []Tag, shareOf int64) (*Post, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	p, ok := w.pages[pageID]
+	if !ok {
+		return nil, fmt.Errorf("fakefb: no page %d", pageID)
+	}
+	post := w.addPostLocked(p, at, false)
+	post.Type, post.Text, post.Tags, post.Media, post.LinkURL = "status", text, tags, nil, ""
+	if shareOf != 0 {
+		if _, ok := w.posts[shareOf]; !ok {
+			return nil, fmt.Errorf("fakefb: no post %d", shareOf)
+		}
+		post.Type, post.SharedPost = "share", shareOf
+	}
+	return post, nil
+}
+
+// AddMentionComment adds a top-level comment by author on post postID,
+// tagging tags.
+func (w *World) AddMentionComment(postID int64, author Author, text string, tags []Tag) (*Comment, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	post, ok := w.posts[postID]
+	if !ok {
+		return nil, fmt.Errorf("fakefb: no post %d", postID)
+	}
+	c := &Comment{ID: w.id(), PostID: post.ID, Author: author, Text: text, Tags: tags, CreatedAt: time.Now().UTC(),
+		Reactions: map[string]int64{}}
+	w.comments[c.ID] = c
+	post.Comments = append(post.Comments, c)
+	return c, nil
 }

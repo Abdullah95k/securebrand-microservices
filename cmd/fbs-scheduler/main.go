@@ -75,7 +75,7 @@ func runScheduler(ctx context.Context, cfg *config.Config) error {
 			return scheduler.TaskBacklog(ctx, admin, cfg.Kafka.TopicPrefix)
 		}}
 	maint := &scheduler.Maintenance{DB: db, Cfg: cfg}
-	eraser := &gdpr.Eraser{DB: db, S3: s3, Producer: producer}
+	eraser := &gdpr.Eraser{DB: db, S3: s3, Producer: producer, HMACKey: []byte(cfg.Privacy.AuthorHMACKey)}
 
 	ops := httpserver.NewOps(cfg.HTTP.OpsAddr)
 	ops.AddCheck("postgres", db.Ping)
@@ -100,6 +100,21 @@ func runScheduler(ctx context.Context, cfg *config.Config) error {
 		leaderLoops = append(leaderLoops, func(ctx context.Context) error {
 			return scheduler.Every(ctx, "budget", b.Interval, budget.Tick)
 		})
+	}
+	if cfg.Mentions.Enabled {
+		ment := scheduler.NewMentions(db, producer, cfg)
+		ment.Budget = planner.Budget
+		leaderLoops = append(leaderLoops,
+			func(ctx context.Context) error {
+				return scheduler.Every(ctx, "mentions-aggregate", 10*time.Second, ment.Aggregate)
+			},
+			func(ctx context.Context) error {
+				return scheduler.Every(ctx, "mentions-queue", time.Minute, ment.Queue)
+			},
+			func(ctx context.Context) error {
+				return scheduler.Every(ctx, "mentions-gauges", 15*time.Minute, ment.Gauges)
+			},
+		)
 	}
 	if cfg.Discovery.Enabled {
 		disc := &scheduler.Discovery{DB: db, Producer: producer, Cfg: cfg.Discovery}

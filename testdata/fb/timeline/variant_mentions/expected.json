@@ -1,0 +1,88 @@
+{
+  "optional_missing": null,
+  "page_info": {
+    "HasNext": false,
+    "EndCursor": "c2",
+    "Found": true
+  },
+  "posts": [
+    {
+      "media": null,
+      "post": {
+        "post_id": "5550000000000101",
+        "page_id": "100064999000002",
+        "created_at": "2025-10-01T12:00:00Z",
+        "story_id": "UzpfSTEwMDA2NDk5OTAwMDAwMjo1NTUwMDAwMDAwMDAwMTAxOjU1NTAwMDAwMDAwMDAxMDE=",
+        "permalink": "https://www.facebook.com/brandy/posts/5550000000000101",
+        "type": "POST_TYPE_LINK",
+        "text": "Thanks @Example Person and @Partner Page, see facebook.com/some.page",
+        "text_ranges": [
+          {
+            "offset": 7,
+            "length": 14,
+            "entity_type": "User",
+            "entity_id": "100000000000101",
+            "url": "https://www.facebook.com/example.person.101",
+            "name": "Example Person"
+          },
+          {
+            "offset": 26,
+            "length": 13,
+            "entity_type": "Page",
+            "entity_id": "100064000000202",
+            "url": "https://www.facebook.com/partnerpage",
+            "name": "Partner Page"
+          },
+          {
+            "offset": 45,
+            "length": 22,
+            "entity_type": "ExternalUrl",
+            "url": "https://l.facebook.com/l.php?u=https%3A%2F%2Fwww.facebook.com%2Fsome.page\u0026h=AT2"
+          }
+        ],
+        "links": [
+          {
+            "url": "https://shop.example.com/x",
+            "title": "Shop"
+          }
+        ],
+        "author_id": "100064999000002",
+        "author_name": "Brand Y",
+        "reactions": {
+          "total": "3"
+        },
+        "comment_count": "0",
+        "feedback_id": "ZmVlZGJhY2s6NTU1MDAwMDAwMDAwMDEwMQ==",
+        "status": "POST_STATUS_VISIBLE",
+        "facebook_links": [
+          "https://m.facebook.com/profile.php?id=100000000000303"
+        ]
+      }
+    },
+    {
+      "media": null,
+      "post": {
+        "post_id": "5550000000000102",
+        "page_id": "100064999000002",
+        "created_at": "2025-10-01T12:00:00Z",
+        "story_id": "UzpfSTEwMDA2NDk5OTAwMDAwMjo1NTUwMDAwMDAwMDAwMTAyOjU1NTAwMDAwMDAwMDAxMDI=",
+        "permalink": "https://www.facebook.com/brandy/posts/5550000000000102",
+        "type": "POST_TYPE_SHARE",
+        "text": "Look at this",
+        "shared_post_id": "5550000000000909",
+        "shared_post_url": "https://www.facebook.com/otherpage/posts/5550000000000909",
+        "author_id": "100064999000002",
+        "author_name": "Brand Y",
+        "reactions": {
+          "total": "3"
+        },
+        "comment_count": "0",
+        "feedback_id": "ZmVlZGJhY2s6NTU1MDAwMDAwMDAwMDEwMg==",
+        "status": "POST_STATUS_VISIBLE",
+        "shared_owner_id": "100064000000404",
+        "shared_owner_url": "https://www.facebook.com/otherpage",
+        "shared_owner_type": "Page"
+      }
+    }
+  ]
+}

@@ -165,7 +165,7 @@ func (r *renderer) story(w *World, p *Page, post *Post, alt bool) obj {
 	if r.drift {
 		msgKey = "msg_v2"
 	}
-	content := obj{msgKey: obj{"text": post.Text, "ranges": hashtagRanges(post.Text)}}
+	content := obj{msgKey: obj{"text": post.Text, "ranges": append(hashtagRanges(post.Text), tagRanges(post.Tags)...)}}
 	if len(atts) > 0 {
 		content["attachments"] = atts
 	}
@@ -201,9 +201,39 @@ func (r *renderer) story(w *World, p *Page, post *Post, alt bool) obj {
 		if sp := w.posts[post.SharedPost]; sp != nil {
 			s["attached_story"] = obj{"__typename": "Story", "id": b64(fmt.Sprintf("S:_I%d:%d:%d", p.ID, sp.ID, sp.ID)),
 				"post_id": strconv.FormatInt(sp.ID, 10), "url": r.postURL(p, sp)}
+			if owner := w.pages[sp.PageID]; owner != nil && owner != p {
+				// Another page's post: the story names its owner, and lives
+				// under its URL.
+				typ := "Page"
+				if owner.Profile {
+					typ = "User"
+				}
+				s["attached_story"] = obj{"__typename": "Story", "id": b64(fmt.Sprintf("S:_I%d:%d:%d", owner.ID, sp.ID, sp.ID)),
+					"post_id": strconv.FormatInt(sp.ID, 10), "url": r.postURL(owner, sp),
+					"actors": []any{obj{"__typename": typ, "id": strconv.FormatInt(owner.ID, 10), "url": r.pageURL(owner)}}}
+			}
 		}
 	}
 	return s
+}
+
+// tagRanges renders tags as message ranges.
+func tagRanges(tags []Tag) []any {
+	var out []any
+	for _, t := range tags {
+		e := obj{"__typename": t.Type}
+		if t.ID != "" {
+			e["id"] = t.ID
+		}
+		if t.URL != "" {
+			e["url"] = t.URL
+		}
+		if t.Name != "" {
+			e["name"] = t.Name
+		}
+		out = append(out, obj{"offset": t.Offset, "length": t.Length, "entity": e})
+	}
+	return out
 }
 
 func hashtagRanges(text string) []any {
@@ -260,7 +290,7 @@ func (r *renderer) comment(w *World, post *Post, c *Comment, withInline bool) ob
 		"legacy_fbid":               strconv.FormatInt(c.ID, 10),
 		"depth":                     c.Depth,
 		"created_time":              c.CreatedAt.Unix(),
-		"body":                      obj{"text": c.Text, "ranges": []any{}},
+		"body":                      obj{"text": c.Text, "ranges": append([]any{}, tagRanges(c.Tags)...)},
 		"author":                    author,
 		"is_author_original_poster": c.IsOP,
 		"edit_history":              obj{"count": map[bool]int{true: 1, false: 0}[c.Edited]},
@@ -328,7 +358,7 @@ func (r *renderer) pageHTML(p *Page, lsd, datr string, consent bool) []byte {
 		}},
 		"profile_intro_card": obj{"bio": obj{"text": p.Intro}},
 	}
-	if !r.noID {
+	if !r.noID && !p.Profile {
 		user["delegate_page"] = obj{"id": strconv.FormatInt(p.delegate(), 10), "category_name": p.Category}
 	}
 	header := obj{"require": []any{[]any{"RelayPrefetchedStreamCache", "next", []any{}, []any{
@@ -343,7 +373,7 @@ func (r *renderer) pageHTML(p *Page, lsd, datr string, consent bool) []byte {
 	fmt.Fprintf(&b, "<title>%s | Facebook</title>", html.EscapeString(p.Name))
 	fmt.Fprintf(&b, `<meta property="og:title" content="%s"/>`, html.EscapeString(p.Name))
 	fmt.Fprintf(&b, `<meta property="og:url" content="%s"/>`, r.pageURL(p))
-	if !r.noID {
+	if !r.noID && !p.Profile {
 		fmt.Fprintf(&b, `<meta property="al:android:url" content="fb://page/%d"/>`, p.delegate())
 	}
 	bundle := r.bundle
@@ -365,8 +395,10 @@ func (r *renderer) pageHTML(p *Page, lsd, datr string, consent bool) []byte {
 		fmt.Fprintf(&b, `<script type="application/json" data-sjs>%s</script>`, site)
 	}
 	fmt.Fprintf(&b, `<script type="application/json" data-sjs>%s</script>`, hb)
-	if !r.noID {
+	if !r.noID && !p.Profile {
 		fmt.Fprintf(&b, `<script>window.requireLazy&&requireLazy(["pageID"],function(){});var x={"pageID":"%d"};</script>`, p.delegate())
+	}
+	if !r.noID {
 		// The profile route's props name the profile, the id with a timeline.
 		fmt.Fprintf(&b, `<script type="application/json" data-sjs>{"require":[["CometProfileRoot","props",null,[{"userID":"%d"}]]]}</script>`, p.ID)
 	}

@@ -340,6 +340,36 @@ discovery:
   concurrency: 2         # searches a crawler runs at once
   mentions_days: 30      # mentions kept; 0 = for good
 
+# Mentions (docs/runbooks/operations.md, "Mentions"). The persister records
+# every account a new post or comment mentions: pages and people tagged in
+# the text, facebook.com links in the text and attachments, the owner of a
+# shared post and, with include_comment_authors, each comment's author.
+# Each account is counted (GET /v1/discovery/accounts). Those not on our
+# main list (page_schedule) and not checked within recheck_after are checked,
+# most mentioned, by most of our pages and most recently first: the
+# crawler's check stage (crawler --stages ...,check) loads the account
+# logged out through the identity pool and the page-load gate (one page load,
+# then one timeline request). A public one (a page, or a profile whose posts
+# logged-out visitors see) is added to the schedule with source "mention";
+# a private or unavailable one is recorded, and checked again after
+# recheck_after. A check that fails (a wall, a rate limit, a proxy error)
+# records nothing about the account and is retried later. Other tools send
+# candidates to POST /v1/discovery/candidates (scope discovery:write), which
+# go through the same checks. Erased people are never added or checked
+# again; erasure requests remove their rows.
+mentions:
+  enabled: false
+  include_comment_authors: true
+  max_checks_per_day: 300    # hard cap on checks (page loads); 0 = none
+  max_new_per_day: 50        # pages and profiles added; 0 = none
+  time_zone: Asia/Baghdad    # where a day starts for both caps (Iraq time)
+  recheck_after: 4380h       # ~6 months: a not-public account is checked again after this
+  retry_backoff: 1h          # after a failed check, doubling up to:
+  retry_max_backoff: 168h
+  concurrency: 2             # checks a crawler runs at once
+  candidate_weight: 2        # starting priority of a candidate from another tool
+  retention_days: 180        # rows nobody mentioned or checked for this long are deleted; 0 = kept
+
 registry_sync:
   interval: 30m
   canary_pages: []       # vanity names or URLs; set at least three in production

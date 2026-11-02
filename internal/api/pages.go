@@ -190,20 +190,25 @@ type scheduleView struct {
 	Adaptive        bool            `json:"adaptive"`
 	PostsPerDay     *float64        `json:"posts_per_day,omitempty"`
 	LastPostAt      *time.Time      `json:"last_post_at,omitempty"`
-	// Source is "api" (registered by a client) or "discovery" (added by a
-	// keyword search, DiscoveredByKeywordID).
-	Source                string     `json:"source"`
-	DiscoveredAt          *time.Time `json:"discovered_at,omitempty"`
-	DiscoveredByKeywordID *int64     `json:"discovered_by_keyword_id,omitempty"`
+	// Source is "api" (registered by a client), "discovery" (added by a
+	// keyword search, DiscoveredByKeywordID) or "mention" (mentioned by our
+	// posts and comments, or proposed by another tool, and checked public:
+	// DiscoveredVia says why).
+	Source                string          `json:"source"`
+	DiscoveredAt          *time.Time      `json:"discovered_at,omitempty"`
+	DiscoveredByKeywordID *int64          `json:"discovered_by_keyword_id,omitempty"`
+	DiscoveredVia         json.RawMessage `json:"discovered_via,omitempty"`
 }
 
 const scheduleColumns = `s.page_ref, s.page_id, s.enabled, s.tier, s.interval_seconds, s.next_run_at, s.last_run_at, s.options,
-	s.consecutive_failures, s.adaptive, s.posts_per_day, s.last_post_at, s.source, s.discovered_at, s.discovered_by_keyword_id`
+	s.consecutive_failures, s.adaptive, s.posts_per_day, s.last_post_at, s.source, s.discovered_at, s.discovered_by_keyword_id,
+	s.discovered_via`
 
 func scanSchedule(row pgx.Row) (scheduleView, error) {
 	var v scheduleView
 	err := row.Scan(&v.PageRef, &v.PageID, &v.Enabled, &v.Tier, &v.IntervalSeconds, &v.NextRunAt, &v.LastRunAt, &v.Options,
-		&v.Failures, &v.Adaptive, &v.PostsPerDay, &v.LastPostAt, &v.Source, &v.DiscoveredAt, &v.DiscoveredByKeywordID)
+		&v.Failures, &v.Adaptive, &v.PostsPerDay, &v.LastPostAt, &v.Source, &v.DiscoveredAt, &v.DiscoveredByKeywordID,
+		&v.DiscoveredVia)
 	return v, err
 }
 
@@ -214,6 +219,14 @@ func (s *Server) listPages(w http.ResponseWriter, r *http.Request) {
 	if !c.Has(ScopeAdmin) {
 		q += ` JOIN page_registrations r ON r.page_ref = s.page_ref AND r.api_client_id = $1`
 		args = append(args, c.ID)
+	}
+	if src := r.URL.Query().Get("source"); src != "" {
+		if src != "api" && src != "discovery" && src != "mention" {
+			problem(w, http.StatusBadRequest, "invalid source", "source is api, discovery or mention")
+			return
+		}
+		args = append(args, src)
+		q += ` WHERE s.source = $` + strconv.Itoa(len(args))
 	}
 	args = append(args, limitParam(r))
 	q += ` ORDER BY s.page_ref LIMIT $` + strconv.Itoa(len(args))

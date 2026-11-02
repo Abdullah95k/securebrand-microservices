@@ -66,6 +66,18 @@ message Post {
   repeated string media_ids = 23;
   string extra_json = 24;
   PostStatus status = 25;
+  // The page or profile whose post this one shares, when Facebook names it
+  // (the shared post's actor). Like a person mention in text_ranges, it is
+  // cleared when it may be a person and pii_mode is pseudonymized, or the
+  // person was erased.
+  string shared_owner_id = 26;
+  string shared_owner_url = 27;
+  // Facebook __typename of the shared post's owner: Page, User, ...
+  string shared_owner_type = 28;
+  // facebook.com links among the post's attachments (to pages, profiles or
+  // posts), unwrapped from l.facebook.com. Links to other sites are in
+  // links.
+  repeated string facebook_links = 29;
 }
 
 // PostMetrics is a point-in-time engagement sample, on fb.post_metrics.v1.
