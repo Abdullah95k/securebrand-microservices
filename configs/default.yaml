@@ -353,9 +353,9 @@ discovery:
 # logged-out visitors see) is added to the schedule with source "mention";
 # a private or unavailable one is recorded, and checked again after
 # recheck_after. A check that fails (a wall, a rate limit, a proxy error)
-# records nothing about the account and is retried later. Other tools send
-# candidates to POST /v1/discovery/candidates (scope discovery:write), which
-# go through the same checks. Erased people are never added or checked
+# records nothing about the account and is retried later. Other tools may
+# send candidates to POST /v1/discovery/candidates (scope discovery:write),
+# which go through the same checks; none does yet. Erased people are never added or checked
 # again; erasure requests remove their rows.
 mentions:
   enabled: false
