@@ -37,6 +37,9 @@ type PostStage struct{ D *Deps }
 
 func (s *PostStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	d := s.D
+	// yield_after counts from here: with the wait for an identity, the
+	// task stays well inside its lease (crawler.lease_ttl).
+	started := time.Now()
 	sc := t.GetPost()
 	c := map[string]int64{}
 	if sc == nil {
@@ -87,7 +90,6 @@ func (s *PostStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 		return retry(t, st.Cursor, "30s", "full pass: "+err.Error(), c)
 	}
 
-	started := time.Now()
 	finished, truncated, exhausted := false, false, false
 	var olderRun int
 	var reported int64 // Facebook's comment count on the last page read
@@ -379,6 +381,9 @@ type ThreadStage struct{ D *Deps }
 
 func (s *ThreadStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	d := s.D
+	// yield_after counts from here: with the wait for an identity, the
+	// task stays well inside its lease (crawler.lease_ttl).
+	started := time.Now()
 	sc := t.GetThread()
 	c := map[string]int64{}
 	if sc == nil {
@@ -412,7 +417,6 @@ func (s *ThreadStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 		PageAuthorID: strconv.FormatInt(sc.PageId, 10), BaseDepth: sc.Depth,
 		ParentCommentID: sc.CommentId, RootCommentID: sc.RootCommentId, Replies: true}
 
-	started := time.Now()
 	finished, truncated := false, false
 	for !finished {
 		if kafka.IsDraining(ctx) || st.Pages >= d.Cfg.Crawler.YieldPages || time.Since(started) > d.Cfg.Crawler.YieldAfter {

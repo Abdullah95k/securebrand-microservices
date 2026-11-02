@@ -41,6 +41,9 @@ const refreshHorizon = 72 * time.Hour
 
 func (s *PageStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	d := s.D
+	// yield_after counts from here: with the wait for an identity, the
+	// task stays well inside its lease (crawler.lease_ttl).
+	started := time.Now()
 	sc := t.GetPage()
 	c := map[string]int64{}
 	if sc == nil {
@@ -176,7 +179,6 @@ timeline:
 	stopOld := int32(d.Cfg.Crawler.ConsecutiveOldStop)
 	q, _ := d.GQL.Registry.Get("timeline")
 	src := emit.Source{JobID: t.JobId, Query: "timeline", DocID: q.DocID, ParserVersion: parse.TimelineVersion, Mode: mode}
-	started := time.Now()
 	var oldest time.Time
 	finished, truncated := false, ""
 
