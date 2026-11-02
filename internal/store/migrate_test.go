@@ -15,7 +15,7 @@ import (
 func TestSourceExpiredMigration(t *testing.T) {
 	db := testenv.Postgres(t)
 	ctx := context.Background()
-	if err := store.MigrateDown(ctx, db); err != nil {
+	if err := store.MigrateDownTo(ctx, db, 6); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(ctx, `INSERT INTO media (media_id, fb_media_id, variant, kind, owner_type, status, stored_at, ready_at) VALUES
@@ -37,5 +37,25 @@ func TestSourceExpiredMigration(t *testing.T) {
 		if err := db.QueryRow(ctx, `SELECT status FROM media WHERE media_id = $1`, id).Scan(&got); err != nil || got != status {
 			t.Errorf("%s: %q (%v), want %q", id, got, err, status)
 		}
+	}
+}
+
+// Migration 00008 rolls back and forward; schedules registered before it
+// are a client's ("api").
+func TestDiscoveryMigration(t *testing.T) {
+	db := testenv.Postgres(t)
+	ctx := context.Background()
+	if err := store.MigrateDownTo(ctx, db, 7); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO page_schedule (page_ref, interval_seconds, next_run_at) VALUES ('v:old', 3600, now())`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MigrateUp(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	var source string
+	if err := db.QueryRow(ctx, `SELECT source FROM page_schedule WHERE page_ref = 'v:old'`).Scan(&source); err != nil || source != "api" {
+		t.Fatalf("%q %v", source, err)
 	}
 }

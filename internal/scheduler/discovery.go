@@ -36,10 +36,13 @@ func (d *Discovery) Tick(ctx context.Context) error {
 	if d.Now != nil {
 		now = d.Now()
 	}
-	rows, err := d.DB.Query(ctx, `UPDATE discovery_keywords SET last_queued_at = $1
+	// Database time on both sides of the comparison: the sink stamps
+	// last_searched_at with it, and a clock ahead here would leave every
+	// finished search looking unfinished.
+	rows, err := d.DB.Query(ctx, `UPDATE discovery_keywords SET last_queued_at = now()
 		WHERE enabled AND (last_queued_at IS NULL OR last_searched_at >= last_queued_at
-			OR last_queued_at < $1 - make_interval(secs => $2))
-		RETURNING id, term, language`, now, 3*d.Cfg.Interval.Seconds())
+			OR last_queued_at < now() - make_interval(secs => $1))
+		RETURNING id, term, language`, 3*d.Cfg.Interval.Seconds())
 	if err != nil {
 		return err
 	}

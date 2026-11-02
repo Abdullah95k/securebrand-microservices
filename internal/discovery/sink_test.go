@@ -225,4 +225,26 @@ func TestSinkDailyCap(t *testing.T) {
 			t.Errorf("capped mention: %+v", m)
 		}
 	}
+	// Found again while still over the cap: nothing new. Found again once
+	// there is room (the cap reset): its poster is added.
+	results := []discovery.Result{{PostID: "2", PostTime: now.Add(-time.Minute), OwnerRef: "second", OwnerKind: "page"}}
+	if st, err := sink.Record(ctx, q, results); err != nil || st.Mentions != 0 || st.Capped != 0 || st.Added != 0 {
+		t.Fatalf("still capped: %+v %v", st, err)
+	}
+	sink.Cfg.MaxNewPerDay = 2
+	if st, err := sink.Record(ctx, q, results); err != nil || st.Added != 1 {
+		t.Fatalf("after the cap: %+v %v", st, err)
+	}
+	if _, ok := scheduled(t, db, "v:second"); !ok {
+		t.Fatal("the capped poster was not added once there was room")
+	}
+	ms, _ = discovery.ListMentions(ctx, db, discovery.MentionFilter{Since: now.Add(-time.Hour)})
+	for _, m := range ms {
+		if m.PostID == "2" && (m.PageRef == nil || *m.PageRef != "v:second" || m.MatchedExisting) {
+			t.Errorf("resolved mention: %+v", m)
+		}
+	}
+	if len(ms) != 2 {
+		t.Errorf("%d mentions, want 2", len(ms))
+	}
 }

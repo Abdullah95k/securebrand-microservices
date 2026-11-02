@@ -41,7 +41,7 @@ type Query struct {
 // Stats counts what became of a search's results.
 type Stats struct {
 	Results  int // returned by the search
-	Mentions int // new mentions recorded (a retry records none twice)
+	Mentions int // mentions recorded, or capped ones now resolved (a retry records none twice)
 	Existing int // of which the poster was scheduled already
 	Added    int // of which added the poster
 	Capped   int // of which the daily cap kept from adding the poster
@@ -126,14 +126,22 @@ func (s *Sink) accept(q Query, r Result) (string, bool) {
 
 // record stores one mention and, for a poster not scheduled yet, its
 // schedule entry, in one transaction. It returns "existing", "added",
-// "capped", or "" for a mention recorded before.
+// "capped", or "" for a mention recorded before. A mention the daily cap
+// kept from adding its poster is tried again when the post is found again
+// (the windows overlap, and the cap resets at midnight UTC).
 func (s *Sink) record(ctx context.Context, q Query, r Result, ref string) (string, error) {
 	var outcome string
 	err := pgx.BeginFunc(ctx, s.DB, func(tx pgx.Tx) error {
 		outcome = ""
-		var dup bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM discovery_mentions WHERE keyword_id = $1 AND post_fb_id = $2)`,
-			q.KeywordID, r.PostID).Scan(&dup); err != nil || dup {
+		var prev *string
+		capped := false
+		switch err := tx.QueryRow(ctx, `SELECT page_ref FROM discovery_mentions WHERE keyword_id = $1 AND post_fb_id = $2`,
+			q.KeywordID, r.PostID).Scan(&prev); {
+		case err == nil && prev != nil:
+			return nil // recorded before
+		case err == nil:
+			capped = true
+		case !errors.Is(err, pgx.ErrNoRows):
 			return err
 		}
 		refs := []string{ref}
@@ -155,6 +163,15 @@ func (s *Sink) record(ctx context.Context, q Query, r Result, ref string) (strin
 			if outcome != "capped" {
 				pageRef = &ref
 			}
+		}
+		if capped {
+			if outcome == "capped" {
+				outcome = "" // still over the cap: nothing new
+				return nil
+			}
+			_, err = tx.Exec(ctx, `UPDATE discovery_mentions SET page_ref = $3, matched_existing = $4 WHERE keyword_id = $1 AND post_fb_id = $2`,
+				q.KeywordID, r.PostID, pageRef, outcome == "existing")
+			return err
 		}
 		var postTime *time.Time
 		if !r.PostTime.IsZero() {

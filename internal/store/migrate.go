@@ -50,6 +50,19 @@ func MigrateDown(ctx context.Context, pool *pgxpool.Pool) error {
 	return nil
 }
 
+// MigrateDownTo rolls back every migration after version.
+func MigrateDownTo(ctx context.Context, pool *pgxpool.Pool, version int64) error {
+	p, db, err := gooseProvider(pool)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+	if _, err := p.DownTo(ctx, version); err != nil {
+		return fmt.Errorf("store: migrate down to %d: %w", version, err)
+	}
+	return nil
+}
+
 // MigrateStatus returns "version: applied" lines.
 func MigrateStatus(ctx context.Context, pool *pgxpool.Pool) ([]string, error) {
 	p, db, err := gooseProvider(pool)
