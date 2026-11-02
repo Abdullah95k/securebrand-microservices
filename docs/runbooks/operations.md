@@ -210,7 +210,8 @@ The reaper marks jobs `partial` after `scheduler.reaper_after` (30m) without
 activity, or `failed` when their accounting state is gone. While crawl tasks
 wait in the job's lane (consumer lag on its page, post or thread topics, as
 in a burst of backfills), a quiet job is taken to be queued and is left
-until `scheduler.reaper_max_age` (24h). The tasks a closed job still has
+until `scheduler.reaper_max_age` (24h); the crawl task topics keep their
+tasks as long (24h in `configs/topics.yaml`), so raise both together. The tasks a closed job still has
 waiting (on the retry topics) stop when they come back, as a cancelled job's
 do. Inspect the DLQ and `GET /v1/jobs/{id}` counters.
 

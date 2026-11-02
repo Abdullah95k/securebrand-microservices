@@ -3,16 +3,19 @@
 # `fbctl kafka apply --partitions-cap 3`.
 replicas: 3
 topics:
-  # Internal work queues (protobuf Task envelopes).
-  - {name: fbs.task.page.p0,   partitions: 24, retention: 72h}
-  - {name: fbs.task.page.p1,   partitions: 24, retention: 72h}
-  - {name: fbs.task.page.p2,   partitions: 24, retention: 72h}
-  - {name: fbs.task.post.p0,   partitions: 48, retention: 72h}
-  - {name: fbs.task.post.p1,   partitions: 48, retention: 72h}
-  - {name: fbs.task.post.p2,   partitions: 48, retention: 72h}
-  - {name: fbs.task.thread.p0, partitions: 48, retention: 72h}
-  - {name: fbs.task.thread.p1, partitions: 48, retention: 72h}
-  - {name: fbs.task.thread.p2, partitions: 48, retention: 72h}
+  # Internal work queues (protobuf Task envelopes). A crawl task older than
+  # a day belongs to a job the reaper has closed (scheduler.reaper_max_age,
+  # 24h), and would be cancelled on arrival: keeping it longer only costs
+  # disk.
+  - {name: fbs.task.page.p0,   partitions: 24, retention: 24h}
+  - {name: fbs.task.page.p1,   partitions: 24, retention: 24h}
+  - {name: fbs.task.page.p2,   partitions: 24, retention: 24h}
+  - {name: fbs.task.post.p0,   partitions: 48, retention: 24h}
+  - {name: fbs.task.post.p1,   partitions: 48, retention: 24h}
+  - {name: fbs.task.post.p2,   partitions: 48, retention: 24h}
+  - {name: fbs.task.thread.p0, partitions: 48, retention: 24h}
+  - {name: fbs.task.thread.p1, partitions: 48, retention: 24h}
+  - {name: fbs.task.thread.p2, partitions: 48, retention: 24h}
   - {name: fbs.task.media,     partitions: 24, retention: 72h}
   # Discovery keyword searches (p1 only); a search older than a day is
   # stale (the next interval queues a fresh one).
