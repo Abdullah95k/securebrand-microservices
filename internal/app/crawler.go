@@ -111,8 +111,9 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 	if err != nil {
 		return nil, err
 	}
-	// The sessions the last crawler saved when it stopped (SaveSessions):
-	// resuming them spares a page load on every exit at once.
+	// The sessions the last crawler left (SaveSessions as it stopped, or its
+	// last checkpoint if it died): resuming them spares a page load on every
+	// exit at once.
 	if n, err := pool.Resume(ctx); err != nil {
 		slog.Warn("saved sessions not resumed", "resumed", n, "err", err)
 	} else {
@@ -161,6 +162,9 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 		func(ctx context.Context) error { return supp.Run(ctx, cfg.Crawler.SuppressionRefresh) },
 		// Sessions of crawlers that stop after this one started.
 		func(ctx context.Context) error { return pool.RunResume(ctx, time.Minute) },
+		// This crawler's sessions, for the next one even if this one dies
+		// without saving them.
+		func(ctx context.Context) error { return pool.RunCheckpoint(ctx, session.CheckpointEvery) },
 	}
 	// The reporter feeds both AIMD (block rate) and the traffic budget.
 	if cfg.FB.AIMD.Enabled || cfg.Scheduler.Budget.Enabled {
@@ -294,8 +298,9 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 	return c, nil
 }
 
-// SaveSessions keeps the crawler's idle sessions and its exits' page-load
-// pacing for the next crawler to resume. Call it once the crawler stopped.
+// SaveSessions keeps the crawler's sessions and its exits' page-load pacing
+// for the next crawler to resume at once. Call it once the crawler stopped.
+// A crawler that dies without it leaves its last checkpoint instead.
 func (c *Crawler) SaveSessions(ctx context.Context) {
 	if n, err := c.Deps.Pool.Save(ctx); err != nil {
 		slog.Warn("sessions not saved", "err", err)

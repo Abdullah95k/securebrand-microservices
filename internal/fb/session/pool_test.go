@@ -60,8 +60,8 @@ func TestBreakerRetiresIdleIdentitiesAndFeedsOutcomes(t *testing.T) {
 	if err != nil || c == a || c.Endpoint.Bucket != "isp|198.51.100.0/24" {
 		t.Fatalf("want a fresh identity on the other /24: %+v %v", c.Endpoint, err)
 	}
-	if pool.live["isp"] != 1 {
-		t.Fatalf("the identity on the open bucket must be retired: live=%d", pool.live["isp"])
+	if pool.live["isp"] != 1 || len(pool.all) != 1 {
+		t.Fatalf("the identity on the open bucket must be retired: live=%d tracked=%d", pool.live["isp"], len(pool.all))
 	}
 }
 

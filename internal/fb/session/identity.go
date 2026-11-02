@@ -5,7 +5,6 @@ package session
 import (
 	"context"
 	"crypto/rand"
-	"encoding/json"
 	"fmt"
 	"math/big"
 	"net/url"
@@ -251,27 +250,6 @@ func (id *Identity) saved() (Saved, bool) {
 		SessionID: id.sessionID, Req: id.req.Load(), Requests: id.requests, MaxRequests: id.maxRequests,
 		Tokens: id.tokens, Bootstrapped: id.bootstrapped, Cookies: id.Doer.Cookies(id.Base), SavedAt: time.Now(),
 	}, true
-}
-
-// Snapshot serialises the identity so another pod can rebuild it on the
-// same sticky exit (used if cursors turn out to be session-bound).
-type Snapshot struct {
-	ID        string            `json:"id"`
-	Tier      string            `json:"tier"`
-	ProxyURL  string            `json:"proxy_url"`
-	SessionID string            `json:"session_id"`
-	Expires   time.Time         `json:"expires"`
-	Profile   string            `json:"profile"`
-	Cookies   map[string]string `json:"cookies"`
-	Tokens    htmlx.Tokens      `json:"tokens"`
-}
-
-func (id *Identity) Snapshot() ([]byte, error) {
-	s := Snapshot{
-		ID: id.ID, Tier: id.Endpoint.Tier, ProxyURL: id.Endpoint.URL, SessionID: id.Endpoint.SessionID,
-		Expires: id.Endpoint.ExpiresAt, Profile: id.FP.Profile, Cookies: id.Doer.Cookies(id.Base), Tokens: id.Tokens(),
-	}
-	return json.Marshal(s)
 }
 
 func randAlnum(n int) string {
