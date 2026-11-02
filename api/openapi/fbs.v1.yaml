@@ -110,6 +110,10 @@ paths:
                   backfill_reused: {type: boolean, description: "backfill_job is the client's backfill of the page already under way (started with its own limits), not a new one"}
     get:
       summary: List registered pages and their schedules
+      description: >-
+        Each schedule carries `source`: `api` for a page a client registered, `discovery` for one a
+        keyword search added (with `discovered_at` and `discovered_by_keyword_id`). Discovered pages have
+        no registering client, so only `admin` keys list them here.
       parameters: [{$ref: '#/components/parameters/Limit'}]
       responses:
         "200": {description: Pages}
@@ -226,6 +230,98 @@ paths:
         - {in: path, name: media, required: true, schema: {type: string, format: uuid}}
       responses:
         "200": {description: Media, content: {application/json: {schema: {$ref: '#/components/schemas/Media'}}}}
+  /discovery/keywords:
+    get:
+      summary: Discovery keywords, by id
+      description: >-
+        Requires `data:read`. Keywords are searched every `discovery.interval` for posts of the last
+        `discovery.window`; each post found is a mention, and a poster not yet scheduled is added to
+        the schedule (`source: discovery`). `fbctl discovery keywords seed` loads the Iraq list.
+      parameters:
+        - {in: query, name: language, schema: {type: string, enum: [en, ar, ckb, kmr]}}
+        - {in: query, name: group, schema: {type: string}}
+        - {in: query, name: enabled, schema: {type: boolean}}
+        - {in: query, name: after, schema: {type: integer, format: int64}, description: Keyword id to list after (next_after)}
+        - {in: query, name: limit, schema: {type: integer, default: 1000, maximum: 1000}}
+      responses:
+        "200":
+          description: Keywords
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  keywords: {type: array, items: {$ref: '#/components/schemas/Keyword'}}
+                  next_after: {type: integer, format: int64, description: Set when more keywords follow}
+    post:
+      summary: Add a discovery keyword
+      description: >-
+        Requires `pages:write`. A term whose spelling folds to a keyword already listed in the same
+        language (case, accents, Arabic letter forms, harakat, Sorani ZWNJ typing) returns that keyword
+        with 200 and `created: false`, unchanged.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [term, language]
+              properties:
+                term: {type: string, maxLength: 100}
+                language: {type: string, enum: [en, ar, ckb, kmr], description: 'English, Arabic, Sorani Kurdish (Arabic script), Kurmanji Kurdish (Latin script)'}
+                group: {type: string, description: 'Free label, e.g. the governorate'}
+                enabled: {type: boolean, default: true}
+      responses:
+        "201": {description: Added, content: {application/json: {schema: {$ref: '#/components/schemas/KeywordResult'}}}}
+        "200": {description: Already listed, content: {application/json: {schema: {$ref: '#/components/schemas/KeywordResult'}}}}
+        "400": {$ref: '#/components/responses/Problem'}
+  /discovery/keywords/{id}:
+    parameters:
+      - {in: path, name: id, required: true, schema: {type: integer, format: int64}}
+    patch:
+      summary: Change a keyword's term, group or enabled state
+      description: Requires `pages:write`. The language can't change.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                term: {type: string, maxLength: 100}
+                group: {type: string}
+                enabled: {type: boolean}
+      responses:
+        "200": {description: Keyword, content: {application/json: {schema: {$ref: '#/components/schemas/KeywordResult'}}}}
+        "404": {$ref: '#/components/responses/Problem'}
+        "409": {$ref: '#/components/responses/Problem'}
+    delete:
+      summary: Delete a keyword and its mentions; the pages it added stay scheduled
+      responses:
+        "204": {description: Deleted}
+        "404": {$ref: '#/components/responses/Problem'}
+  /discovery/mentions:
+    get:
+      summary: Posts discovery found, newest first
+      description: >-
+        Requires `data:read`. A mention of a profile (a person) shows who posted only with `pii:read`.
+        `new_only` lists mentions whose poster was not scheduled before: `page_ref` set when discovery
+        added it, unset when `discovery.max_new_per_day` stopped it.
+      parameters:
+        - {in: query, name: since, schema: {type: string, format: date-time}, description: 'Found at or after (default: 24 hours ago)'}
+        - {in: query, name: before, schema: {type: string, format: date-time}, description: Found before (next_before)}
+        - {in: query, name: keyword, schema: {type: integer, format: int64}}
+        - {in: query, name: new_only, schema: {type: boolean}}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        "200":
+          description: Mentions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  mentions: {type: array, items: {$ref: '#/components/schemas/Mention'}}
+                  next_before: {type: string, format: date-time, description: Set when more mentions follow}
   /erasure-requests:
     post:
       summary: GDPR erasure of an author or a page (admin)
@@ -311,6 +407,37 @@ components:
         application/problem+json:
           schema: {$ref: '#/components/schemas/Problem'}
   schemas:
+    Keyword:
+      type: object
+      properties:
+        id: {type: integer, format: int64}
+        term: {type: string}
+        normalized: {type: string, description: The term folded for matching}
+        language: {type: string, enum: [en, ar, ckb, kmr]}
+        group: {type: string}
+        enabled: {type: boolean}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        last_searched_at: {type: string, format: date-time}
+    KeywordResult:
+      type: object
+      properties:
+        keyword: {$ref: '#/components/schemas/Keyword'}
+        created: {type: boolean}
+    Mention:
+      type: object
+      properties:
+        keyword_id: {type: integer, format: int64}
+        keyword: {type: string}
+        language: {type: string}
+        post_id: {type: string}
+        owner_id: {type: integer, format: int64}
+        owner_ref: {type: string}
+        owner_kind: {type: string, enum: [page, profile]}
+        page_ref: {type: string, description: The poster's schedule entry}
+        post_time: {type: string, format: date-time}
+        found_at: {type: string, format: date-time}
+        matched_existing: {type: boolean, description: The poster was scheduled before}
     Problem:
       type: object
       properties:

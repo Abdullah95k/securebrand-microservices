@@ -61,6 +61,16 @@ var (
 	PageLoadsDeferred = counterVec("proxy_page_loads_deferred_total", "Page loads put off by an exit's page-load gate, by reason.", "tier", "reason")
 	Bootstraps        = counterVec("bootstrap_total", "Identity bootstraps.", "method", "outcome")
 
+	// Discovery: keyword searches by outcome (ok, error, unavailable),
+	// posts they returned, and what became of each: a mention of a page
+	// already scheduled (existing), one that added a page (added), one
+	// over discovery.max_new_per_day (capped), or one skipped (outside the
+	// window, a group, a profile with include_profiles off, text without the
+	// keyword, an erased page).
+	DiscoverySearches = counterVec("discovery_searches_total", "Discovery keyword searches.", "language", "outcome")
+	DiscoveryResults  = counterVec("discovery_results_total", "Posts discovery searches returned, by what became of them.", "outcome")
+	DiscoveryAdded    = counterVec("discovery_pages_added_total", "Pages and profiles discovery added to the schedule.", "kind")
+
 	// Tasks.
 	Tasks       = counterVec("tasks_total", "Crawl tasks by stage, lane and outcome.", "stage", "lane", "outcome")
 	TaskSeconds = histVec("task_seconds", "Crawl task duration.", prometheus.ExponentialBuckets(0.1, 2, 12), "stage")

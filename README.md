@@ -43,7 +43,7 @@ fbs-crawler --stages page ─PostTask─▶ post ─ThreadTask─▶ thread     
 |---|---|
 | `fbs-api` | REST API (`/v1`, [OpenAPI](api/openapi/fbs.v1.yaml)), API keys with scopes, job dispatch |
 | `fbs-scheduler` | Leader-elected. Runs the planner, the job finaliser (completeness, `fb.job.v1`), the reaper, partitions, retention and erasure. |
-| `fbs-crawler --stages page,post,thread,retry` | Fetch, parse and emit. Run one Deployment per stage. |
+| `fbs-crawler --stages page,post,thread,retry,search` | Fetch, parse and emit; `search` runs discovery's keyword searches. Run one Deployment per stage. |
 | `fbs-persister` | Writes `fb.*` topics into partitioned Postgres (COPY + no-op upserts) |
 | `fbs-media-downloader` / `fbs-media-janitor` | Temporary media lifecycle ([contract](docs/contracts/media-handoff.md)) |
 | `fbs-registry-sync` | Follows Facebook's doc_id rotations. It scans canary pages' bundles, checks new ids with real requests and promotes working ones ([runbook](docs/runbooks/operations.md#registry-stale-doc_id-rotated)). |
@@ -147,6 +147,7 @@ Settings that matter most:
 | `scheduler.post_refresh` | 24h / 72h / 7d by post age | Comment refresh of posts older than the timeline overlap, riding on the page's scheduled job; recrawls at 7 and 30 days |
 | `scheduler.budget` | unlimited | Daily request/byte budget: pauses backfill, then stretches slow tiers; never holds on-demand work |
 | `registry_sync.canary_pages`, `registry_sync.interval` | none / 30m | Public pages fbs-registry-sync checks doc_ids on; set at least three in production. `promote: false` makes it a dry run. |
+| `discovery` | off; 1h / 6h / 200 a day | Keyword discovery: every `interval` each enabled keyword (`/v1/discovery/keywords`; `fbctl discovery keywords seed` loads the Iraq list in English, Arabic, Sorani and Kurmanji) is searched for posts of the last `window`; posters not yet scheduled are added (`source: discovery`), up to `max_new_per_day`. Needs the crawler's `search` stage. The Facebook search client is not built yet: searches end `unavailable`. |
 | `api.max_running_p0_jobs` | 0 (off) | Fleet-wide cap on running on-demand jobs (429 + Retry-After) |
 | `limits.video_policy` | `sd` (`thumbnail` for backfills) | `none`, `thumbnail`, `sd` or `hd` |
 | `crawler.slots`, `crawler.lanes`, `crawler.lane_min` | 240 / p2 ≤ 96 / 12 | In-flight tasks per pod and stage, shared by the lanes in priority order (on-demand > scheduled > backfill); backfill capped at 40%, each lane keeps a minimum |

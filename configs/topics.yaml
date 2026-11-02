@@ -14,6 +14,9 @@ topics:
   - {name: fbs.task.thread.p1, partitions: 48, retention: 72h}
   - {name: fbs.task.thread.p2, partitions: 48, retention: 72h}
   - {name: fbs.task.media,     partitions: 24, retention: 72h}
+  # Discovery keyword searches (p1 only); a search older than a day is
+  # stale (the next interval queues a fresh one).
+  - {name: fbs.task.search.p1, partitions: 6,  retention: 24h}
   # A retry waits its delay in the relay, which forwards it within minutes:
   # a short retention bounds the disk a burst of retries takes.
   - {name: fbs.task.retry.30s, partitions: 12, retention: 6h}

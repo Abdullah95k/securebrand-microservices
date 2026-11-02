@@ -193,6 +193,14 @@ components:
     command: ["/usr/local/bin/fbs-crawler", "--stages", "retry"]
     replicas: 1
     resources: {requests: {cpu: 100m, memory: 128Mi}, limits: {memory: 256Mi}}
+  # Keyword discovery searches: enable with config.discovery.enabled. Needs
+  # the crawlers' egress (proxies).
+  crawler-search:
+    enabled: false
+    command: ["/usr/local/bin/fbs-crawler", "--stages", "search"]
+    replicas: 1
+    terminationGracePeriodSeconds: 90
+    resources: {requests: {cpu: 200m, memory: 256Mi}, limits: {memory: 512Mi}}
   persister:
     enabled: true
     command: ["/usr/local/bin/fbs-persister"]

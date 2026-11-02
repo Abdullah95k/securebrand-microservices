@@ -38,6 +38,10 @@ func ScopeKey(t *taskv1.Task) string {
 		return "thread:" + strconv.FormatInt(s.Thread.CommentId, 10)
 	case *taskv1.Task_Media:
 		return "media:" + s.Media.GetMedia().GetMediaId()
+	case *taskv1.Task_Search:
+		// One search per keyword and window: a run queued twice for the
+		// same window is one task.
+		return "search:" + strconv.FormatInt(s.Search.KeywordId, 10) + ":" + strconv.FormatInt(s.Search.GetUntil().GetSeconds(), 10)
 	}
 	return "unknown"
 }
@@ -123,6 +127,16 @@ func NewMedia(jobID string, m *fbv1.Media) *taskv1.Task {
 	return Finalize(&taskv1.Task{
 		JobId: jobID, Kind: taskv1.Kind_KIND_MEDIA, Lane: taskv1.Lane_LANE_P1,
 		Scope: &taskv1.Task_Media{Media: &taskv1.MediaScope{Media: m}},
+	})
+}
+
+// NewSearch creates a discovery search for keyword id: posts mentioning
+// term in [since, until). Searches are not part of any job.
+func NewSearch(keywordID int64, term, lang string, since, until time.Time) *taskv1.Task {
+	return Finalize(&taskv1.Task{
+		Kind: taskv1.Kind_KIND_SEARCH, Lane: taskv1.Lane_LANE_P1,
+		Scope: &taskv1.Task_Search{Search: &taskv1.SearchScope{KeywordId: keywordID, Term: term, Language: lang,
+			Since: timestamppb.New(since), Until: timestamppb.New(until)}},
 	})
 }
 

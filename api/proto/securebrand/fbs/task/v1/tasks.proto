@@ -24,6 +24,8 @@ enum Kind {
   KIND_POST = 2;
   KIND_THREAD = 3;
   KIND_MEDIA = 4;
+  // A keyword search for new mentions (discovery).
+  KIND_SEARCH = 5;
 }
 
 enum VideoPolicy {
@@ -97,6 +99,17 @@ message MediaScope {
   securebrand.fb.v1.Media media = 1;
 }
 
+// SearchScope is one discovery search: a keyword's mentions posted in
+// [since, until).
+message SearchScope {
+  int64 keyword_id = 1;
+  string term = 2;
+  // en | ar | ckb | kmr
+  string language = 3;
+  google.protobuf.Timestamp since = 4;
+  google.protobuf.Timestamp until = 5;
+}
+
 // SessionSnapshot carries a serialised identity when cursors turn out to be
 // bound to a session (decided in Phase 0).
 message SessionSnapshot {
@@ -122,6 +135,7 @@ message Task {
     PostScope post = 11;
     ThreadScope thread = 12;
     MediaScope media = 13;
+    SearchScope search = 21;
   }
   SessionSnapshot affinity = 14;
   uint32 attempt = 15;

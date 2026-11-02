@@ -104,7 +104,8 @@ services:
 
   crawler:
     <<: *fbs
-    entrypoint: ["/usr/local/bin/fbs-crawler", "--stages", "page,post,thread,retry"]
+    # search runs discovery's keyword searches (idle while discovery.enabled is false).
+    entrypoint: ["/usr/local/bin/fbs-crawler", "--stages", "page,post,thread,retry,search"]
 
   persister:
     <<: *fbs
