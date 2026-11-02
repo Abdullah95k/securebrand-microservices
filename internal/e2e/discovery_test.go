@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"testing"
 	"time"
@@ -19,6 +20,8 @@ import (
 // planner's next run crawls it. A post older than the window adds nothing,
 // and searching again records nothing twice.
 func TestDiscoveryAddsPagesThatMentionKeywords(t *testing.T) {
+	t.Setenv("FBS_E2E_DEBUG", "1") // TEMP: diagnose in CI
+	t.Cleanup(func() { slog.SetLogLoggerLevel(slog.LevelInfo) })
 	s := Start(t, Options{
 		Spec: fakefb.Spec{Seed: 21, Pages: 3, PostsPerPage: 4, PostSpacing: 20 * time.Hour, MaxComments: 6,
 			ReplyProbability: 0.1, MaxReplies: 2},
