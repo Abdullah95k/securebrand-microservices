@@ -316,6 +316,7 @@ func TestErasureCoversMentions(t *testing.T) {
 			('id:100064000000222', 100064000000222, 'mention', 'listed', now(), now()),
 			('v:the.page', NULL, 'mention', 'unchecked', now(), now()),
 			('id:100000000000333', 100000000000333, 'mention', 'unchecked', now(), now())`,
+		`UPDATE checked_accounts SET pages = 2 WHERE account_ref = 'id:100000000000333'`,
 		`INSERT INTO mention_pages (account_ref, page_id, mentions, last_seen_at) VALUES
 			('v:the.person', 9, 1, now()), ('id:100000000000333', 100064000000222, 1, now()), ('id:100000000000333', 9, 1, now())`,
 		`INSERT INTO mention_events (account_ref, account_id, kind, via, page_id, post_id, seen_at) VALUES
@@ -378,6 +379,10 @@ func TestErasureCoversMentions(t *testing.T) {
 	}
 	if n := count(`SELECT count(*) FROM checked_accounts WHERE account_id = $1`, other) + count(`SELECT count(*) FROM mention_pages WHERE page_id = 9`); n != 2 {
 		t.Fatalf("other accounts' rows touched: %d", n)
+	}
+	// The other account no longer counts the erased page among its pages.
+	if n := count(`SELECT pages FROM checked_accounts WHERE account_id = $1`, other); n != 1 {
+		t.Fatalf("other account's pages = %d, want 1", n)
 	}
 }
 

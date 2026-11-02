@@ -268,7 +268,8 @@ func TestRecordFailed(t *testing.T) {
 	var prev time.Duration
 	for i := 1; i <= 3; i++ {
 		start := time.Now()
-		if err := RecordFailed(ctx, db, "v:walled.one", "login_wall", true, time.Hour, 3*time.Hour); err != nil {
+		if err := RecordFailed(ctx, db, "v:walled.one", "login_wall", true, Retry{Backoff: time.Hour, MaxBackoff: 3 * time.Hour,
+			MaxFailures: 4, Park: 30 * 24 * time.Hour}); err != nil {
 			t.Fatal(err)
 		}
 		a := get(t, db, "v:walled.one")
@@ -281,6 +282,44 @@ func TestRecordFailed(t *testing.T) {
 	}
 	if due, _ := Pick(ctx, db, 10); len(due) != 0 {
 		t.Fatal("picked before its retry time")
+	}
+	// The fourth failure in a row parks it, still unchecked, until a
+	// mention after the park.
+	if err := RecordFailed(ctx, db, "v:walled.one", "login_wall", true, Retry{Backoff: time.Hour, MaxBackoff: 3 * time.Hour,
+		MaxFailures: 4, Park: 30 * 24 * time.Hour}); err != nil {
+		t.Fatal(err)
+	}
+	a := get(t, db, "v:walled.one")
+	if a.InQueue || a.Status != StatusUnchecked || a.CheckedAt != nil || a.RecheckAt == nil || a.RecheckAt.Before(time.Now().Add(29*24*time.Hour)) {
+		t.Fatalf("parked: %+v", a)
+	}
+	copyEvents(t, db, ev("v:walled.one", 1, 2, 0, ViaTag, time.Now()))
+	aggregate(t, db)
+	if a := get(t, db, "v:walled.one"); a.InQueue {
+		t.Fatal("a mention during the park brought it back")
+	}
+	if _, err := db.Exec(ctx, `UPDATE checked_accounts SET recheck_at = now() - interval '1 second'`); err != nil {
+		t.Fatal(err)
+	}
+	copyEvents(t, db, ev("v:walled.one", 1, 3, 0, ViaTag, time.Now()))
+	aggregate(t, db)
+	if a := get(t, db, "v:walled.one"); !a.InQueue || a.Failures != 0 || a.RetryAt != nil {
+		t.Fatalf("after the park: %+v", a)
+	}
+}
+
+// What first mentioned an account follows the earliest mention, also one
+// found later (a backfill after a scheduled crawl).
+func TestFirstMentionFollowsEarliest(t *testing.T) {
+	db := testenv.Postgres(t)
+	now := time.Now().UTC()
+	copyEvents(t, db, ev("v:some.page", 1, 20, 200, ViaTag, now))
+	aggregate(t, db)
+	copyEvents(t, db, ev("v:some.page", 2, 10, 100, ViaTag, now.Add(-48*time.Hour)), ev("v:some.page", 3, 30, 0, ViaTag, now.Add(time.Hour)))
+	aggregate(t, db)
+	a := get(t, db, "v:some.page")
+	if *a.FirstPageID != 2 || *a.FirstPostID != 10 || *a.FirstCommentID != 100 || !a.FirstSeenAt.Equal(now.Add(-48*time.Hour).Truncate(time.Microsecond)) {
+		t.Fatalf("first: %+v", a)
 	}
 }
 

@@ -366,6 +366,7 @@ mentions:
   recheck_after: 4380h       # ~6 months: a not-public account is checked again after this
   retry_backoff: 1h          # after a failed check, doubling up to:
   retry_max_backoff: 168h
+  max_failures: 10           # failed checks in a row park an account (unchecked) until mentioned after recheck_after
   concurrency: 2             # checks a crawler runs at once
   candidate_weight: 2        # starting priority of a candidate from another tool
   retention_days: 180        # rows nobody mentioned or checked for this long are deleted; 0 = kept

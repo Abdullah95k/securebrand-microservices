@@ -340,7 +340,8 @@ paths:
         private or unavailable account is checked again when mentioned after `recheck_at`
         (`mentions.recheck_after`, about 6 months). A failed check (a wall, a rate limit, a proxy error)
         records nothing about the account: `failures`, `last_error` and `retry_at` say when it is tried
-        again. Accounts that may be people (any `kind` but `page`) show their `account_ref`,
+        again; after `mentions.max_failures` in a row it is parked (still unchecked, `in_queue` false)
+        until mentioned after `recheck_at`. Accounts that may be people (any `kind` but `page`) show their `account_ref`,
         `account_id`, `page_ref`, `first_comment_id` and `evidence_url` only with `pii:read`. The list
         keeps no names, text or pictures; erasure requests remove a person's or a page's rows, and
         `mentions.retention_days` removes accounts nobody mentioned or checked for that long.

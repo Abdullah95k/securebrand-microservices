@@ -120,7 +120,7 @@ func TestMentionsConfig(t *testing.T) {
 	m := c.Mentions
 	if m.Enabled || !m.IncludeCommentAuthors || m.MaxChecksPerDay != 300 || m.MaxNewPerDay != 50 || m.TimeZone != "Asia/Baghdad" ||
 		m.RecheckAfter != 4380*time.Hour || m.RetryBackoff != time.Hour || m.RetryMaxBackoff != 168*time.Hour || m.Concurrency != 2 ||
-		m.CandidateWeight != 2 || m.RetentionDays != 180 {
+		m.CandidateWeight != 2 || m.RetentionDays != 180 || m.MaxFailures != 10 {
 		t.Fatalf("defaults: %+v", m)
 	}
 	at := time.Date(2026, 11, 2, 22, 30, 0, 0, time.UTC) // 01:30 the next day in Iraq
@@ -141,6 +141,7 @@ func TestMentionsConfig(t *testing.T) {
 		"unknown zone":              func(m *Mentions) { m.TimeZone = "Mars/Olympus" },
 		"no zone":                   func(m *Mentions) { m.TimeZone = "" },
 		"negative retention":        func(m *Mentions) { m.RetentionDays = -1 },
+		"negative max failures":     func(m *Mentions) { m.MaxFailures = -1 },
 	} {
 		c, _ := Load("")
 		c.Mentions.Enabled = true

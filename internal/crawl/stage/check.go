@@ -203,8 +203,7 @@ func judgeTimeline(v *mentions.Verdict, tl parse.TimelineResult) {
 }
 
 func (s *CheckStage) suppressed(ref string, id int64) bool {
-	return mentions.Suppressed(s.D.Suppression, s.HMACKey, ref, id) ||
-		(id != 0 && mentions.Suppressed(s.D.Suppression, s.HMACKey, "id:"+strconv.FormatInt(id, 10), id))
+	return mentions.Suppressed(s.D.Suppression, s.HMACKey, ref, id)
 }
 
 // forget drops an erased person or page from the list: never checked or
@@ -225,7 +224,8 @@ func (s *CheckStage) forget(ctx context.Context, t *taskv1.Task, ref string, id 
 // whether it spent a page load.
 func (s *CheckStage) fail(ctx context.Context, t *taskv1.Task, ref, reason string, sent bool, c map[string]int64) Outcome {
 	metrics.MentionChecks.WithLabelValues("failed").Inc()
-	if err := mentions.RecordFailed(ctx, s.D.DB, ref, reason, sent, s.Cfg.RetryBackoff, s.Cfg.RetryMaxBackoff); err != nil {
+	if err := mentions.RecordFailed(ctx, s.D.DB, ref, reason, sent, mentions.Retry{Backoff: s.Cfg.RetryBackoff,
+		MaxBackoff: s.Cfg.RetryMaxBackoff, MaxFailures: s.Cfg.MaxFailures, Park: s.Cfg.RecheckAfter}); err != nil {
 		return retry(t, "", "30s", err.Error(), c)
 	}
 	c["checks_failed"]++

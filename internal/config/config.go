@@ -70,6 +70,10 @@ type Mentions struct {
 	// RetryMaxBackoff.
 	RetryBackoff    time.Duration `koanf:"retry_backoff"`
 	RetryMaxBackoff time.Duration `koanf:"retry_max_backoff"`
+	// MaxFailures failed checks in a row park an account, still unchecked,
+	// until a mention after RecheckAfter (or a recheck asked for): one
+	// that walls every time costs no page load a week forever. 0 = never.
+	MaxFailures int `koanf:"max_failures"`
 	// Concurrency is how many checks a crawler runs at once.
 	Concurrency int `koanf:"concurrency"`
 	// CandidateWeight is the priority a candidate from another tool
@@ -556,8 +560,8 @@ func (c *Config) Validate() error {
 		if _, err := time.LoadLocation(m.TimeZone); err != nil || m.TimeZone == "" {
 			errs = append(errs, fmt.Errorf("mentions.time_zone %q is not a time zone name (e.g. Asia/Baghdad)", m.TimeZone))
 		}
-		if m.RetentionDays < 0 || m.CandidateWeight < 0 {
-			errs = append(errs, errors.New("mentions.retention_days and candidate_weight must be >= 0"))
+		if m.RetentionDays < 0 || m.CandidateWeight < 0 || m.MaxFailures < 0 {
+			errs = append(errs, errors.New("mentions.retention_days, candidate_weight and max_failures must be >= 0"))
 		}
 	}
 	if d := c.Discovery; d.Enabled {

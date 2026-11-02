@@ -59,14 +59,18 @@ func CopyEvents(ctx context.Context, tx pgx.Tx, evs []Event) error {
 // listedJoin finds the main-list (page_schedule) entry of the account in
 // row x (columns account_ref, account_id): by reference, by page id, or by
 // the vanity of a page we have stored. Each branch is an index lookup.
-func listedJoin(x string) string {
+func listedJoin(x string) string { return listedJoinIf(x, "true") }
+
+// listedJoinIf is listedJoin looked up only where cond holds (a condition
+// on x alone, checked before any lookup).
+func listedJoinIf(x, cond string) string {
 	return `LEFT JOIN LATERAL (SELECT m.page_ref FROM (
 			SELECT s.page_ref FROM page_schedule s WHERE s.page_ref = ` + x + `.account_ref
 			UNION ALL SELECT s.page_ref FROM page_schedule s WHERE s.page_id = ` + x + `.account_id
 			UNION ALL SELECT s.page_ref FROM page_schedule s WHERE s.page_ref = 'id:' || ` + x + `.account_id::text
 			UNION ALL SELECT s.page_ref FROM pages p JOIN page_schedule s ON s.page_id = p.page_id
 				WHERE ` + x + `.account_ref LIKE 'v:%' AND lower(p.vanity) = substr(` + x + `.account_ref, 3)
-		) m LIMIT 1) l ON true`
+		) m WHERE ` + cond + ` LIMIT 1) l ON true`
 }
 
 // Aggregate drains up to n mention events into checked_accounts (counts,
@@ -102,13 +106,14 @@ func Aggregate(ctx context.Context, db DB, n int) (int64, error) {
 				mention_priority(g.n, coalesce(np.n, 0), g.last_seen, 0), g.first_seen, g.last_seen,
 				f.page_id, f.post_id, f.comment_id
 			FROM agg g JOIN firsts f USING (account_ref) LEFT JOIN new_pages np USING (account_ref)
-			`+listedJoin("g")+`
+			`+listedJoinIf("g", "NOT EXISTS (SELECT 1 FROM checked_accounts c WHERE c.account_ref = g.account_ref)")+`
 			ON CONFLICT (account_ref) DO UPDATE SET
 				account_id = coalesce(a.account_id, EXCLUDED.account_id),
 				kind = CASE WHEN a.kind = 'unknown' THEN EXCLUDED.kind ELSE a.kind END,
 				vias = ARRAY(SELECT DISTINCT v FROM unnest(a.vias || EXCLUDED.vias) AS v ORDER BY v),
 				mentions = a.mentions + EXCLUDED.mentions, pages = a.pages + EXCLUDED.pages,
 				first_seen_at = LEAST(a.first_seen_at, EXCLUDED.first_seen_at),
+				`+earlierFirst("first_page_id")+`, `+earlierFirst("first_post_id")+`, `+earlierFirst("first_comment_id")+`,
 				last_seen_at = GREATEST(a.last_seen_at, EXCLUDED.last_seen_at),
 				priority = mention_priority(a.mentions + EXCLUDED.mentions, a.pages + EXCLUDED.pages,
 					GREATEST(a.last_seen_at, EXCLUDED.last_seen_at), a.boost),
@@ -121,10 +126,18 @@ func Aggregate(ctx context.Context, db DB, n int) (int64, error) {
 	return drained, nil
 }
 
+// earlierFirst moves what first mentioned the account (row a) to an
+// earlier mention found later (a backfill after a scheduled crawl), while
+// it is kept (it is dropped once the account is found not public).
+func earlierFirst(col string) string {
+	return col + ` = CASE WHEN EXCLUDED.first_seen_at < a.first_seen_at AND a.first_post_id IS NOT NULL
+		THEN EXCLUDED.` + col + ` ELSE a.` + col + ` END`
+}
+
 // rearm puts back in the queue an account (row a) mentioned again once its
 // not-public check has expired: checked within mentions.recheck_after, a
 // mention only counts; after it, the mention brings a new check.
-const rearm = `in_queue = a.in_queue OR (a.status IN ('private', 'unavailable') AND a.recheck_at <= now()),
+const rearm = `in_queue = a.in_queue OR (a.status IN ('unchecked', 'private', 'unavailable') AND a.recheck_at <= now()),
 				failures = CASE WHEN NOT a.in_queue AND a.recheck_at <= now() THEN 0 ELSE a.failures END,
 				retry_at = CASE WHEN NOT a.in_queue AND a.recheck_at <= now() THEN NULL ELSE a.retry_at END`
 
@@ -175,14 +188,20 @@ func Pick(ctx context.Context, db DB, n int) ([]Due, error) {
 		return nil, err
 	}
 	var out []Due
+	var listed, pageRefs []string
 	for _, x := range list {
 		if x.listed != nil {
-			if err := MarkListed(ctx, db, x.ref, *x.listed); err != nil {
-				return nil, err
-			}
+			listed, pageRefs = append(listed, x.ref), append(pageRefs, *x.listed)
 			continue
 		}
 		out = append(out, Due{Ref: x.ref, ID: x.id})
+	}
+	if len(listed) > 0 {
+		if _, err := db.Exec(ctx, `UPDATE checked_accounts a SET status = 'listed', in_queue = false, queued_at = NULL,
+				retry_at = NULL, requested_at = NULL, page_ref = l.page_ref
+			FROM unnest($1::text[], $2::text[]) AS l(account_ref, page_ref) WHERE a.account_ref = l.account_ref`, listed, pageRefs); err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
 }
@@ -377,15 +396,27 @@ func RecordNotPublic(ctx context.Context, db DB, ref string, v Verdict, recheck 
 	return err
 }
 
+// Retry is how failed checks are retried.
+type Retry struct {
+	Backoff, MaxBackoff time.Duration
+	// MaxFailures in a row park the account, still unchecked, until a
+	// mention after Park (or a recheck asked for) brings it back: an
+	// account that walls every time costs no page load a week forever.
+	MaxFailures int
+	Park        time.Duration
+}
+
 // RecordFailed records a check that failed (a wall, a rate limit, a proxy
 // error): nothing about the account. It stays in the queue and is checked
-// again after backoff, doubling with each failure in a row up to
-// maxBackoff.
-func RecordFailed(ctx context.Context, db DB, ref, reason string, sent bool, backoff, maxBackoff time.Duration) error {
+// again after a backoff doubling with each failure in a row; after
+// MaxFailures it is parked, unchecked (status, checked_at untouched).
+func RecordFailed(ctx context.Context, db DB, ref, reason string, sent bool, r Retry) error {
 	_, err := db.Exec(ctx, `UPDATE checked_accounts SET failures = failures + 1, last_error = $2, queued_at = NULL,
 			checks = checks + CASE WHEN $5 THEN 1 ELSE 0 END,
-			retry_at = now() + make_interval(secs => least($3 * power(2, least(failures, 30)), $4))
-		WHERE account_ref = $1`, ref, reason, backoff.Seconds(), maxBackoff.Seconds(), sent)
+			retry_at = now() + make_interval(secs => least($3 * power(2, least(failures, 30)), $4)),
+			in_queue = $6 <= 0 OR failures + 1 < $6, requested_at = NULL,
+			recheck_at = CASE WHEN $6 > 0 AND failures + 1 >= $6 THEN now() + make_interval(secs => $7) ELSE recheck_at END
+		WHERE account_ref = $1`, ref, reason, r.Backoff.Seconds(), r.MaxBackoff.Seconds(), sent, r.MaxFailures, r.Park.Seconds())
 	return err
 }
 

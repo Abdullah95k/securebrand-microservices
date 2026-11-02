@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/abdullah95k/securebrand-microservices/internal/crawl/task"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/parse"
 )
 
@@ -26,15 +27,9 @@ func IDRef(s string) string {
 	return "id:" + s
 }
 
-// RefID returns the id of an "id:<n>" reference, 0 for a vanity.
-func RefID(ref string) int64 {
-	s, ok := strings.CutPrefix(ref, "id:")
-	if !ok {
-		return 0
-	}
-	id, _ := strconv.ParseInt(s, 10, 64)
-	return id
-}
+// RefID returns the id of an "id:<n>" reference, 0 for a vanity: the
+// main list's own rule (task.RefID).
+var RefID = task.RefID
 
 // reserved are first path segments of facebook.com that never name a page
 // or profile.
@@ -113,7 +108,8 @@ func URLRef(raw string) string {
 	}
 	first := strings.ToLower(seg[0])
 	switch first {
-	case "profile.php":
+	case "profile.php", "permalink.php", "story.php":
+		// The account (the post's owner, for a post link) is the id.
 		return IDRef(u.Query().Get("id"))
 	case "people", "pages":
 		// /people/<name>/<id>, /pages/<name>/<id>
@@ -133,8 +129,10 @@ func URLRef(raw string) string {
 	return vanityRef(seg[0])
 }
 
-// textLink finds facebook.com links written in text.
-var textLink = regexp.MustCompile(`(?i)\b(?:https?://)?(?:[a-z0-9-]+\.)?(?:facebook|fb)\.com/[^\s<>"'()\[\]{}]+`)
+// textLink finds facebook.com links written in text. A link ends at the
+// first character no URL has unescaped, so text written right after it
+// (Arabic, Kurdish, a bracket) is not taken for its path.
+var textLink = regexp.MustCompile(`(?i)\b(?:https?://)?(?:[a-z0-9-]+\.)?(?:facebook|fb)\.com/[A-Za-z0-9._~/?#@!$&*+,;=%:-]+`)
 
 // TextRefs returns the references of the facebook.com links in text, once
 // each.

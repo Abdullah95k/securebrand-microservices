@@ -32,7 +32,8 @@ func TestURLRef(t *testing.T) {
 		"https://www.facebook.com/watch/?v=1":                                           "",
 		"https://www.facebook.com/share/p/abc/":                                         "",
 		"https://www.facebook.com/photo.php?fbid=1":                                     "",
-		"https://www.facebook.com/story.php?story_fbid=1&id=2":                          "",
+		"https://www.facebook.com/story.php?story_fbid=1&id=2":                          "id:2",
+		"https://www.facebook.com/permalink.php?story_fbid=1&id=100064000000505":        "id:100064000000505",
 		"https://www.facebook.com/reel/123":                                             "",
 		"https://www.facebook.com/":                                                     "",
 		"https://www.facebook.com/abc":                                                  "", // shorter than any username
@@ -63,6 +64,11 @@ func TestTextRefs(t *testing.T) {
 	want := []string{"v:some.page", "id:100000000000101", "v:other.page"}
 	if got := TextRefs(text); !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
+	}
+	// Written right before Arabic or Kurdish text, or in brackets.
+	if got := TextRefs("facebook.com/some.pageسڵاو (facebook.com/other.page) «facebook.com/third.page»"); !reflect.DeepEqual(got,
+		[]string{"v:some.page", "v:other.page", "v:third.page"}) {
+		t.Fatalf("links before other text: %v", got)
 	}
 	if TextRefs("no links here") != nil {
 		t.Fatal("refs in plain text")

@@ -217,6 +217,8 @@ func (e *Eraser) process(ctx context.Context, r request) (map[string]int64, erro
 				// vanity it may be named by).
 				{"mention_accounts", `DELETE FROM checked_accounts WHERE account_id = $1 OR account_ref = 'id:' || $1::bigint::text
 					OR account_ref = (SELECT 'v:' || lower(vanity) FROM pages WHERE page_id = $1)`},
+				{"mention_page_counts", `UPDATE checked_accounts a SET pages = greatest(a.pages - 1, 0)
+					FROM mention_pages m WHERE m.page_id = $1 AND m.account_ref = a.account_ref`},
 				{"mention_pages", `DELETE FROM mention_pages WHERE page_id = $1 OR account_ref = 'id:' || $1::bigint::text
 					OR account_ref = (SELECT 'v:' || lower(vanity) FROM pages WHERE page_id = $1)`},
 				{"mention_events", `DELETE FROM mention_events WHERE page_id = $1 OR account_id = $1
