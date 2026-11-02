@@ -322,6 +322,24 @@ privacy:
 # each candidate and the active entry with a real request on a canary page
 # (timeline -> comments -> replies), and promotes a candidate that parses.
 # The former active entry stays as a fallback.
+# Keyword discovery (docs/runbooks/operations.md, "Discovery"). Every
+# interval the scheduler queues one search per enabled keyword
+# (/v1/discovery/keywords; `fbctl discovery keywords seed` loads the Iraq
+# list) for posts of the last `window`, and the crawler's `search` stage
+# (crawler --stages ...,search) runs them. Each post found is recorded as a
+# mention (/v1/discovery/mentions); a poster not yet scheduled is added to
+# the schedule (source "discovery") and crawled from the next planner run.
+# The Facebook search client is not built yet: until it is, searches end
+# "unavailable" (fbs_discovery_searches_total) without a request.
+discovery:
+  enabled: false
+  interval: 1h
+  window: 6h             # at least `interval`, so searches overlap
+  max_new_per_day: 200   # pages and profiles added per UTC day; 0 adds none
+  include_profiles: true # people's public profiles as well as pages
+  concurrency: 2         # searches a crawler runs at once
+  mentions_days: 30      # mentions kept; 0 = for good
+
 registry_sync:
   interval: 30m
   canary_pages: []       # vanity names or URLs; set at least three in production

@@ -79,3 +79,33 @@ func TestSchedulingDefaults(t *testing.T) {
 		t.Fatal("unordered tiers must fail validation")
 	}
 }
+
+// Discovery's defaults are off and valid when turned on; a window shorter
+// than the interval would leave gaps between searches.
+func TestDiscoveryConfig(t *testing.T) {
+	c, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := c.Discovery
+	if d.Enabled || d.Interval != time.Hour || d.Window != 6*time.Hour || d.MaxNewPerDay != 200 || !d.IncludeProfiles || d.Concurrency != 2 {
+		t.Fatalf("defaults: %+v", d)
+	}
+	c.Discovery.Enabled = true
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(*Discovery){
+		"window shorter than interval": func(d *Discovery) { d.Window = 30 * time.Minute },
+		"no interval":                  func(d *Discovery) { d.Interval = 0 },
+		"no concurrency":               func(d *Discovery) { d.Concurrency = 0 },
+		"negative cap":                 func(d *Discovery) { d.MaxNewPerDay = -1 },
+	} {
+		c, _ := Load("")
+		c.Discovery.Enabled = true
+		mutate(&c.Discovery)
+		if c.Validate() == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+}

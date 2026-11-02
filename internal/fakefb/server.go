@@ -676,6 +676,8 @@ func (s *Server) admin(w http.ResponseWriter, r *http.Request) {
 		}
 		s.RotateDoc(req.FriendlyName, req.DocID)
 		_, _ = io.WriteString(w, `{"ok":true}`)
+	case path == "search":
+		s.search(w, r)
 	case path == "stats":
 		_ = json.NewEncoder(w).Encode(s.Stats())
 	default:

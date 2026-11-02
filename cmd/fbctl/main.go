@@ -14,6 +14,7 @@
 //	fbctl fixtures scrub --dir testdata/fb/<query>/<case>
 //	fbctl media ack --consumer analysis [--status processed]   (dev: simulate analysis-service acks)
 //	fbctl pages import --api URL --key KEY FILE   register many pages through the API (safe to re-run)
+//	fbctl discovery keywords seed|import --file F|list   discovery keywords (seed: the Iraq list)
 package main
 
 import (
@@ -45,7 +46,8 @@ commands:
   replay [--prefix raw-failures] [--query Q,..] [--since 168h] [--fixtures-dir DIR --name N --samples 3]
   fixtures scrub --dir DIR
   media ack --consumer NAME [--status processed|failed_permanent|failed_retryable] [--max N]
-  pages import --api URL --key KEY [--interval-hours N] [--rps 5] [--backfill=false] FILE`)
+  pages import --api URL --key KEY [--interval-hours N] [--rps 5] [--backfill=false] FILE
+  discovery keywords seed | discovery keywords import --file F | discovery keywords list [--language L] [--group G]`)
 	os.Exit(2)
 }
 
@@ -96,6 +98,8 @@ func main() {
 		err = fixturesScrub(rest)
 	case "media ack":
 		err = mediaAck(ctx, cfg, rest)
+	case "discovery keywords":
+		err = discoveryKeywords(ctx, cfg, rest)
 	case "pages import":
 		// Long imports outlive the 30-minute command timeout; Ctrl-C stops them.
 		ictx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

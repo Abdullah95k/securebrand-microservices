@@ -189,6 +189,11 @@ func TestErasureReachesEverything(t *testing.T) {
 		`INSERT INTO pages (page_id, vanity, name) VALUES (8, 'Brand8', 'Brand')`,
 		`INSERT INTO page_schedule (page_ref, page_id, interval_seconds, next_run_at) VALUES ('v:brand8', NULL, 3600, now()), ('id:8', 8, 3600, now())`,
 		`INSERT INTO jobs (job_id, kind, lane, mode, page_ref, params, status) VALUES (gen_random_uuid(), 'scheduled', 1, 'full', 'v:brand8', '{}', 'completed')`,
+		// Discovery's mentions of page 8 (by id, by its vanity) and of another.
+		`INSERT INTO discovery_keywords (id, term, normalized, language) VALUES (1, 'Erbil', 'erbil', 'en')`,
+		`INSERT INTO discovery_mentions (keyword_id, post_fb_id, owner_id, owner_ref, owner_kind, page_ref, matched_existing)
+			VALUES (1, 'p1', 8, 'id:8', 'page', 'id:8', true), (1, 'p2', NULL, 'v:brand8', 'page', 'v:brand8', true),
+				(1, 'p3', 7, 'v:other', 'page', 'v:other', false)`,
 	} {
 		var args []any
 		if strings.Contains(q, "$2") {
@@ -229,6 +234,7 @@ func TestErasureReachesEverything(t *testing.T) {
 		`SELECT count(*) FROM page_schedule WHERE page_ref = 'id:8'`:                       1,
 		`SELECT count(*) FROM jobs WHERE page_ref = 'id:8'`:                                1,
 		`SELECT count(*) FROM pages WHERE page_id = 8 AND vanity IS NULL AND name IS NULL`: 1,
+		`SELECT count(*) FROM discovery_mentions`:                                          1,
 	} {
 		var n int
 		if err := db.QueryRow(ctx, q).Scan(&n); err != nil || n != want {

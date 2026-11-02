@@ -118,19 +118,11 @@ func (s *Server) registerPage(w http.ResponseWriter, r *http.Request) {
 	if req.MaxAgeDays != nil {
 		maxAge = req.MaxAgeDays
 	}
-	var created, neverRun bool
-	var intervalSeconds int
+	var sch dispatch.Scheduled
 	err = pgx.BeginFunc(r.Context(), s.DB, func(tx pgx.Tx) error {
-		err := tx.QueryRow(r.Context(), `INSERT INTO page_schedule (page_ref, enabled, interval_seconds, next_run_at, options, max_age_days, max_posts, adaptive)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-			ON CONFLICT (page_ref) DO UPDATE SET enabled = page_schedule.enabled OR EXCLUDED.enabled,
-				interval_seconds = CASE WHEN EXCLUDED.adaptive THEN page_schedule.interval_seconds
-					ELSE LEAST(page_schedule.interval_seconds, EXCLUDED.interval_seconds) END,
-				adaptive = page_schedule.adaptive AND EXCLUDED.adaptive
-			RETURNING old.page_ref IS NULL, old.last_job_id IS NULL,
-				new.enabled, new.interval_seconds, new.next_run_at, new.adaptive`,
-			ref, enabled, int(interval.Seconds()), next, opts, maxAge, req.MaxPosts, adaptive).
-			Scan(&created, &neverRun, &enabled, &intervalSeconds, &next, &adaptive)
+		var err error
+		sch, err = dispatch.Register(r.Context(), tx, dispatch.ScheduleEntry{Ref: ref, Enabled: enabled, Interval: interval,
+			NextRun: next, Options: opts, MaxAgeDays: maxAge, MaxPosts: req.MaxPosts, Adaptive: adaptive, Source: "api"})
 		if err != nil {
 			return err
 		}
@@ -141,9 +133,9 @@ func (s *Server) registerPage(w http.ResponseWriter, r *http.Request) {
 		serverError(w, err)
 		return
 	}
-	resp := map[string]any{"page_ref": ref, "created": created, "schedule": map[string]any{"enabled": enabled,
-		"interval_seconds": intervalSeconds, "next_run_at": next, "adaptive": adaptive}}
-	if (req.Backfill == nil && neverRun) || (req.Backfill != nil && *req.Backfill) {
+	resp := map[string]any{"page_ref": ref, "created": sch.Created, "schedule": map[string]any{"enabled": sch.Enabled,
+		"interval_seconds": sch.IntervalSeconds, "next_run_at": sch.NextRun, "adaptive": sch.Adaptive}}
+	if (req.Backfill == nil && sch.NeverRun) || (req.Backfill != nil && *req.Backfill) {
 		// The client's own backfill of the page still under way is returned
 		// (backfill_reused), not started again: each is a full read of up to
 		// years of posts. Requests racing each other (a retry, a parallel
@@ -198,15 +190,20 @@ type scheduleView struct {
 	Adaptive        bool            `json:"adaptive"`
 	PostsPerDay     *float64        `json:"posts_per_day,omitempty"`
 	LastPostAt      *time.Time      `json:"last_post_at,omitempty"`
+	// Source is "api" (registered by a client) or "discovery" (added by a
+	// keyword search, DiscoveredByKeywordID).
+	Source                string     `json:"source"`
+	DiscoveredAt          *time.Time `json:"discovered_at,omitempty"`
+	DiscoveredByKeywordID *int64     `json:"discovered_by_keyword_id,omitempty"`
 }
 
 const scheduleColumns = `s.page_ref, s.page_id, s.enabled, s.tier, s.interval_seconds, s.next_run_at, s.last_run_at, s.options,
-	s.consecutive_failures, s.adaptive, s.posts_per_day, s.last_post_at`
+	s.consecutive_failures, s.adaptive, s.posts_per_day, s.last_post_at, s.source, s.discovered_at, s.discovered_by_keyword_id`
 
 func scanSchedule(row pgx.Row) (scheduleView, error) {
 	var v scheduleView
 	err := row.Scan(&v.PageRef, &v.PageID, &v.Enabled, &v.Tier, &v.IntervalSeconds, &v.NextRunAt, &v.LastRunAt, &v.Options,
-		&v.Failures, &v.Adaptive, &v.PostsPerDay, &v.LastPostAt)
+		&v.Failures, &v.Adaptive, &v.PostsPerDay, &v.LastPostAt, &v.Source, &v.DiscoveredAt, &v.DiscoveredByKeywordID)
 	return v, err
 }
 

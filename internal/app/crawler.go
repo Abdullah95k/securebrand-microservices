@@ -23,6 +23,7 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/rawsink"
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/shadow"
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/stage"
+	"github.com/abdullah95k/securebrand-microservices/internal/discovery"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/browser"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/detect"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/graphql"
@@ -65,6 +66,9 @@ type CrawlerOptions struct {
 	// DrainTimeout bounds how long in-flight tasks may run at shutdown
 	// before they are abandoned (default 75s).
 	DrainTimeout time.Duration
+	// SearchSource is the discovery search source for an identity; nil
+	// until the Facebook search client exists (searches end unavailable).
+	SearchSource func(*session.Identity) discovery.Source
 }
 
 // NewCrawler builds the crawler: identity pool, GraphQL client, stages,
@@ -147,6 +151,8 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 			taskv1.Kind_KIND_PAGE:   &stage.PageStage{D: deps},
 			taskv1.Kind_KIND_POST:   &stage.PostStage{D: deps},
 			taskv1.Kind_KIND_THREAD: &stage.ThreadStage{D: deps},
+			taskv1.Kind_KIND_SEARCH: &stage.SearchStage{D: deps, Source: o.SearchSource,
+				Sink: &discovery.Sink{DB: db, Cfg: cfg.Discovery, Interval: cfg.Scheduler.DefaultInterval, Suppressed: supp.PageSuppressed}},
 		}}
 	c := &Crawler{Deps: deps, Worker: worker, Registry: reg, Suppression: supp}
 	c.Components = []run.Func{
@@ -192,6 +198,21 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 	kinds := map[string]taskv1.Kind{"page": taskv1.Kind_KIND_PAGE, "post": taskv1.Kind_KIND_POST, "thread": taskv1.Kind_KIND_THREAD}
 	for _, s := range stages {
 		s = strings.TrimSpace(s)
+		if s == "search" {
+			// Discovery searches: p1 only, discovery.concurrency at once,
+			// apart from the crawl lanes' slots.
+			cons, err := kafka.NewConsumer(kafka.ConsumerConfig{
+				ClientConfig: kcfg, Group: "fbs-crawler-search-p1",
+				Topics:      []string{topics.Task(taskv1.Kind_KIND_SEARCH, taskv1.Lane_LANE_P1)},
+				MaxInflight: max(1, cfg.Discovery.Concurrency), MaxInflightPerPartition: 1, DrainTimeout: drain,
+			}, worker.Handle)
+			if err != nil {
+				return nil, err
+			}
+			c.Components = append(c.Components, cons.Run)
+			slog.Info("stage enabled", "stage", s, "discovery", cfg.Discovery.Enabled)
+			continue
+		}
 		if s == "retry" {
 			relays, err := stage.RetryRelays(kcfg, producer)
 			if err != nil {

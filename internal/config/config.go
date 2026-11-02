@@ -33,6 +33,30 @@ type Config struct {
 	Privacy   Privacy   `koanf:"privacy"`
 	// RegistrySync follows Facebook's doc_id rotations (fbs-registry-sync).
 	RegistrySync RegistrySync `koanf:"registry_sync"`
+	// Discovery searches keywords for recent posts and adds the pages and
+	// profiles posting them to the schedule.
+	Discovery Discovery `koanf:"discovery"`
+}
+
+// Discovery configures keyword discovery: every Interval the scheduler
+// queues one search per enabled keyword for posts of the last Window; the
+// crawler's search stage runs them and records each mention, adding the
+// posters not yet scheduled.
+type Discovery struct {
+	Enabled  bool          `koanf:"enabled"`
+	Interval time.Duration `koanf:"interval"`
+	// Window is how far back each search reaches; at least Interval, so
+	// consecutive searches overlap rather than leave gaps.
+	Window time.Duration `koanf:"window"`
+	// MaxNewPerDay caps the pages and profiles added per UTC day; mentions
+	// past it are recorded without adding their poster.
+	MaxNewPerDay int `koanf:"max_new_per_day"`
+	// IncludeProfiles adds people's public profiles as well as pages.
+	IncludeProfiles bool `koanf:"include_profiles"`
+	// Concurrency is how many searches a crawler runs at once.
+	Concurrency int `koanf:"concurrency"`
+	// MentionsDays is how long mentions are kept (0 = for good).
+	MentionsDays int `koanf:"mentions_days"`
 }
 
 // RegistrySync configures the service that discovers rotated doc_ids on
@@ -470,6 +494,14 @@ func (c *Config) Validate() error {
 	}
 	if c.RegistrySync.Interval <= 0 || c.RegistrySync.Timeout <= 0 {
 		errs = append(errs, errors.New("registry_sync.interval and registry_sync.timeout must be > 0"))
+	}
+	if d := c.Discovery; d.Enabled {
+		if d.Interval <= 0 || d.Window < d.Interval {
+			errs = append(errs, errors.New("discovery.interval must be > 0 and discovery.window at least as long"))
+		}
+		if d.MaxNewPerDay < 0 || d.Concurrency <= 0 {
+			errs = append(errs, errors.New("discovery.max_new_per_day must be >= 0 and discovery.concurrency > 0"))
+		}
 	}
 	return errors.Join(errs...)
 }

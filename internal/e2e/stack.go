@@ -27,10 +27,12 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/app"
 	"github.com/abdullah95k/securebrand-microservices/internal/config"
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/jobs"
+	"github.com/abdullah95k/securebrand-microservices/internal/discovery"
 	"github.com/abdullah95k/securebrand-microservices/internal/dispatch"
 	"github.com/abdullah95k/securebrand-microservices/internal/fakefb"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/ratelimit"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/registry"
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/session"
 	"github.com/abdullah95k/securebrand-microservices/internal/gdpr"
 	"github.com/abdullah95k/securebrand-microservices/internal/media"
 	"github.com/abdullah95k/securebrand-microservices/internal/persist"
@@ -82,6 +84,8 @@ type Options struct {
 	// CrawlerDrain overrides how long a stopping crawler lets in-flight
 	// tasks run before abandoning them (a short one is a crash).
 	CrawlerDrain time.Duration
+	// Discovery runs the crawler's search stage, searching fakefb.
+	Discovery bool
 }
 
 // Start brings up the stack; it stops at test cleanup.
@@ -183,6 +187,12 @@ func Start(t *testing.T, o Options) *Stack {
 	s := &Stack{Cfg: cfg, DB: db, Redis: rdb, Producer: producer, S3: s3, Fake: fake, FakeURL: fhs.URL,
 		groups: map[string]*group{}, kcfg: kcfg, tracker: jobs.New(rdb),
 		copts: app.CrawlerOptions{Stages: []string{"page", "post", "thread", "retry"}, DrainTimeout: o.CrawlerDrain}}
+	if o.Discovery {
+		s.copts.Stages = append(s.copts.Stages, "search")
+		s.copts.SearchSource = func(id *session.Identity) discovery.Source {
+			return fakefb.SearchSource{Doer: id.Doer, Base: id.Base}
+		}
+	}
 	t.Cleanup(s.Stop)
 
 	s.Crawler, err = app.NewCrawler(ctx, cfg, db, rdb, producer, s.copts)

@@ -101,6 +101,12 @@ func runScheduler(ctx context.Context, cfg *config.Config) error {
 			return scheduler.Every(ctx, "budget", b.Interval, budget.Tick)
 		})
 	}
+	if cfg.Discovery.Enabled {
+		disc := &scheduler.Discovery{DB: db, Producer: producer, Cfg: cfg.Discovery}
+		leaderLoops = append(leaderLoops, func(ctx context.Context) error {
+			return scheduler.Every(ctx, "discovery", cfg.Discovery.Interval, disc.Tick)
+		})
+	}
 	if cfg.FB.AIMD.Enabled {
 		aimd := ratelimit.NewController(rdb, cfg.Kafka.TopicPrefix, cfg.FB.AIMD, cfg.FB.GlobalRPS)
 		leaderLoops = append(leaderLoops, func(ctx context.Context) error {

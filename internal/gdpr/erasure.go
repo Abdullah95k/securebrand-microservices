@@ -200,6 +200,10 @@ func (e *Eraser) process(ctx context.Context, r request) (map[string]int64, erro
 				{"post_index", `DELETE FROM post_index WHERE page_id = $1`},
 				{"page_snapshots", `DELETE FROM page_snapshots WHERE page_id = $1`},
 				{"crawl_cursors", `DELETE FROM crawl_cursors WHERE scope_type = 'page_timeline' AND scope_id = $1`},
+				// Discovery's record of the page's posts (before "pages"
+				// clears the vanity it may be named by).
+				{"discovery_mentions", `DELETE FROM discovery_mentions WHERE owner_id = $1 OR page_ref = 'id:' || $1::bigint::text
+					OR page_ref = (SELECT 'v:' || lower(vanity) FROM pages WHERE page_id = $1)`},
 				// No schedule or job keeps the page's vanity, and none
 				// crawls it: jobs name it by id; a schedule registered under
 				// the vanity (its key) goes, with its registrations; one

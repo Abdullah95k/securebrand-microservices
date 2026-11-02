@@ -87,6 +87,12 @@ func (s *Server) routes(r chi.Router) {
 	r.Get("/posts/{post}/media", require(ScopeDataRead, s.postMedia))
 	r.Get("/media/{media}", require(ScopeDataRead, s.getMedia))
 
+	r.Get("/discovery/keywords", require(ScopeDataRead, s.listKeywords))
+	r.Post("/discovery/keywords", require(ScopePagesWrite, s.createKeyword))
+	r.Patch("/discovery/keywords/{id}", require(ScopePagesWrite, s.updateKeyword))
+	r.Delete("/discovery/keywords/{id}", require(ScopePagesWrite, s.deleteKeyword))
+	r.Get("/discovery/mentions", require(ScopeDataRead, s.listMentions))
+
 	r.Post("/erasure-requests", require(ScopeAdmin, s.createErasure))
 	r.Get("/erasure-requests/{id}", require(ScopeAdmin, s.getErasure))
 
