@@ -44,10 +44,33 @@ func storePool(t *testing.T, store Store, endpoints ...string) (*Pool, *proxy.Po
 	return pool, proxies
 }
 
-// A crawler that stops saves its idle sessions and its exits' page-load
-// pauses; the next one resumes them: the same session on the same exit,
-// with its tokens and cookies, and no page load. Sessions without tokens,
-// retired or still in use are not saved, and the proxy's credentials never
+// leave stores a stopped crawler's snapshot, free to take.
+func leave(t *testing.T, store *RedisStore, owner string, snap Snapshot) {
+	t.Helper()
+	ctx := context.Background()
+	snap.Owner = owner
+	if err := store.Checkpoint(ctx, owner, snap, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Release(ctx, owner); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// idleByID finds a resumed identity.
+func idleByID(p *Pool, tier, id string) *Identity {
+	for _, i := range p.idle[tier] {
+		if i.ID == id {
+			return i
+		}
+	}
+	return nil
+}
+
+// A crawler that stops saves its sessions (idle or in use) and its exits'
+// page-load pauses; the next one resumes them: the same session on the same
+// exit, with its tokens and cookies, and no page load. Retired sessions and
+// sessions without tokens are not saved, and the proxy's credentials never
 // are.
 func TestSessionsResumeAfterARestart(t *testing.T) {
 	mr := miniredis.RunT(t)
@@ -68,19 +91,17 @@ func TestSessionsResumeAfterARestart(t *testing.T) {
 	good.NextReq()
 	Outcome(good, detect.OK)
 	walled.SetTokens(htmlx.Tokens{LSD: "lsd-2"})
-	PageOutcome(walled, detect.LoginWall) // retired, and its exit pauses page loads
-	busy.SetTokens(htmlx.Tokens{LSD: "lsd-3"})
+	PageOutcome(walled, detect.LoginWall)      // retired, and its exit pauses page loads
+	busy.SetTokens(htmlx.Tokens{LSD: "lsd-3"}) // still in use when the crawler stops
 	before.Release(good)
 	before.Release(walled)
-	idle, _ := before.Acquire(ctx, "isp") // the one released last before: good
-	if idle != good {
-		t.Fatal("the idle identity is not reused")
+	if len(before.all) != 2 {
+		t.Fatalf("a retired identity is still tracked: %d", len(before.all))
 	}
-	before.Release(idle)
-	if n, err := before.Save(ctx); err != nil || n != 1 {
+	if n, err := before.Save(ctx); err != nil || n != 2 {
 		t.Fatalf("saved %d: %v", n, err)
 	}
-	if before.live["isp"] != 1 || len(before.idle["isp"]) != 0 {
+	if before.live["isp"] != 0 || len(before.idle["isp"]) != 0 || len(before.all) != 0 {
 		t.Fatalf("saved identities stay in the pool: live=%d idle=%d", before.live["isp"], len(before.idle["isp"]))
 	}
 	if strings.Contains(mr.Dump(), "secret") {
@@ -88,15 +109,18 @@ func TestSessionsResumeAfterARestart(t *testing.T) {
 	}
 
 	after, proxies := storePool(t, store, storeExits...)
-	if n, err := after.Resume(ctx); err != nil || n != 1 {
+	if n, err := after.Resume(ctx); err != nil || n != 2 {
 		t.Fatalf("resumed %d: %v", n, err)
 	}
-	got, err := after.Acquire(ctx, "isp")
-	if err != nil {
-		t.Fatal(err)
+	if mr.Exists(store.snapKey(before.owner)) {
+		t.Fatal("a taken snapshot (cookies, tokens) stays in Redis")
 	}
-	if got.ID != good.ID || got.Endpoint != good.Endpoint || got.Tokens() != tokens || got.SessionParam() != good.SessionParam() {
-		t.Fatalf("resumed %s on %s with %+v, want %s on %s", got.ID, got.Endpoint.Exit, got.Tokens(), good.ID, good.Endpoint.Exit)
+	got := idleByID(after, "isp", good.ID)
+	if got == nil || idleByID(after, "isp", busy.ID) == nil || after.live["isp"] != 2 || len(after.all) != 2 {
+		t.Fatalf("resumed %d sessions, live %d", len(after.idle["isp"]), after.live["isp"])
+	}
+	if got.Endpoint != good.Endpoint || got.Tokens() != tokens || got.SessionParam() != good.SessionParam() {
+		t.Fatalf("resumed on %s with %+v, want %s", got.Endpoint.Exit, got.Tokens(), good.Endpoint.Exit)
 	}
 	if c := got.Doer.Cookie(base, "datr"); c != "datr-1" {
 		t.Fatalf("cookie %q", c)
@@ -113,18 +137,14 @@ func TestSessionsResumeAfterARestart(t *testing.T) {
 	if ok, why := proxies.PageLoad(busy.Endpoint); ok || why != "paced" {
 		t.Fatalf("an exit that just loaded a page loads another after a restart: %v %q", ok, why)
 	}
-	if after.live["isp"] != 1 {
-		t.Fatalf("live %d", after.live["isp"])
-	}
 	// Its outcomes reach its exit like any identity's.
 	PageOutcome(got, detect.LoginWall)
 	if ok, why := proxies.PageLoad(got.Endpoint); ok || why != "backoff" {
 		t.Fatalf("a resumed session's walled page load leaves its exit loading pages: %v %q", ok, why)
 	}
 
-	// Each saved session resumes once.
-	// Each saved session resumes once, and so does the exits' pacing: a
-	// later start never re-applies it over what page loads showed since.
+	// Each snapshot is taken once, its pacing too: a later start never
+	// re-applies it over what page loads showed since.
 	again, againProxies := storePool(t, store, storeExits...)
 	if n, _ := again.Resume(ctx); n != 0 {
 		t.Fatalf("a saved session resumed twice: %d", n)
@@ -134,13 +154,55 @@ func TestSessionsResumeAfterARestart(t *testing.T) {
 	}
 
 	// A session whose exit is no longer configured is dropped.
-	s := Saved{ID: good.ID, Tier: "isp", Exit: good.Endpoint.Exit, Profile: "chrome_146", Tokens: tokens, SavedAt: time.Now()}
-	if err := store.Save(ctx, []Saved{s}, nil); err != nil {
-		t.Fatal(err)
-	}
+	leave(t, store, "old", Snapshot{SavedAt: time.Now(), Sessions: []Saved{{ID: good.ID, Tier: "isp", Exit: good.Endpoint.Exit,
+		Profile: "chrome_146", Tokens: tokens, SavedAt: time.Now()}}})
 	other, _ := storePool(t, store, "http://u:secret@192.0.2.99:8000")
 	if n, err := other.Resume(ctx); err != nil || n != 0 || other.live["isp"] != 0 {
 		t.Fatalf("resumed %d on another exit: %v", n, err)
+	}
+}
+
+// A running crawler checkpoints its sessions, in use or idle, under a
+// lease: no other crawler takes them while it runs, nor does it take its
+// own. One that dies without saving leaves its last checkpoint, free once
+// its lease ends.
+func TestCheckpointsOutliveACrawlerThatDies(t *testing.T) {
+	mr := miniredis.RunT(t)
+	store := &RedisStore{R: redis.NewClient(&redis.Options{Addr: mr.Addr()})}
+	ctx := context.Background()
+	dies, _ := storePool(t, store, storeExits...)
+	inUse, err := dies.Acquire(ctx, "isp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inUse.SetTokens(htmlx.Tokens{LSD: "lsd-1"})
+	if n, err := dies.Checkpoint(ctx); err != nil || n != 1 {
+		t.Fatalf("checkpointed %d: %v", n, err)
+	}
+	next, _ := storePool(t, store, storeExits...)
+	if n, _ := next.Resume(ctx); n != 0 {
+		t.Fatal("a running crawler's sessions are taken")
+	}
+	mr.FastForward(checkpointLease + time.Second)
+	if n, _ := dies.Resume(ctx); n != 0 {
+		t.Fatal("a crawler takes its own checkpoint")
+	}
+	if n, err := next.Resume(ctx); err != nil || n != 1 || idleByID(next, "isp", inUse.ID) == nil {
+		t.Fatalf("resumed %d from a crawler that died: %v", n, err)
+	}
+
+	// RunCheckpoint keeps checkpointing until it stops.
+	runs, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- next.RunCheckpoint(runs, 10*time.Millisecond) }()
+	key := store.snapKey(next.owner)
+	for deadline := time.Now().Add(5 * time.Second); !mr.Exists(key) && time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	if !mr.Exists(key) || !mr.Exists(store.leaseKey(next.owner)) {
+		t.Fatal("no checkpoint under a lease")
 	}
 }
 
@@ -156,9 +218,7 @@ func TestResumeKeepsToTheCapAndTheProfile(t *testing.T) {
 			Tokens: htmlx.Tokens{LSD: "x"}, SavedAt: time.Now()})
 	}
 	saved[0].Profile = "firefox"
-	if err := store.Save(ctx, saved, nil); err != nil {
-		t.Fatal(err)
-	}
+	leave(t, store, "old", Snapshot{SavedAt: time.Now(), Sessions: saved})
 	pool, _ := storePool(t, store, storeExits...)
 	pool.cfg.MaxPerTier = 1
 	if n, err := pool.Resume(ctx); err != nil || n != 1 || pool.live["isp"] != 1 || pool.idle["isp"][0].ID != "id-1" {
@@ -166,21 +226,17 @@ func TestResumeKeepsToTheCapAndTheProfile(t *testing.T) {
 	}
 }
 
-// Saved sessions past SavedSessionTTL, and a gateway's (its sticky session
-// expires), are not resumed.
+// Sessions of a snapshot past SavedSessionTTL are not resumed (its pauses
+// still count), nor are a gateway's (its sticky session expires).
 func TestSavedSessionsThatCannotResume(t *testing.T) {
 	mr := miniredis.RunT(t)
 	store := &RedisStore{R: redis.NewClient(&redis.Options{Addr: mr.Addr()})}
 	ctx := context.Background()
 	s := Saved{ID: "id-1", Tier: "isp", Exit: "isp|203.0.113.10:8000", Profile: "chrome_146", Tokens: htmlx.Tokens{LSD: "x"}}
-	s.SavedAt = time.Now().Add(-SavedSessionTTL - time.Minute)
-	fresh := s
-	fresh.ID, fresh.SavedAt = "id-2", time.Now()
-	if err := store.Save(ctx, []Saved{s, fresh}, nil); err != nil {
-		t.Fatal(err)
-	}
-	got, err := store.TakeSessions(ctx)
-	if err != nil || len(got) != 1 || got[0].ID != "id-2" {
+	leave(t, store, "old", Snapshot{SavedAt: time.Now().Add(-SavedSessionTTL - time.Minute), Sessions: []Saved{s},
+		Exits: map[string]proxy.ExitState{s.Exit: {PausedUntil: time.Now().Add(time.Hour)}}})
+	got, err := store.TakeOrphans(ctx, "me")
+	if err != nil || len(got) != 1 || len(got[0].Sessions) != 0 || len(got[0].Exits) != 1 {
 		t.Fatalf("%+v %v", got, err)
 	}
 
@@ -205,7 +261,8 @@ func TestSavedSessionsThatCannotResume(t *testing.T) {
 }
 
 // A crawler resumes the sessions of one that stops after it started (a
-// rolling update starts the new pod first).
+// rolling update starts the new pod first), and keeps a snapshot past the
+// longest pause it holds.
 func TestSessionsSavedLaterResume(t *testing.T) {
 	mr := miniredis.RunT(t)
 	store := &RedisStore{R: redis.NewClient(&redis.Options{Addr: mr.Addr()}), NS: "t."}
@@ -217,11 +274,15 @@ func TestSessionsSavedLaterResume(t *testing.T) {
 	}
 	go func() { _ = pool.RunResume(ctx, 10*time.Millisecond) }()
 	s := Saved{ID: "id-1", Tier: "isp", Exit: "isp|203.0.113.10:8000", Profile: "chrome_146", Tokens: htmlx.Tokens{LSD: "x"}, SavedAt: time.Now()}
-	if err := store.Save(ctx, []Saved{s}, map[string]proxy.ExitState{"isp|203.0.113.10:8000": {PausedUntil: time.Now().Add(48 * time.Hour)}}); err != nil {
+	if err := store.Checkpoint(ctx, "old", Snapshot{Owner: "old", SavedAt: time.Now(), Sessions: []Saved{s},
+		Exits: map[string]proxy.ExitState{s.Exit: {PausedUntil: time.Now().Add(48 * time.Hour)}}}, time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	if ttl := mr.TTL("{t.fbs:sessions}:exits"); ttl < 48*time.Hour {
-		t.Fatalf("the exits' pacing expires before its pause ends: %s", ttl)
+	if ttl := mr.TTL("{t.fbs:sessions}:snap:old"); ttl < 48*time.Hour {
+		t.Fatalf("the snapshot expires before its pause ends: %s", ttl)
+	}
+	if err := store.Release(ctx, "old"); err != nil {
+		t.Fatal(err)
 	}
 	id, err := pool.Acquire(ctx, "isp")
 	if err != nil {

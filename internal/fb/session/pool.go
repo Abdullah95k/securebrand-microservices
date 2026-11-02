@@ -49,10 +49,14 @@ type Pool struct {
 	fps     map[string]Fingerprint
 	newDoer DoerFactory
 
+	// owner names this pool's snapshots in the store (Checkpoint).
+	owner string
+
 	mu   sync.Mutex
 	cond *sync.Cond
 	idle map[string][]*Identity
 	live map[string]int
+	all  map[*Identity]struct{} // every live identity, idle or in use
 }
 
 func NewPool(cfg PoolConfig, proxies *proxy.Pool, fps map[string]Fingerprint, f DoerFactory) (*Pool, error) {
@@ -72,8 +76,8 @@ func NewPool(cfg PoolConfig, proxies *proxy.Pool, fps map[string]Fingerprint, f 
 	if cfg.PacedWait <= 0 {
 		cfg.PacedWait = 30 * time.Second
 	}
-	p := &Pool{cfg: cfg, base: base, proxies: proxies, fps: fps, newDoer: f,
-		idle: map[string][]*Identity{}, live: map[string]int{}}
+	p := &Pool{cfg: cfg, base: base, proxies: proxies, fps: fps, newDoer: f, owner: "crawler-" + randAlnum(10),
+		idle: map[string][]*Identity{}, live: map[string]int{}, all: map[*Identity]struct{}{}}
 	p.cond = sync.NewCond(&p.mu)
 	return p, nil
 }
@@ -106,6 +110,7 @@ func (p *Pool) Acquire(ctx context.Context, tier string) (*Identity, error) {
 				list = append(list[:i], list[i+1:]...)
 				p.idle[tier] = list
 				p.live[tier]--
+				delete(p.all, id)
 				metrics.IdentityRetired.WithLabelValues(tier, "breaker").Inc()
 				go id.Doer.Close()
 				continue
@@ -122,6 +127,7 @@ func (p *Pool) Acquire(ctx context.Context, tier string) (*Identity, error) {
 			id, err := p.create(tier)
 			p.mu.Lock()
 			if err == nil {
+				p.all[id] = struct{}{}
 				metrics.IdentityActive.WithLabelValues(tier).Set(float64(p.live[tier]))
 				return id, nil
 			}
@@ -165,6 +171,7 @@ func (p *Pool) Release(id *Identity) {
 	defer p.cond.Broadcast()
 	if reason := id.RetireReason(); reason != "" {
 		p.live[tier]--
+		delete(p.all, id)
 		metrics.IdentityActive.WithLabelValues(tier).Set(float64(p.live[tier]))
 		metrics.IdentityRetired.WithLabelValues(tier, reason).Inc()
 		slog.Debug("session: identity retired", "identity", id.ID, "tier", tier, "reason", reason)
@@ -209,59 +216,120 @@ func (p *Pool) observer(ep proxy.Endpoint) func(detect.Class, bool) {
 	}
 }
 
-// Save hands the idle identities' sessions (tokens and cookies) and the
-// exits' page-load pacing to the store, for the next crawler to resume, and
-// retires the identities. Call it once the crawler has stopped using the
-// pool. Identities still in use, without tokens or on a gateway are not
-// saved. It returns how many sessions were saved.
+// Checkpoint leases: a crawler checkpoints its sessions every
+// CheckpointEvery and holds its snapshot for checkpointLease, so one that
+// dies without saving leaves sessions at most CheckpointEvery old, free
+// for the next crawler within checkpointLease.
+const (
+	CheckpointEvery = 2 * time.Minute
+	checkpointLease = 5 * time.Minute
+)
+
+// snapshot returns the sessions of every live identity, idle or in use, and
+// the exits' page-load pacing. Identities retired, without tokens, or on a
+// gateway are left out.
+func (p *Pool) snapshot(final bool) Snapshot {
+	p.mu.Lock()
+	ids := make([]*Identity, 0, len(p.all))
+	for id := range p.all {
+		ids = append(ids, id)
+	}
+	p.mu.Unlock()
+	snap := Snapshot{Owner: p.owner, SavedAt: time.Now(), Final: final, Exits: p.proxies.PageGateState()}
+	for _, id := range ids {
+		if s, ok := id.saved(); ok {
+			snap.Sessions = append(snap.Sessions, s)
+		}
+	}
+	return snap
+}
+
+// Checkpoint stores this crawler's sessions and pacing under its lease
+// (RunCheckpoint calls it every CheckpointEvery). It returns how many
+// sessions it stored.
+func (p *Pool) Checkpoint(ctx context.Context) (int, error) {
+	if p.cfg.Store == nil {
+		return 0, nil
+	}
+	snap := p.snapshot(false)
+	return len(snap.Sessions), p.cfg.Store.Checkpoint(ctx, p.owner, snap, checkpointLease)
+}
+
+// RunCheckpoint checkpoints every interval until ctx ends. A failed
+// checkpoint is retried at the next one.
+func (p *Pool) RunCheckpoint(ctx context.Context, interval time.Duration) error {
+	if p.cfg.Store == nil {
+		return nil
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-t.C:
+			if _, err := p.Checkpoint(ctx); err != nil && ctx.Err() == nil {
+				slog.Warn("session: checkpoint failed", "err", err)
+			}
+		}
+	}
+}
+
+// Save stores this crawler's sessions and pacing as it stops and ends its
+// lease, so the next crawler takes them at once, and closes the
+// identities. Call it once the crawler has stopped using the pool. It
+// returns how many sessions it stored.
 func (p *Pool) Save(ctx context.Context) (int, error) {
 	if p.cfg.Store == nil {
 		return 0, nil
 	}
+	snap := p.snapshot(true)
 	p.mu.Lock()
-	var ids []*Identity
-	for tier, list := range p.idle {
-		ids = append(ids, list...)
-		p.live[tier] -= len(list)
-		delete(p.idle, tier)
+	ids := make([]*Identity, 0, len(p.all))
+	for id := range p.all {
+		ids = append(ids, id)
 	}
+	p.idle, p.live, p.all = map[string][]*Identity{}, map[string]int{}, map[*Identity]struct{}{}
 	p.mu.Unlock()
-	var sessions []Saved
+	err := p.cfg.Store.Checkpoint(ctx, p.owner, snap, checkpointLease)
+	if err == nil {
+		err = p.cfg.Store.Release(ctx, p.owner)
+	}
 	for _, id := range ids {
-		if s, ok := id.saved(); ok {
-			sessions = append(sessions, s)
-		}
 		id.Doer.Close()
 	}
-	if err := p.cfg.Store.Save(ctx, sessions, p.proxies.PageGateState()); err != nil {
+	if err != nil {
 		return 0, err
 	}
-	return len(sessions), nil
+	return len(snap.Sessions), nil
 }
 
-// Resume restores what the last crawler saved when it stopped (Save): the
-// exits' page-load pauses, and its sessions (ResumeSessions). Call it once,
-// at start.
+// Resume takes what crawlers that stopped left behind (Save, or the last
+// Checkpoint of one that died): their exits' page-load pauses, and their
+// sessions, which become idle identities with their tokens and cookies, so
+// the tasks they serve need no page load. Each snapshot is taken once.
+// Sessions it can't rebuild are dropped: an exit no longer configured or
+// cooling down, another fingerprint profile, or a tier at its cap. It
+// returns how many sessions resumed.
 func (p *Pool) Resume(ctx context.Context) (int, error) {
 	if p.cfg.Store == nil {
 		return 0, nil
 	}
-	exits, err := p.cfg.Store.TakeExits(ctx)
-	p.proxies.RestorePageGate(exits)
-	n, serr := p.ResumeSessions(ctx)
-	return n, errors.Join(err, serr)
+	snaps, err := p.cfg.Store.TakeOrphans(ctx, p.owner)
+	n := 0
+	for _, snap := range snaps {
+		p.proxies.RestorePageGate(snap.Exits)
+		added := p.resumeSessions(snap.Sessions)
+		n += added
+		// Final=false: the crawler stopped without saving (it crashed or was
+		// killed), and these are from its last checkpoint.
+		slog.Info("session: resumed a stopped crawler's sessions", "sessions", added, "saved", len(snap.Sessions),
+			"exits", len(snap.Exits), "saved_on_stop", snap.Final, "age", time.Since(snap.SavedAt).Round(time.Second).String())
+	}
+	return n, err
 }
 
-// ResumeSessions takes the sessions crawlers saved when they stopped, which
-// become idle identities with their tokens and cookies, so the tasks they
-// serve need no page load. Sessions it can't rebuild are dropped: an exit
-// no longer configured or cooling down, another fingerprint profile, or a
-// tier at its cap. It returns how many sessions resumed.
-func (p *Pool) ResumeSessions(ctx context.Context) (int, error) {
-	if p.cfg.Store == nil {
-		return 0, nil
-	}
-	saved, err := p.cfg.Store.TakeSessions(ctx)
+func (p *Pool) resumeSessions(saved []Saved) int {
 	n := 0
 	for _, s := range saved {
 		id := p.rebuild(s)
@@ -276,6 +344,7 @@ func (p *Pool) ResumeSessions(ctx context.Context) (int, error) {
 		}
 		p.live[s.Tier]++
 		p.idle[s.Tier] = append(p.idle[s.Tier], id)
+		p.all[id] = struct{}{}
 		metrics.IdentityActive.WithLabelValues(s.Tier).Set(float64(p.live[s.Tier]))
 		p.cond.Broadcast()
 		p.mu.Unlock()
@@ -285,12 +354,16 @@ func (p *Pool) ResumeSessions(ctx context.Context) (int, error) {
 	if len(saved) > n {
 		metrics.Bootstraps.WithLabelValues("resumed", "dropped").Add(float64(len(saved) - n))
 	}
-	return n, err
+	return n
 }
 
-// RunResume resumes, every interval, the sessions of crawlers that stopped
-// after this one started (a rolling update starts the new pod first).
+// RunResume resumes, every interval, what crawlers that stopped after this
+// one started left behind: a rolling update starts the new pod first, and
+// a crawler that died frees its last checkpoint only when its lease ends.
 func (p *Pool) RunResume(ctx context.Context, interval time.Duration) error {
+	if p.cfg.Store == nil {
+		return nil
+	}
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -298,10 +371,8 @@ func (p *Pool) RunResume(ctx context.Context, interval time.Duration) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-t.C:
-			if n, err := p.ResumeSessions(ctx); err != nil && ctx.Err() == nil {
+			if n, err := p.Resume(ctx); err != nil && ctx.Err() == nil {
 				slog.Warn("session: saved sessions not resumed", "resumed", n, "err", err)
-			} else if n > 0 {
-				slog.Info("session: saved sessions resumed", "sessions", n)
 			}
 		}
 	}
