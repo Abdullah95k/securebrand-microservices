@@ -117,7 +117,7 @@ func TestSinkRecord(t *testing.T) {
 	kw, _, _ := discovery.AddKeyword(ctx, db, "Hewlêr", "kmr", "erbil", true)
 	schedule(t, db, "v:known")
 	schedule(t, db, "v:byid")
-	if _, err := db.Exec(ctx, `UPDATE page_schedule SET page_id = 77 WHERE page_ref = 'v:byid'`); err != nil {
+	if _, err := db.Exec(ctx, `UPDATE page_schedule SET page_id = 100064000000077 WHERE page_ref = 'v:byid'`); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now()
@@ -125,17 +125,17 @@ func TestSinkRecord(t *testing.T) {
 	at := now.Add(-time.Hour)
 	results := []discovery.Result{
 		{PostID: "1", PostTime: at, OwnerRef: "https://www.facebook.com/Known", OwnerKind: "page", Text: "li Hewlêr"},
-		{PostID: "2", PostTime: at, OwnerID: 77, OwnerRef: "renamed", OwnerKind: "page"},
+		{PostID: "2", PostTime: at, OwnerID: 100064000000077, OwnerRef: "renamed", OwnerKind: "page"},
 		{PostID: "3", PostTime: at, OwnerRef: "newpage", OwnerKind: "page", Text: "HEWLER tonight"},
-		{PostID: "4", PostTime: at, OwnerID: 555, OwnerKind: "profile"},
+		{PostID: "4", PostTime: at, OwnerID: 100064000000555, OwnerKind: "profile"},
 		{PostID: "5", PostTime: at, OwnerRef: "agroup", OwnerKind: "group"},
 		{PostID: "6", PostTime: now.Add(-7 * time.Hour), OwnerRef: "old", OwnerKind: "page"},
 		{PostID: "7", PostTime: at, OwnerRef: "offtopic", OwnerKind: "page", Text: "nothing about it"},
-		{PostID: "8", PostTime: at, OwnerID: 666, OwnerRef: "erased", OwnerKind: "page"},
+		{PostID: "8", PostTime: at, OwnerID: 100064000000666, OwnerRef: "erased", OwnerKind: "page"},
 		{PostID: "", PostTime: at, OwnerRef: "noid", OwnerKind: "page"},
 	}
 	sink := &discovery.Sink{DB: db, Cfg: config.Discovery{MaxNewPerDay: 10, IncludeProfiles: true}, Interval: 3 * time.Hour,
-		Suppressed: func(id int64) bool { return id == 666 }}
+		Suppressed: func(id int64) bool { return id == 100064000000666 }}
 	st, err := sink.Record(ctx, q, results)
 	if err != nil {
 		t.Fatal(err)
@@ -144,7 +144,7 @@ func TestSinkRecord(t *testing.T) {
 	if st != want {
 		t.Fatalf("%+v, want %+v", st, want)
 	}
-	for _, ref := range []string{"v:newpage", "id:555"} {
+	for _, ref := range []string{"v:newpage", "id:100064000000555"} {
 		e, ok := scheduled(t, db, ref)
 		if !ok || e.source != "discovery" || e.by == nil || *e.by != kw.ID || e.next.After(time.Now()) {
 			t.Errorf("%s: %+v %v", ref, e, ok)
@@ -187,7 +187,7 @@ func TestSinkRecord(t *testing.T) {
 
 	// Profiles are skipped when include_profiles is off.
 	noProfiles := &discovery.Sink{DB: db, Cfg: config.Discovery{MaxNewPerDay: 10}, Interval: time.Hour}
-	if st, err := noProfiles.Record(ctx, q, []discovery.Result{{PostID: "9", PostTime: at, OwnerID: 888, OwnerKind: "profile"}}); err != nil || st.Skipped != 1 {
+	if st, err := noProfiles.Record(ctx, q, []discovery.Result{{PostID: "9", PostTime: at, OwnerID: 100064000000888, OwnerKind: "profile"}}); err != nil || st.Skipped != 1 {
 		t.Fatalf("%+v %v", st, err)
 	}
 

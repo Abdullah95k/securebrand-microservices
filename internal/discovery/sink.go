@@ -149,7 +149,7 @@ func (s *Sink) record(ctx context.Context, q Query, r Result, ref string) (strin
 			refs = append(refs, "id:"+strconv.FormatInt(r.OwnerID, 10))
 		}
 		var pageRef *string
-		err := tx.QueryRow(ctx, `SELECT page_ref FROM page_schedule WHERE page_ref = ANY($1) OR ($2 > 0 AND page_id = $2)
+		err := tx.QueryRow(ctx, `SELECT page_ref FROM page_schedule WHERE page_ref = ANY($1) OR ($2::bigint > 0 AND page_id = $2::bigint)
 			ORDER BY page_ref = $3 DESC LIMIT 1`, refs, r.OwnerID, ref).Scan(&pageRef)
 		switch {
 		case err == nil:
