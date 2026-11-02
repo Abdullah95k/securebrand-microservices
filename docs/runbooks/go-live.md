@@ -17,6 +17,7 @@ Commenter data is personal data.
   | raw payloads | 7 days |
   | media rows | 30 days |
   | jobs | 90 days |
+  | checked accounts (mentions) | 180 days after the last mention and check (`mentions.retention_days`) |
 
 - **Erasure:** an owner for erasure requests (`POST /v1/erasure-requests`, scope `admin`). An erased author or page is also suppressed, so later scrapes never bring the data back.
 

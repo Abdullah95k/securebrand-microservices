@@ -266,7 +266,7 @@ func (s *Server) page(w http.ResponseWriter, r *http.Request) {
 	}
 	rd := s.renderer(r)
 	var body []byte
-	if s.opts.Faults.Restricted && !consent {
+	if (s.opts.Faults.Restricted || p.Restricted) && !consent {
 		body = rd.restrictedHTML(lsd)
 	} else {
 		s.World.mu.RLock()
@@ -394,8 +394,14 @@ func (s *Server) timeline(rd *renderer, vars map[string]any) []byte {
 		// returns no timeline at all.
 		return ndjson(obj{"data": obj{"node": obj{"__typename": "Page", "id": str(vars["id"])}}, "extensions": obj{"is_final": true}})
 	}
-	if p == nil {
+	if p == nil || p.Restricted {
 		return ndjson(obj{"data": obj{"node": nil}, "extensions": obj{"is_final": true}})
+	}
+	if p.Private {
+		// What a logged-out visitor gets of a private profile: the node,
+		// with no posts.
+		return ndjson(obj{"data": obj{"node": obj{"__typename": "User", "id": str(vars["id"]),
+			"timeline_list_feed_units": obj{"edges": []any{}, "page_info": obj{"has_next_page": false}}}}, "extensions": obj{"is_final": true}})
 	}
 	_, _, off, ok := parseCursor(str(vars["cursor"]))
 	if !ok {

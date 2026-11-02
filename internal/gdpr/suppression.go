@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -199,4 +200,15 @@ func ScrubMentionsJSON(raw []byte) []byte {
 		return nil
 	}
 	return out
+}
+
+// RefKey is the suppression key of an account reference: the author key
+// of its id ("id:<n>"), or of the reference itself ("v:<name>"), which an
+// author erasure records for the vanity names it knows of the person, so
+// a link to them is never checked again.
+func RefKey(secret []byte, ref string) []byte {
+	if id, ok := strings.CutPrefix(ref, "id:"); ok {
+		return AuthorKey(secret, id)
+	}
+	return AuthorKey(secret, ref)
 }

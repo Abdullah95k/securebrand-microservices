@@ -43,7 +43,7 @@ fbs-crawler --stages page ─PostTask─▶ post ─ThreadTask─▶ thread     
 |---|---|
 | `fbs-api` | REST API (`/v1`, [OpenAPI](api/openapi/fbs.v1.yaml)), API keys with scopes, job dispatch |
 | `fbs-scheduler` | Leader-elected. Runs the planner, the job finaliser (completeness, `fb.job.v1`), the reaper, partitions, retention and erasure. |
-| `fbs-crawler --stages page,post,thread,retry,search` | Fetch, parse and emit; `search` runs discovery's keyword searches. Run one Deployment per stage. |
+| `fbs-crawler --stages page,post,thread,retry,search,check` | Fetch, parse and emit; `search` runs discovery's keyword searches, `check` the mention checks. Run one Deployment per stage. |
 | `fbs-persister` | Writes `fb.*` topics into partitioned Postgres (COPY + no-op upserts) |
 | `fbs-media-downloader` / `fbs-media-janitor` | Temporary media lifecycle ([contract](docs/contracts/media-handoff.md)) |
 | `fbs-registry-sync` | Follows Facebook's doc_id rotations. It scans canary pages' bundles, checks new ids with real requests and promotes working ones ([runbook](docs/runbooks/operations.md#registry-stale-doc_id-rotated)). |
@@ -51,7 +51,7 @@ fbs-crawler --stages page ─PostTask─▶ post ─ThreadTask─▶ thread     
 | `fbs-spike` | Phase 0 harness against real Facebook: `phase0` runs everything; also `preflight`, `docids`, `har`, `capture`, `check-fixtures`, `run`, `report` (no infrastructure needed) |
 | `fakefb`, `devs3` | Synthetic Facebook and in-memory S3, for development and tests |
 
-Design decisions: [ADR 0001](docs/adr/0001-logged-out-graphql-scraping.md) (scraping approach), [0002](docs/adr/0002-kafka-postgres-valkey.md) (Kafka, Postgres, Valkey), [0003](docs/adr/0003-temporary-media.md) (temporary media).
+Design decisions: [ADR 0001](docs/adr/0001-logged-out-graphql-scraping.md) (scraping approach), [0002](docs/adr/0002-kafka-postgres-valkey.md) (Kafka, Postgres, Valkey), [0003](docs/adr/0003-temporary-media.md) (temporary media), [0004](docs/adr/0004-mentions.md) (mentioned accounts).
 
 ### Quick start (Docker Compose, against fakefb)
 
@@ -148,6 +148,7 @@ Settings that matter most:
 | `scheduler.budget` | unlimited | Daily request/byte budget: pauses backfill, then stretches slow tiers; never holds on-demand work |
 | `registry_sync.canary_pages`, `registry_sync.interval` | none / 30m | Public pages fbs-registry-sync checks doc_ids on; set at least three in production. `promote: false` makes it a dry run. |
 | `discovery` | off; 1h / 6h / 200 a day | Keyword discovery: every `interval` each enabled keyword (`/v1/discovery/keywords`; `fbctl discovery keywords seed` loads the Iraq list in English, Arabic, Sorani and Kurmanji) is searched for posts of the last `window`; posters not yet scheduled are added (`source: discovery`), up to `max_new_per_day`. Needs the crawler's `search` stage. The Facebook search client is not built yet: searches end `unavailable`. |
+| `mentions` | off; 300 checks / 50 adds a day (Iraq time); recheck after ~6 months | Accounts our posts and comments mention (tags, facebook.com links, shared posts, comment authors) and candidates other tools send (`POST /v1/discovery/candidates`, scope `discovery:write`): those not scheduled are checked logged out (one page load each, through the page-load gate) and the public ones added (`source: mention`). Needs the crawler's `check` stage. See the [runbook](docs/runbooks/operations.md#mentions). |
 | `api.max_running_p0_jobs` | 0 (off) | Fleet-wide cap on running on-demand jobs (429 + Retry-After) |
 | `limits.video_policy` | `sd` (`thumbnail` for backfills) | `none`, `thumbnail`, `sd` or `hd` |
 | `crawler.slots`, `crawler.lanes`, `crawler.lane_min` | 240 / p2 ≤ 96 / 12 | In-flight tasks per pod and stage, shared by the lanes in priority order (on-demand > scheduled > backfill); backfill capped at 40%, each lane keeps a minimum |
@@ -221,7 +222,7 @@ Commenter data is personal data.
 - a `pseudonymized` mode;
 - author identity only for keys with the `pii:read` scope;
 - retention by partition drop;
-- erasure by author or page (`POST /v1/erasure-requests`), which redacts or deletes data, deletes media, publishes `fb.erasure.v1` and adds the subject to a suppression set so re-scrapes never reintroduce it;
+- erasure by author or page (`POST /v1/erasure-requests`), which redacts or deletes data, deletes media, publishes `fb.erasure.v1` and adds the subject to a suppression set so re-scrapes never reintroduce it (and removes them from the checked-accounts list of the mentions flow, which never checks them again);
 - no payloads in logs, and scrubbed fixtures.
 
 **Get legal sign-off before production:** Facebook ToS review, a legitimate-interest assessment and a DPIA.

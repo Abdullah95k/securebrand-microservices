@@ -2,6 +2,7 @@ package task
 
 import (
 	"testing"
+	"time"
 
 	fbv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fb/v1"
 	taskv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fbs/task/v1"
@@ -80,5 +81,23 @@ func TestRefID(t *testing.T) {
 		if got := RefID(ref); got != want {
 			t.Errorf("RefID(%q) = %d, want %d", ref, got, want)
 		}
+	}
+}
+
+// A retried search or check keeps its scope (and so its task id); a check
+// queued again later is another task.
+func TestRetryKeepsSearchAndCheckScopes(t *testing.T) {
+	at := time.Date(2026, 11, 2, 10, 0, 0, 0, time.UTC)
+	for _, orig := range []*taskv1.Task{
+		NewSearch(7, "erbil", "en", at.Add(-time.Hour), at),
+		NewCheck("v:some.page", 42, at),
+	} {
+		r := Retry(orig, "")
+		if r.TaskId != orig.TaskId || ScopeKey(r) != ScopeKey(orig) || r.Scope == nil {
+			t.Fatalf("retry of %v lost its scope: %v", orig.Kind, r)
+		}
+	}
+	if a, b := NewCheck("v:some.page", 42, at), NewCheck("v:some.page", 42, at.Add(time.Microsecond)); a.TaskId == b.TaskId {
+		t.Fatal("two queueings of a check share a task id")
 	}
 }

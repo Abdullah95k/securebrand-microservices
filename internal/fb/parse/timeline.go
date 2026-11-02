@@ -188,6 +188,12 @@ func story(n *Node, all []*Node, pageID int64, baseURL string) (PostBundle, Repo
 				p.SharedPostId = &sid
 			}
 			p.SharedPostUrl = First(x.V, "permalink_url", "url").String()
+			// Its owner: the page or profile that posted it.
+			if a := First(x.V, "actors.0", "comet_sections.context_layout.story.comet_sections.actor_photo.story.actors.0"); a.IsObject() {
+				p.SharedOwnerId = a.Get("id").String()
+				p.SharedOwnerUrl = First(a, "url", "profile_url").String()
+				p.SharedOwnerType = a.Get("__typename").String()
+			}
 			break
 		}
 	}
@@ -247,6 +253,9 @@ func story(n *Node, all []*Node, pageID int64, baseURL string) (PostBundle, Repo
 				if l := linkAttachment(a); l != nil && !seenLink[l.Url] {
 					seenLink[l.Url] = true
 					p.Links = append(p.Links, l)
+				} else if fl := facebookLink(a); fl != "" && !seenLink[fl] {
+					seenLink[fl] = true
+					p.FacebookLinks = append(p.FacebookLinks, fl)
 				}
 				return true
 			})
@@ -358,16 +367,55 @@ func mergeReactions(cur *fbv1.Reactions, curExact bool, r *fbv1.Reactions, rExac
 	return cur, curExact
 }
 
-func linkAttachment(a gjson.Result) *fbv1.LinkAttachment {
+// attachmentURL returns an attachment's link target, unwrapped from
+// l.facebook.com, and the attachment object it was read from.
+func attachmentURL(a gjson.Result) (string, gjson.Result) {
 	att := First(a, "styles.attachment", "attachment", "style_type_renderer.attachment")
 	if !att.Exists() {
 		att = a
 	}
 	raw := First(att, "story_attachment_link_renderer.attachment.web_link.url", "web_link.url", "url", "target.url").String()
 	if raw == "" {
+		return "", att
+	}
+	return unwrapLinkShim(raw), att
+}
+
+// facebookLink returns an attachment's link when it points into
+// facebook.com (a page, a profile, a post), "" otherwise.
+func facebookLink(a gjson.Result) string {
+	raw, _ := attachmentURL(a)
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || !IsFacebookSite(u.Hostname()) {
+		return ""
+	}
+	return raw
+}
+
+// IsFacebookSite reports facebook.com, its subdomains (www, m, web,
+// mbasic) and fb.com: hosts whose paths name pages, profiles and posts.
+// Not the CDN, nor l.facebook.com (a link shim, unwrapped first).
+func IsFacebookSite(h string) bool {
+	h = strings.ToLower(strings.TrimSuffix(h, "."))
+	switch {
+	case h == "l.facebook.com" || h == "lm.facebook.com":
+		return false
+	case h == "facebook.com" || strings.HasSuffix(h, ".facebook.com"):
+		return true
+	case h == "fb.com" || h == "www.fb.com":
+		return true
+	}
+	return false
+}
+
+func linkAttachment(a gjson.Result) *fbv1.LinkAttachment {
+	raw, att := attachmentURL(a)
+	if raw == "" {
 		return nil
 	}
-	raw = unwrapLinkShim(raw)
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" || isFacebookHost(u.Hostname()) {
 		return nil

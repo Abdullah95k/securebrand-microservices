@@ -2,6 +2,7 @@ package gdpr
 
 import (
 	"context"
+	"encoding/hex"
 	"strings"
 	"testing"
 	"time"
@@ -289,3 +290,100 @@ func TestErasureMediaEventsAreNotLost(t *testing.T) {
 		t.Fatalf("after the retry: media %q, request %q", m, r)
 	}
 }
+
+// An author erasure removes the person from the mentions flow: their rows
+// by id and by every vanity name the list knew them by (or the request's
+// profile link), those names suppressed (keyed), and a profile of theirs the
+// flow added erased as a page. A page erasure removes the page's rows and
+// its mentions of others. Other accounts stay.
+func TestErasureCoversMentions(t *testing.T) {
+	db := testenv.Postgres(t)
+	brokers := testenv.Kafka(t)
+	ctx := context.Background()
+	prod, err := kafka.NewProducer(kafka.ClientConfig{Brokers: brokers, TopicPrefix: testenv.TopicPrefix()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prod.Close()
+	key := []byte("secret")
+	e := &Eraser{DB: db, Producer: prod, HMACKey: key}
+	const person, page, other = int64(100000000000111), int64(100064000000222), int64(100000000000333)
+	for _, q := range []string{
+		`INSERT INTO checked_accounts (account_ref, account_id, source, status, first_seen_at, last_seen_at) VALUES
+			('id:100000000000111', 100000000000111, 'mention', 'public', now(), now()),
+			('v:the.person', 100000000000111, 'mention', 'private', now(), now()),
+			('v:linked.only', NULL, 'mention', 'unchecked', now(), now()),
+			('id:100064000000222', 100064000000222, 'mention', 'listed', now(), now()),
+			('v:the.page', NULL, 'mention', 'unchecked', now(), now()),
+			('id:100000000000333', 100000000000333, 'mention', 'unchecked', now(), now())`,
+		`UPDATE checked_accounts SET pages = 2 WHERE account_ref = 'id:100000000000333'`,
+		`INSERT INTO mention_pages (account_ref, page_id, mentions, last_seen_at) VALUES
+			('v:the.person', 9, 1, now()), ('id:100000000000333', 100064000000222, 1, now()), ('id:100000000000333', 9, 1, now())`,
+		`INSERT INTO mention_events (account_ref, account_id, kind, via, page_id, post_id, seen_at) VALUES
+			('v:the.person', NULL, 'profile', 'link', 9, 1, now()), ('id:100000000000333', 100000000000333, 'profile', 'tag', 100064000000222, 2, now())`,
+		`INSERT INTO pages (page_id, vanity, status) VALUES (100064000000222, 'The.Page', 'active')`,
+		`INSERT INTO page_schedule (page_ref, page_id, interval_seconds, next_run_at, source) VALUES
+			('id:100000000000111', 100000000000111, 3600, now(), 'mention'), ('v:linked.only', NULL, 3600, now(), 'mention')`,
+	} {
+		if _, err := db.Exec(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	count := func(q string, args ...any) int {
+		t.Helper()
+		var n int
+		if err := db.QueryRow(ctx, q, args...).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	request := func(subject string, authorKey []byte, pageID *int64, input string) {
+		t.Helper()
+		if _, err := db.Exec(ctx, `INSERT INTO erasure_requests (id, subject_type, author_key, page_id, input, status)
+			VALUES ($1, $2, $3, $4, $5, 'pending')`, uuid.New(), subject, authorKey, pageID, input); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.Tick(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	request("author", AuthorKey(key, "100000000000111"), nil, `{"author_id": "100000000000111"}`)
+	if n := count(`SELECT count(*) FROM checked_accounts WHERE account_ref IN ('id:100000000000111', 'v:the.person')`); n != 0 {
+		t.Fatalf("%d of the person's rows kept", n)
+	}
+	if n := count(`SELECT count(*) FROM mention_pages WHERE account_ref = 'v:the.person'`) +
+		count(`SELECT count(*) FROM mention_events WHERE account_ref = 'v:the.person'`); n != 0 {
+		t.Fatal("the person's counts or events kept")
+	}
+	if n := count(`SELECT count(*) FROM suppression WHERE subject_type = 'author' AND subject_key = $1`,
+		hexKey(RefKey(key, "v:the.person"))); n != 1 {
+		t.Fatal("the person's vanity is not suppressed")
+	}
+	if n := count(`SELECT count(*) FROM erasure_requests WHERE subject_type = 'page' AND page_id = $1 AND status = 'pending'`, person); n != 1 {
+		t.Fatal("the profile the flow added is not queued for a page erasure")
+	}
+	// A person known by a link only: the request names it.
+	request("author", RefKey(key, "v:linked.only"), nil, `{"account_ref": "v:linked.only"}`)
+	if n := count(`SELECT count(*) FROM checked_accounts WHERE account_ref = 'v:linked.only'`) +
+		count(`SELECT count(*) FROM page_schedule WHERE page_ref = 'v:linked.only'`); n != 0 {
+		t.Fatal("a person known by a link only is kept")
+	}
+	// The page: its rows, by id and vanity, and its mentions of others.
+	pid := page
+	request("page", nil, &pid, `{"page_id": 100064000000222}`)
+	if n := count(`SELECT count(*) FROM checked_accounts WHERE account_ref IN ('id:100064000000222', 'v:the.page')`); n != 0 {
+		t.Fatalf("%d of the page's rows kept", n)
+	}
+	if n := count(`SELECT count(*) FROM mention_pages WHERE page_id = $1`, page) + count(`SELECT count(*) FROM mention_events WHERE page_id = $1`, page); n != 0 {
+		t.Fatal("the page's mentions of others kept")
+	}
+	if n := count(`SELECT count(*) FROM checked_accounts WHERE account_id = $1`, other) + count(`SELECT count(*) FROM mention_pages WHERE page_id = 9`); n != 2 {
+		t.Fatalf("other accounts' rows touched: %d", n)
+	}
+	// The other account no longer counts the erased page among its pages.
+	if n := count(`SELECT pages FROM checked_accounts WHERE account_id = $1`, other); n != 1 {
+		t.Fatalf("other account's pages = %d, want 1", n)
+	}
+}
+
+func hexKey(k []byte) string { return hex.EncodeToString(k) }

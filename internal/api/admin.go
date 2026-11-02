@@ -14,6 +14,7 @@ import (
 
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/registry"
 	"github.com/abdullah95k/securebrand-microservices/internal/gdpr"
+	"github.com/abdullah95k/securebrand-microservices/internal/mentions"
 )
 
 func (s *Server) listQueries(w http.ResponseWriter, r *http.Request) {
@@ -138,11 +139,32 @@ func (s *Server) createErasure(w http.ResponseWriter, r *http.Request) {
 			_ = s.DB.QueryRow(r.Context(), `SELECT author_id FROM comment_authors WHERE profile_url = $1 AND author_id IS NOT NULL LIMIT 1`,
 				req.ProfileURL).Scan(&id)
 		}
+		// The profile as the mentions flow names it (checked accounts): its
+		// id when a link or a check tells it.
+		ref := mentions.NormalizeRef(req.ProfileURL)
+		if id == "" && ref != "" {
+			if n := mentions.RefID(ref); n != 0 {
+				id = strconv.FormatInt(n, 10)
+			} else {
+				_ = s.DB.QueryRow(r.Context(), `SELECT account_id::text FROM checked_accounts WHERE account_ref = $1 AND account_id IS NOT NULL`,
+					ref).Scan(&id)
+			}
+		}
 		var key []byte
+		hmacKey := []byte(s.Cfg.Privacy.AuthorHMACKey)
 		if id != "" {
-			key = gdpr.AuthorKey([]byte(s.Cfg.Privacy.AuthorHMACKey), id)
+			key = gdpr.AuthorKey(hmacKey, id)
 		} else if req.ProfileURL != "" {
 			_ = s.DB.QueryRow(r.Context(), `SELECT author_key FROM comment_authors WHERE profile_url = $1 LIMIT 1`, req.ProfileURL).Scan(&key)
+		}
+		if len(key) == 0 && strings.HasPrefix(ref, "v:") {
+			// Known to the mentions flow by a vanity name only: suppressed
+			// under that name.
+			var known bool
+			_ = s.DB.QueryRow(r.Context(), `SELECT EXISTS (SELECT 1 FROM checked_accounts WHERE account_ref = $1)`, ref).Scan(&known)
+			if known {
+				key = gdpr.RefKey(hmacKey, ref)
+			}
 		}
 		if len(key) == 0 {
 			problem(w, http.StatusBadRequest, "unknown author", "provide author_id, or a profile_url we have stored")
@@ -150,7 +172,8 @@ func (s *Server) createErasure(w http.ResponseWriter, r *http.Request) {
 		}
 		// The Facebook id (resolved from the profile URL if need be) lets the
 		// erasure find the author's mentions; it is dropped once done.
-		e, err := s.insertErasure(r.Context(), c, "author", key, 0, map[string]any{"author_id": id, "profile_url": req.ProfileURL})
+		e, err := s.insertErasure(r.Context(), c, "author", key, 0, map[string]any{"author_id": id, "profile_url": req.ProfileURL,
+			"account_ref": ref})
 		if err != nil {
 			serverError(w, err)
 			return

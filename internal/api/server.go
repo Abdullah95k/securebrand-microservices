@@ -92,6 +92,10 @@ func (s *Server) routes(r chi.Router) {
 	r.Patch("/discovery/keywords/{id}", require(ScopePagesWrite, s.updateKeyword))
 	r.Delete("/discovery/keywords/{id}", require(ScopePagesWrite, s.deleteKeyword))
 	r.Get("/discovery/mentions", require(ScopeDataRead, s.listMentions))
+	r.Get("/discovery/accounts", require(ScopeDataRead, s.listAccounts))
+	r.Get("/discovery/accounts/{ref}", require(ScopeDataRead, s.getAccount))
+	r.Post("/discovery/accounts/{ref}/recheck", require(ScopePagesWrite, s.recheckAccount))
+	r.Post("/discovery/candidates", require(ScopeDiscoveryWrite, s.createCandidate))
 
 	r.Post("/erasure-requests", require(ScopeAdmin, s.createErasure))
 	r.Get("/erasure-requests/{id}", require(ScopeAdmin, s.getErasure))

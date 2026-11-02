@@ -61,6 +61,8 @@ type Stack struct {
 	Planner  *scheduler.Planner
 	Adaptive *scheduler.Adaptive
 	Dispatch *dispatch.Dispatcher
+	// Mentions is the leader's mentions loops (ticked by the tests).
+	Mentions *scheduler.Mentions
 
 	mu      sync.Mutex
 	groups  map[string]*group
@@ -86,6 +88,8 @@ type Options struct {
 	CrawlerDrain time.Duration
 	// Discovery runs the crawler's search stage, searching fakefb.
 	Discovery bool
+	// Mentions runs the crawler's check stage (enable mentions in Config).
+	Mentions bool
 }
 
 // Start brings up the stack; it stops at test cleanup.
@@ -193,6 +197,9 @@ func Start(t *testing.T, o Options) *Stack {
 			return fakefb.SearchSource{Doer: id.Doer, Base: id.Base}
 		}
 	}
+	if o.Mentions {
+		s.copts.Stages = append(s.copts.Stages, "check")
+	}
 	t.Cleanup(s.Stop)
 
 	s.Crawler, err = app.NewCrawler(ctx, cfg, db, rdb, producer, s.copts)
@@ -202,7 +209,8 @@ func Start(t *testing.T, o Options) *Stack {
 	s.Dispatch = &dispatch.Dispatcher{DB: db, Jobs: s.tracker, Producer: producer, BaseURL: cfg.FB.BaseURL}
 	s.Adaptive = &scheduler.Adaptive{DB: db, Cfg: cfg}
 	s.Planner = &scheduler.Planner{DB: db, Dispatch: s.Dispatch, Cfg: cfg, Adaptive: s.Adaptive}
-	s.Eraser = &gdpr.Eraser{DB: db, S3: s3, Producer: producer}
+	s.Eraser = &gdpr.Eraser{DB: db, S3: s3, Producer: producer, HMACKey: []byte(cfg.Privacy.AuthorHMACKey)}
+	s.Mentions = scheduler.NewMentions(db, producer, cfg)
 	dl := &media.Downloader{DB: db, S3: s3, Bucket: cfg.S3.MediaBucket, Producer: producer, HTTP: media.NewHTTPClient(),
 		TTL: cfg.Media.TTL, MaxBytes: cfg.Media.MaxBytes}
 	dlc, err := kafka.NewConsumer(kafka.ConsumerConfig{ClientConfig: kcfg, Group: "fbs-media-downloader",
@@ -272,7 +280,7 @@ func (s *Stack) RestartCrawler(t *testing.T) {
 func (s *Stack) RestartPersister(t *testing.T) {
 	t.Helper()
 	s.stop("persister")
-	pc, err := persist.NewConsumer(s.kcfg, &persist.Writer{DB: s.DB}, 2000, 100*time.Millisecond)
+	pc, err := persist.NewConsumer(s.kcfg, persist.NewWriter(s.DB, s.Cfg), 2000, 100*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}

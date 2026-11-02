@@ -21,6 +21,7 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/task"
 	"github.com/abdullah95k/securebrand-microservices/internal/dispatch"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/ratelimit"
+	"github.com/abdullah95k/securebrand-microservices/internal/mentions"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/kafka"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/metrics"
 	"github.com/abdullah95k/securebrand-microservices/internal/store"
@@ -441,6 +442,20 @@ func (m *Maintenance) Tick(ctx context.Context) error {
 		}
 		if _, err := m.DB.Exec(ctx, s.q, s.days); err != nil {
 			errs = append(errs, err)
+		}
+	}
+	// The checked-accounts list holds mostly private people: accounts nobody
+	// mentioned or checked for mentions.retention_days go, whether the
+	// flow is on or not.
+	if days := m.Cfg.Mentions.RetentionDays; days > 0 {
+		for range 20 {
+			n, err := mentions.Expire(ctx, m.DB, days)
+			if err != nil {
+				errs = append(errs, err)
+			}
+			if err != nil || n < 5000 {
+				break
+			}
 		}
 	}
 	// Refresh rows of posts past every refresh window and recrawl age, and

@@ -48,6 +48,8 @@ func Task(kind taskv1.Kind, lane taskv1.Lane) string {
 		stage = "thread"
 	case taskv1.Kind_KIND_SEARCH:
 		stage = "search"
+	case taskv1.Kind_KIND_CHECK:
+		stage = "check"
 	default:
 		panic(fmt.Sprintf("topics: unknown kind %v", kind))
 	}

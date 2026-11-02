@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"os"
 	"time"
+	// The caps' day starts in mentions.time_zone, also where the image
+	// has no zoneinfo.
+	_ "time/tzdata"
 
 	"github.com/abdullah95k/securebrand-microservices/configs"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/breaker"
@@ -36,6 +39,58 @@ type Config struct {
 	// Discovery searches keywords for recent posts and adds the pages and
 	// profiles posting them to the schedule.
 	Discovery Discovery `koanf:"discovery"`
+	// Mentions finds the accounts our posts and comments mention, checks
+	// whether those not on the main list are public, and adds the public
+	// ones (docs/runbooks/operations.md, "Mentions").
+	Mentions Mentions `koanf:"mentions"`
+}
+
+// Mentions configures the mentions flow: the persister records the
+// accounts new posts and comments mention, the scheduler leader queues
+// checks of those not on the main list (highest priority first, under a
+// daily cap), and the crawler's check stage loads each one logged out
+// through the identity pool and the page-load gate. Public ones are added
+// to the schedule (source "mention"), under their own daily cap.
+type Mentions struct {
+	Enabled bool `koanf:"enabled"`
+	// IncludeCommentAuthors counts every comment's author as mentioned by
+	// it (a large volume, mostly private people).
+	IncludeCommentAuthors bool `koanf:"include_comment_authors"`
+	// MaxChecksPerDay is the hard cap on checks (each one page load) per
+	// day; MaxNewPerDay the cap on pages added per day. 0 = none.
+	MaxChecksPerDay int `koanf:"max_checks_per_day"`
+	MaxNewPerDay    int `koanf:"max_new_per_day"`
+	// TimeZone is where a day starts for both caps (IANA name).
+	TimeZone string `koanf:"time_zone"`
+	// RecheckAfter is how long a check that found an account not public
+	// holds: it is checked again when mentioned after that.
+	RecheckAfter time.Duration `koanf:"recheck_after"`
+	// A failed check (a wall, a rate limit, a proxy error) says nothing
+	// about the account: it is retried after RetryBackoff, doubling up to
+	// RetryMaxBackoff.
+	RetryBackoff    time.Duration `koanf:"retry_backoff"`
+	RetryMaxBackoff time.Duration `koanf:"retry_max_backoff"`
+	// MaxFailures failed checks in a row park an account, still unchecked,
+	// until a mention after RecheckAfter (or a recheck asked for): one
+	// that walls every time costs no page load a week forever. 0 = never.
+	MaxFailures int `koanf:"max_failures"`
+	// Concurrency is how many checks a crawler runs at once.
+	Concurrency int `koanf:"concurrency"`
+	// CandidateWeight is the priority a candidate from another tool
+	// (POST /v1/discovery/candidates) starts with, on the scale of
+	// mention_priority (2 ≈ being mentioned by one more of our pages).
+	CandidateWeight float64 `koanf:"candidate_weight"`
+	// RetentionDays removes an account nobody mentioned or checked for
+	// that long (0 = kept for good).
+	RetentionDays int `koanf:"retention_days"`
+}
+
+// Location returns the time zone of the daily caps.
+func (m Mentions) Location() *time.Location {
+	if l, err := time.LoadLocation(m.TimeZone); err == nil && m.TimeZone != "" {
+		return l
+	}
+	return time.FixedZone("UTC+3", 3*3600)
 }
 
 // Discovery configures keyword discovery: every Interval the scheduler
@@ -494,6 +549,20 @@ func (c *Config) Validate() error {
 	}
 	if c.RegistrySync.Interval <= 0 || c.RegistrySync.Timeout <= 0 {
 		errs = append(errs, errors.New("registry_sync.interval and registry_sync.timeout must be > 0"))
+	}
+	if m := c.Mentions; m.Enabled {
+		if m.MaxChecksPerDay < 0 || m.MaxNewPerDay < 0 || m.Concurrency <= 0 {
+			errs = append(errs, errors.New("mentions.max_checks_per_day and max_new_per_day must be >= 0, mentions.concurrency > 0"))
+		}
+		if m.RecheckAfter <= 0 || m.RetryBackoff <= 0 || m.RetryMaxBackoff < m.RetryBackoff {
+			errs = append(errs, errors.New("mentions.recheck_after and retry_backoff must be > 0, retry_max_backoff at least retry_backoff"))
+		}
+		if _, err := time.LoadLocation(m.TimeZone); err != nil || m.TimeZone == "" {
+			errs = append(errs, fmt.Errorf("mentions.time_zone %q is not a time zone name (e.g. Asia/Baghdad)", m.TimeZone))
+		}
+		if m.RetentionDays < 0 || m.CandidateWeight < 0 || m.MaxFailures < 0 {
+			errs = append(errs, errors.New("mentions.retention_days, candidate_weight and max_failures must be >= 0"))
+		}
 	}
 	if d := c.Discovery; d.Enabled {
 		if d.Interval <= 0 || d.Window < d.Interval {

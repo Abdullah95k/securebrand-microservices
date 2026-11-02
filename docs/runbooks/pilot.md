@@ -49,6 +49,12 @@ at the new rate (the database is kept). The report sizes the IPs at the
 current rate, so after a change, measure only the time since
 (`PILOT_SINCE`).
 
+Mention checks (docs/runbooks/operations.md, "Mentions") are off unless
+`PILOT_MENTIONS=on` is given: `make pilot-up PILOT_RPS=0.5 PILOT_MENTIONS=on`.
+Every `make pilot-up` writes the setting again, so leaving it out turns
+them off. They use the same ISP exits and page-load gate as the crawl, at
+most `mentions.max_checks_per_day` (300) page loads a day.
+
 The import replaces only the built-in placeholders, so running `make
 pilot-up` again never undoes a rotation registry-sync promoted. To load
 a newer `phase0/out/registry.yaml` on purpose (after a new HAR, say), run

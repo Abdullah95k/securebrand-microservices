@@ -316,3 +316,61 @@ Keyword discovery finds pages and profiles posting about the keywords it is give
 - **Mentions:** each post found is a mention (`GET /v1/discovery/mentions?since=&keyword=&new_only=`). A poster already scheduled (by reference or page id) is matched; one that isn't is added to the schedule with `source: discovery` and due at once, so the planner's next run crawls it (scheduled, incremental, the default limits; no backfill). Groups, posts outside the window, posts whose text lacks the keyword, erased pages and, with `include_profiles: false`, people's profiles are skipped. Past `discovery.max_new_per_day` (200, per UTC day) mentions are recorded without adding the poster (`page_ref` unset). A profile is a person: who posted a profile's mention is shown only with `pii:read`. Mentions are kept `discovery.mentions_days` (30).
 - **Discovered pages** have no registering client, so only `admin` keys list them in `GET /v1/pages` (`source`, `discovered_at`, `discovered_by_keyword_id`). Disable or purge them like any page. Deleting a keyword deletes its mentions; the pages it added stay.
 - **Status:** the Facebook search client is not built: whether logged-out Facebook search serves recent posts is not confirmed. Until it is, every search ends at once without a request, the crawler logs it once, and `fbs_discovery_searches_total{outcome="unavailable"}` counts them. Watch `fbs_discovery_searches_total`, `fbs_discovery_results_total` (existing, added, capped, skipped) and `fbs_discovery_pages_added_total`.
+
+## Mentions
+
+The mentions flow finds every account (page or profile) our posts and comments mention, checks whether those not on our main list are public, and adds the public ones. It is off by default (`mentions.enabled`). Why it is built this way: [ADR 0004](../adr/0004-mentions.md).
+
+**How it works, end to end:**
+
+1. **Recording.** When the persister stores a post or comment for the first time, it records the accounts it mentions (`mention_events`) in the same transaction. Later scrapes of the same item record nothing again, so a mention is counted once per post or comment. What counts as a mention:
+   - pages and people tagged in the text (Facebook's entity ranges);
+   - facebook.com links in the text and in a post's attachments, to a page or profile (or one of its posts or photos; groups, events, hashtags and share links name no account);
+   - the owner of a post a post shares;
+   - with `mentions.include_comment_authors` (on by default), each comment's author. That is most of the volume: in the pilot about 126,000 new authors in 6 hours, mostly private people.
+
+   Mentions of a page by itself, of erased people and pages, in redacted comments, and in items written more than `retention_days` ago are left out. In `pii_mode: pseudonymized` person tags and comment authors carry no id, so only pages, links and shared posts count.
+2. **Counting.** Every 10 seconds the scheduler leader moves the events into the checked-accounts list (`checked_accounts`): mentions, distinct pages of ours (`mention_pages`), first and last mention. A new account already on the main list (`page_schedule`, by reference, id or a stored page's vanity) is `listed` and only counted.
+3. **Queueing.** Every minute the leader queues checks (`fbs.task.check.p1`), in priority order: rechecks asked for through the API first, then `ln(1+mentions) + 2·ln(1+pages) + weeks since 1970 of the latest mention` (+ `candidate_weight` for candidates from other tools). So an account mentioned often, by many of our pages and recently goes first; each week of age weighs as much as e (2.7) times the mentions.
+   - **Daily check cap** (`max_checks_per_day`, 300): a hard cap on page loads, per day in `time_zone` (Iraq time). The crawler takes one from `mention_check_days` right before each page load; a check whose exit could not load a page gives it back. The leader also spreads the day's checks over the day (by any hour, the share of the cap the day has run plus an hour's worth), so they never come in one burst.
+   - While the traffic budget pauses backfill (`scheduler.budget`), no checks are queued.
+   - A check task not finished after 6 hours is taken for lost and queued again.
+4. **Checking** (the crawler's `check` stage, `--stages ...,check`; Helm `crawler-check`; the pilot's crawler runs it). Logged out, through the identity pool and the exit's page-load gate (`fb.proxy.page_loads`), like any page load, and counted in the traffic budget and AIMD:
+   - one page load of the account, then (when it names an account) one timeline request;
+   - **public:** logged-out visitors see its posts, or it is a page → added to the main list (`source: mention`, `discovered_via`: why), crawled from the next planner run like a discovered page (scheduled, incremental, no backfill);
+   - **private:** it exists but shows no posts logged out (`no_public_posts`, `timeline_hidden`), or its page names nothing twice in a row (`restricted`: restricted to logged-in viewers, or removed);
+   - **unavailable:** not found (`not_found`);
+   - **failed:** a login wall, a rate limit, a checkpoint, a proxy error, an answer the parsers no longer read, or a first "names nothing" (it may be this exit's country): this says nothing about the account. It stays unchecked and is retried after `retry_backoff` (1h), doubling to `retry_max_backoff` (7 days). After `max_failures` (10) failures in a row it is parked, still unchecked (no result recorded), until a mention after `recheck_after` or a recheck asked for brings it back: an account that walls every time costs no page load every week forever. Walls are never worked around: the gate pauses the exit as for any walled page load.
+   - A private or unavailable account keeps its result for `recheck_after` (about 6 months): a mention within that time only counts; the first mention after it brings a new check.
+   - **Daily add cap** (`max_new_per_day`, 50): a public account past it stays `public` without `added_at` and is added on a later day (highest priority first), without another check.
+
+**Intake from other tools.** `POST /v1/discovery/candidates` with `{"ref", "source", "evidence_url", "keyword"}` and a key with only `discovery:write`:
+
+```bash
+docker compose -f deploy/compose/docker-compose.yml run --rm --entrypoint /usr/local/bin/fbctl api apikey create --name google-search --scopes discovery:write
+```
+
+A candidate is one more mention of its account and goes through the same checks, caps and lists. Its keyword and evidence are kept until a check finds the account not public (and on its schedule entry when it is added). An erased person or page is answered `ignored`.
+
+**API** (`api/openapi/fbs.v1.yaml`):
+- `GET /v1/discovery/accounts?status=&source=&kind=&checked_after=&checked_before=&added=&order=`: the list. Accounts that may be people show their reference only with `pii:read`.
+- `GET /v1/discovery/accounts/{ref}`: one account's counts and the pages of ours that mention it most.
+- `POST /v1/discovery/accounts/{ref}/recheck`: check it next (still under the daily cap).
+- `GET /v1/discovery/accounts?added=true` or `GET /v1/pages?source=mention` (admin): what was added, and why (`discovered_via`).
+
+**Privacy.** The list is mostly private individuals: it keeps references (`id:<n>`, `v:<name>`), kinds, states, dates and counts, never names, text or pictures. What first brought an account in (the post or comment, a candidate's keyword and evidence) is dropped when a check finds it not public.
+- **Erasure:** an author erasure (`POST /v1/erasure-requests`) removes the person's rows (by id, and by every vanity name the list or the request's `profile_url` knew them by), puts those vanity names in the suppression list (keyed, as author keys are) so links to them are never checked again, and erases as a page any profile of theirs the flow added. A page erasure removes the page and its mentions of others. Erased people and pages are never recorded, checked or added again.
+- **Retention:** `retention_days` (180) deletes accounts nobody mentioned or checked for that long, hourly, whether the flow is on or off.
+
+**Signals:**
+- `fbs_mentions_found_total{via}`: mentions recorded (tag, link, share, author);
+- `fbs_mention_checks_total{outcome}`: public, private, unavailable, listed, failed, suppressed, capped;
+- `fbs_mention_pages_added_total{kind}`;
+- `fbs_mention_cap_hits_total{cap}`: days the `checks` or `adds` cap was reached;
+- leader gauges: `fbs_mention_accounts{status}` and `fbs_mention_queue` (every 15 minutes: they count the whole list), `fbs_mention_checks_used`, `fbs_mention_events_pending`.
+
+**What to check:**
+- `failed` dominating `fbs_mention_checks_total`: exits are walled (see "Block storm"; `fbs_proxy_page_loads_deferred_total`). Checks back off by themselves; lower `max_checks_per_day` if crawling suffers.
+- `fbs_mention_queue` growing every day: the cap is below the rate of new accounts. That is expected with comment authors on; the highest-priority accounts are checked first.
+- `fbs_mention_events_pending` growing: the leader is not draining (scheduler down or Postgres slow).
+- Turning it on in the pilot: `make pilot-up PILOT_RPS=0.5 PILOT_MENTIONS=on` (the pilot runbook).

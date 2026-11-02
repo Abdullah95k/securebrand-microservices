@@ -109,3 +109,45 @@ func TestDiscoveryConfig(t *testing.T) {
 		}
 	}
 }
+
+// Mentions are off by default, with the agreed defaults, valid when
+// turned on; the caps' day starts in Iraq time (UTC+3).
+func TestMentionsConfig(t *testing.T) {
+	c, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := c.Mentions
+	if m.Enabled || !m.IncludeCommentAuthors || m.MaxChecksPerDay != 300 || m.MaxNewPerDay != 50 || m.TimeZone != "Asia/Baghdad" ||
+		m.RecheckAfter != 4380*time.Hour || m.RetryBackoff != time.Hour || m.RetryMaxBackoff != 168*time.Hour || m.Concurrency != 2 ||
+		m.CandidateWeight != 2 || m.RetentionDays != 180 || m.MaxFailures != 10 {
+		t.Fatalf("defaults: %+v", m)
+	}
+	at := time.Date(2026, 11, 2, 22, 30, 0, 0, time.UTC) // 01:30 the next day in Iraq
+	if _, off := at.In(m.Location()).Zone(); off != 3*3600 || at.In(m.Location()).Day() != 3 {
+		t.Fatalf("Iraq time: %v", at.In(m.Location()))
+	}
+	c.Mentions.Enabled = true
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(*Mentions){
+		"negative check cap":        func(m *Mentions) { m.MaxChecksPerDay = -1 },
+		"negative add cap":          func(m *Mentions) { m.MaxNewPerDay = -1 },
+		"no concurrency":            func(m *Mentions) { m.Concurrency = 0 },
+		"no recheck":                func(m *Mentions) { m.RecheckAfter = 0 },
+		"no backoff":                func(m *Mentions) { m.RetryBackoff = 0 },
+		"max backoff below backoff": func(m *Mentions) { m.RetryMaxBackoff = time.Minute },
+		"unknown zone":              func(m *Mentions) { m.TimeZone = "Mars/Olympus" },
+		"no zone":                   func(m *Mentions) { m.TimeZone = "" },
+		"negative retention":        func(m *Mentions) { m.RetentionDays = -1 },
+		"negative max failures":     func(m *Mentions) { m.MaxFailures = -1 },
+	} {
+		c, _ := Load("")
+		c.Mentions.Enabled = true
+		mutate(&c.Mentions)
+		if c.Validate() == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+}

@@ -154,6 +154,7 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 			taskv1.Kind_KIND_SEARCH: &stage.SearchStage{D: deps, Source: o.SearchSource,
 				Sink: &discovery.Sink{DB: db, Cfg: cfg.Discovery, Interval: cfg.Scheduler.DefaultInterval, Suppressed: supp.PageSuppressed}},
 		}}
+	worker.Stages[taskv1.Kind_KIND_CHECK] = stage.NewCheckStage(deps, cfg)
 	c := &Crawler{Deps: deps, Worker: worker, Registry: reg, Suppression: supp}
 	c.Components = []run.Func{
 		func(ctx context.Context) error { return reg.Run(ctx, cfg.FB.RegistryRefresh) },
@@ -211,6 +212,22 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 			}
 			c.Components = append(c.Components, cons.Run)
 			slog.Info("stage enabled", "stage", s, "discovery", cfg.Discovery.Enabled)
+			continue
+		}
+		if s == "check" {
+			// Mention checks: p1 only, mentions.concurrency at once, apart
+			// from the crawl lanes' slots. Each takes a page load from its
+			// exit's gate like any other.
+			cons, err := kafka.NewConsumer(kafka.ConsumerConfig{
+				ClientConfig: kcfg, Group: "fbs-crawler-check-p1",
+				Topics:      []string{topics.Task(taskv1.Kind_KIND_CHECK, taskv1.Lane_LANE_P1)},
+				MaxInflight: max(1, cfg.Mentions.Concurrency), MaxInflightPerPartition: 1, DrainTimeout: drain,
+			}, worker.Handle)
+			if err != nil {
+				return nil, err
+			}
+			c.Components = append(c.Components, cons.Run)
+			slog.Info("stage enabled", "stage", s, "mentions", cfg.Mentions.Enabled)
 			continue
 		}
 		if s == "retry" {

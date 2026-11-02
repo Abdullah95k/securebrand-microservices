@@ -15,7 +15,9 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	fbv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fb/v1"
+	"github.com/abdullah95k/securebrand-microservices/internal/config"
 	"github.com/abdullah95k/securebrand-microservices/internal/gdpr"
+	"github.com/abdullah95k/securebrand-microservices/internal/mentions"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/metrics"
 	"github.com/abdullah95k/securebrand-microservices/internal/store"
 )
@@ -32,6 +34,75 @@ type Writer struct {
 	// the erasure lock (crawlers learn of an erasure up to a minute late,
 	// and the erasure's own scrub runs once). Empty: not checked.
 	HMACKey []byte
+	// Mentions, when set, records the accounts new posts and comments
+	// mention (mention_events) in the transaction that stores them: each
+	// post or comment once, when it is first stored, so scrapes that see it
+	// again count nothing twice. Mentions written more than MentionsMaxAge
+	// ago are left out (0 = none): retention would delete them at once.
+	Mentions       *mentions.Options
+	MentionsMaxAge time.Duration
+}
+
+// NewWriter configures a writer from cfg: comment retention, the author
+// key, and with mentions.enabled the mentions it records.
+func NewWriter(db *pgxpool.Pool, cfg *config.Config) *Writer {
+	w := &Writer{DB: db, CommentsRetention: time.Duration(cfg.Privacy.Retention.CommentsDays) * 24 * time.Hour,
+		HMACKey: []byte(cfg.Privacy.AuthorHMACKey)}
+	if m := cfg.Mentions; m.Enabled {
+		w.Mentions = &mentions.Options{CommentAuthors: m.IncludeCommentAuthors}
+		w.MentionsMaxAge = time.Duration(m.RetentionDays) * 24 * time.Hour
+	}
+	return w
+}
+
+// mentionKeys returns the suppression keys and ids of the accounts events
+// name, for gdpr.Guard.
+func (w *Writer) mentionKeys(evs []mentions.Event) ([][]byte, []int64) {
+	var keys [][]byte
+	var ids []int64
+	for _, e := range evs {
+		keys = append(keys, mentions.SuppressionKeys(w.HMACKey, e.Ref, e.ID)...)
+		if e.ID != 0 {
+			ids = append(ids, e.ID)
+		}
+	}
+	return keys, ids
+}
+
+// recentMentions drops events older than MentionsMaxAge.
+func (w *Writer) recentMentions(evs []mentions.Event) []mentions.Event {
+	if w.MentionsMaxAge <= 0 || len(evs) == 0 {
+		return evs
+	}
+	cutoff := time.Now().Add(-w.MentionsMaxAge)
+	out := evs[:0]
+	for _, e := range evs {
+		if !e.At.Before(cutoff) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// writeMentions stores the events of the items created in this
+// transaction, leaving out erased people and pages, and returns how many
+// it wrote per way of mentioning.
+func (w *Writer) writeMentions(ctx context.Context, tx pgx.Tx, sup *gdpr.Suppression, evs []mentions.Event) (map[string]int, error) {
+	out := evs[:0:0]
+	n := map[string]int{}
+	for _, e := range evs {
+		if !mentions.Suppressed(sup, w.HMACKey, e.Ref, e.ID) {
+			out = append(out, e)
+			n[e.Via]++
+		}
+	}
+	return n, mentions.CopyEvents(ctx, tx, out)
+}
+
+func countMentions(n map[string]int) {
+	for via, c := range n {
+		metrics.MentionsFound.WithLabelValues(via).Add(float64(c))
+	}
 }
 
 // mentioned returns the author keys of the people rs mention (none
@@ -103,27 +174,38 @@ func (w *Writer) Posts(ctx context.Context, posts []*fbv1.Post) error {
 	start := time.Now()
 	pageIDs := make([]int64, len(posts))
 	months := make([]time.Time, len(posts))
-	mentions := make([][][]byte, len(posts))
+	keys := make([][][]byte, len(posts))
 	var mentioned [][]byte
+	evs := map[int64][]mentions.Event{}
+	var targetIDs []int64
 	for i, p := range posts {
 		pageIDs[i], months[i] = p.PageId, p.CreatedAt.AsTime()
-		mentions[i] = w.mentioned(p.TextRanges)
-		mentioned = append(mentioned, mentions[i]...)
+		keys[i] = w.mentioned(p.TextRanges)
+		mentioned = append(mentioned, keys[i]...)
+		if w.Mentions != nil {
+			if e := w.recentMentions(mentions.PostEvents(p)); len(e) > 0 {
+				evs[p.PostId] = e
+				k, ids := w.mentionKeys(e)
+				mentioned, targetIDs = append(mentioned, k...), append(targetIDs, ids...)
+			}
+		}
 	}
+	lookup := append(append([]int64{}, pageIDs...), targetIDs...)
 	var written int64
+	var found map[string]int
 	err := w.withPartitions(ctx, "posts", months, func() error {
-		written = 0
+		written, found = 0, nil
 		return pgx.BeginFunc(ctx, w.DB, func(tx pgx.Tx) error {
 			// Posts of an erased page still in flight are dropped, and
 			// erased authors' mentions cleared.
-			sup, err := gdpr.Guard(ctx, tx, mentioned, pageIDs)
+			sup, err := gdpr.Guard(ctx, tx, mentioned, lookup)
 			if err != nil {
 				return err
 			}
 			rows := make([][]any, 0, len(posts))
 			for i, p := range posts {
 				if !sup.PageSuppressed(p.PageId) {
-					gdpr.ScrubSuppressedMentions(sup, p.TextRanges, mentions[i])
+					gdpr.ScrubSuppressedMentions(sup, p.TextRanges, keys[i])
 					rows = append(rows, postRow(p))
 				}
 			}
@@ -151,21 +233,23 @@ func (w *Writer) Posts(ctx context.Context, posts []*fbv1.Post) error {
 					 OR old.reaction_count IS DISTINCT FROM new.reaction_count
 					 OR old.comment_count_total IS DISTINCT FROM new.comment_count_total
 					 OR old.share_count IS DISTINCT FROM new.share_count
-					 OR old.view_count IS DISTINCT FROM new.view_count) AS metrics_changed`
+					 OR old.view_count IS DISTINCT FROM new.view_count) AS metrics_changed,
+					old.post_id IS NULL AS created`
 			r, err := tx.Query(ctx, q)
 			if err != nil {
 				return err
 			}
 			var metricRows [][]any
+			var newEvents []mentions.Event
 			for r.Next() {
 				var (
 					postID, pageID                         int64
 					seen                                   time.Time
 					reactionCount, comments, shares, views *int64
 					reactions                              []byte
-					changed                                bool
+					changed, created                       bool
 				)
-				if err := r.Scan(&postID, &pageID, &seen, &reactionCount, &reactions, &comments, &shares, &views, &changed); err != nil {
+				if err := r.Scan(&postID, &pageID, &seen, &reactionCount, &reactions, &comments, &shares, &views, &changed, &created); err != nil {
 					r.Close()
 					return err
 				}
@@ -173,9 +257,15 @@ func (w *Writer) Posts(ctx context.Context, posts []*fbv1.Post) error {
 				if changed {
 					metricRows = append(metricRows, []any{postID, seen, pageID, reactionCount, reactions, comments, shares, views})
 				}
+				if created {
+					newEvents = append(newEvents, evs[postID]...)
+				}
 			}
 			r.Close()
 			if err := r.Err(); err != nil {
+				return err
+			}
+			if found, err = w.writeMentions(ctx, tx, sup, newEvents); err != nil {
 				return err
 			}
 			if _, err := tx.Exec(ctx, `INSERT INTO post_index (post_id, page_id, post_created_at)
@@ -193,6 +283,7 @@ func (w *Writer) Posts(ctx context.Context, posts []*fbv1.Post) error {
 	if err != nil {
 		return fmt.Errorf("persist: posts: %w", err)
 	}
+	countMentions(found)
 	metrics.PersistRows.WithLabelValues("post", "written").Add(float64(written))
 	metrics.PersistRows.WithLabelValues("post", "unchanged").Add(float64(int64(len(posts)) - written))
 	metrics.PersistBatch.WithLabelValues("post").Observe(time.Since(start).Seconds())
@@ -258,24 +349,34 @@ func (w *Writer) Comments(ctx context.Context, cs []*fbv1.Comment) error {
 	keys := make([][]byte, 0, len(cs))
 	pageIDs := make([]int64, 0, len(cs))
 	var months []time.Time
-	mentions := make(map[*fbv1.Comment][][]byte, len(cs))
+	mentionKeys := make(map[*fbv1.Comment][][]byte, len(cs))
+	evs := map[int64][]mentions.Event{}
+	lookup := []int64{}
 	for _, c := range cs {
 		keys = append(keys, c.GetAuthor().GetAuthorKey())
-		mentions[c] = w.mentioned(c.TextRanges)
-		keys = append(keys, mentions[c]...)
+		mentionKeys[c] = w.mentioned(c.TextRanges)
+		keys = append(keys, mentionKeys[c]...)
 		pageIDs = append(pageIDs, c.PageId)
 		if c.PostCreatedAt != nil {
 			months = append(months, c.PostCreatedAt.AsTime())
 		}
+		if w.Mentions != nil {
+			if e := w.recentMentions(mentions.CommentEvents(c, *w.Mentions)); len(e) > 0 {
+				evs[c.CommentId] = e
+				k, ids := w.mentionKeys(e)
+				keys, lookup = append(keys, k...), append(lookup, ids...)
+			}
+		}
 	}
 	var written, edited, restored, upserted int64
+	var found map[string]int
 	err := w.withPartitions(ctx, "comments", months, func() error {
-		written, edited, restored = 0, 0, 0
+		written, edited, restored, found = 0, 0, 0, nil
 		return pgx.BeginFunc(ctx, w.DB, func(tx pgx.Tx) error {
 			// Comments of an erased page still in flight are dropped, an
 			// erased author's are stored redacted, without an author row,
 			// and erased authors' mentions are cleared.
-			sup, err := gdpr.Guard(ctx, tx, keys, pageIDs)
+			sup, err := gdpr.Guard(ctx, tx, keys, append(lookup, pageIDs...))
 			if err != nil {
 				return err
 			}
@@ -289,7 +390,7 @@ func (w *Writer) Comments(ctx context.Context, cs []*fbv1.Comment) error {
 				if !c.Redacted && sup.AuthorSuppressed(c.GetAuthor().GetAuthorKey()) {
 					gdpr.Redact(c)
 				}
-				gdpr.ScrubSuppressedMentions(sup, c.TextRanges, mentions[c])
+				gdpr.ScrubSuppressedMentions(sup, c.TextRanges, mentionKeys[c])
 				if c.Status == fbv1.CommentStatus_COMMENT_STATUS_DELETED {
 					dels = append(dels, c)
 					continue
@@ -302,8 +403,22 @@ func (w *Writer) Comments(ctx context.Context, cs []*fbv1.Comment) error {
 				}
 			}
 			upserted = int64(len(rows))
+			created := map[int64]bool{}
 			if len(rows) > 0 {
-				if err := upsertComments(ctx, tx, rows, &written, &edited, &restored); err != nil {
+				if err := upsertComments(ctx, tx, rows, &written, &edited, &restored, created); err != nil {
+					return err
+				}
+			}
+			if len(created) > 0 {
+				var newEvents []mentions.Event
+				for _, c := range cs {
+					// A comment redacted here (its author was erased) mentions
+					// nothing.
+					if created[c.CommentId] && !c.Redacted {
+						newEvents = append(newEvents, evs[c.CommentId]...)
+					}
+				}
+				if found, err = w.writeMentions(ctx, tx, sup, newEvents); err != nil {
 					return err
 				}
 			}
@@ -336,6 +451,7 @@ func (w *Writer) Comments(ctx context.Context, cs []*fbv1.Comment) error {
 	if err != nil {
 		return fmt.Errorf("persist: comments: %w", err)
 	}
+	countMentions(found)
 	metrics.PersistRows.WithLabelValues("comment", "written").Add(float64(written))
 	metrics.PersistRows.WithLabelValues("comment", "unchanged").Add(float64(upserted - written))
 	metrics.CommentChanges.WithLabelValues("edited").Add(float64(edited))
@@ -351,7 +467,9 @@ const (
 	commentRestored = `(t.status = 'deleted' AND EXCLUDED.last_seen_at > t.deleted_at)`
 )
 
-func upsertComments(ctx context.Context, tx pgx.Tx, rows [][]any, written, edited, restored *int64) error {
+// upsertComments writes comment rows; created collects the ids of the
+// comments stored for the first time.
+func upsertComments(ctx context.Context, tx pgx.Tx, rows [][]any, written, edited, restored *int64, created map[int64]bool) error {
 	if err := copyTemp(ctx, tx, "tmp_comments", "comments", commentCols, rows); err != nil {
 		return err
 	}
@@ -376,34 +494,37 @@ func upsertComments(ctx context.Context, tx pgx.Tx, rows [][]any, written, edite
 		   OR `+commentRestored+`)
 		RETURNING new.edit_count > coalesce(old.edit_count, 0),
 			coalesce(old.status = 'deleted' AND new.status = 'visible', false),
-			new.post_created_at, new.post_id, new.comment_id, new.depth, old.deleted_at`)
+			new.post_created_at, new.post_id, new.comment_id, new.depth, old.deleted_at, old.comment_id IS NULL`)
 	if err != nil {
 		return err
 	}
 	var (
-		created []time.Time
-		posts   []int64
-		roots   []int64
-		at      []time.Time
+		postCreated []time.Time
+		posts       []int64
+		roots       []int64
+		at          []time.Time
 	)
 	for r.Next() {
-		var e, rs bool
+		var e, rs, isNew bool
 		var pc time.Time
 		var post, id int64
 		var depth int16
 		var deletedAt *time.Time
-		if err := r.Scan(&e, &rs, &pc, &post, &id, &depth, &deletedAt); err != nil {
+		if err := r.Scan(&e, &rs, &pc, &post, &id, &depth, &deletedAt, &isNew); err != nil {
 			r.Close()
 			return err
 		}
 		*written++
+		if isNew && created != nil {
+			created[id] = true
+		}
 		if e {
 			*edited++
 		}
 		if rs {
 			*restored++
 			if depth == 0 && deletedAt != nil {
-				created, posts, roots, at = append(created, pc), append(posts, post), append(roots, id), append(at, *deletedAt)
+				postCreated, posts, roots, at = append(postCreated, pc), append(posts, post), append(roots, id), append(at, *deletedAt)
 			}
 		}
 	}
@@ -416,7 +537,7 @@ func upsertComments(ctx context.Context, tx pgx.Tx, rows [][]any, written, edite
 	tag, err := tx.Exec(ctx, `UPDATE comments c SET status = 'visible', deleted_at = NULL
 		FROM unnest($1::timestamptz[], $2::bigint[], $3::bigint[], $4::timestamptz[]) AS d(created, post_id, root, at)
 		WHERE c.post_created_at = d.created AND c.post_id = d.post_id AND c.root_comment_id = d.root AND c.depth > 0
-		  AND c.status = 'deleted' AND c.deleted_at = d.at`, created, posts, roots, at)
+		  AND c.status = 'deleted' AND c.deleted_at = d.at`, postCreated, posts, roots, at)
 	if err != nil {
 		return err
 	}
