@@ -465,3 +465,37 @@ func TestAcquireForPageLoadPicksAnExitThatCanLoad(t *testing.T) {
 		t.Fatalf("live %d", pool.live["isp"])
 	}
 }
+
+// At the identity cap, with no idle identity whose exit can load a page, a
+// page load gives up after PacedWait instead of waiting for good.
+func TestAcquireForPageLoadAtTheCapGivesUp(t *testing.T) {
+	proxies, err := proxy.New(config.Proxy{
+		Tiers:     []config.ProxyTier{{Name: "isp", Kind: "static_list", Endpoints: []string{"http://203.0.113.10:8000"}}},
+		PageLoads: config.PageLoads{Interval: time.Hour, Backoff: time.Hour, MaxBackoff: time.Hour},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fpBytes, _ := configs.FS.ReadFile("fingerprints.yaml")
+	fps, _ := LoadFingerprints(fpBytes)
+	pool, err := NewPool(PoolConfig{BaseURL: "https://www.facebook.com", Profile: "chrome_146", IdentityRPS: 1, IdentityBurst: 1,
+		MaxPerTier: 1, PacedWait: 200 * time.Millisecond}, proxies,
+		fps, func(transport.Options) (transport.Doer, error) { return transport.NewStd(time.Second), nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := pool.Acquire(context.Background(), "isp")
+	if err != nil || !a.TakeReservation() {
+		t.Fatal(err)
+	}
+	pool.Release(a)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	if _, err := pool.AcquireForPageLoad(ctx, "isp"); !errors.Is(err, proxy.ErrExitsPaced) {
+		t.Fatalf("%v, want ErrExitsPaced", err)
+	}
+	if d := time.Since(start); d < 200*time.Millisecond || d > 2*time.Second {
+		t.Fatalf("gave up after %s, want PacedWait", d)
+	}
+}

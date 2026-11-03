@@ -166,7 +166,11 @@ func (p *Pool) acquire(ctx context.Context, tier string, usable func(*Identity) 
 			createAt, pacedErr = now.Add(pacedCreateEvery), err
 		}
 		// At the cap, or no exit can start an identity: wait for a release
-		// (or a cooldown to end).
+		// (or a cooldown to end). A release may never suit a page load at
+		// the cap: that wait is bounded too.
+		if usable != nil && waitUntil.IsZero() && p.live[tier] >= p.cfg.MaxPerTier {
+			waitUntil, pacedErr = time.Now().Add(p.cfg.PacedWait), proxy.ErrExitsPaced
+		}
 		wake := time.Second
 		if !waitUntil.IsZero() {
 			left := time.Until(waitUntil)
