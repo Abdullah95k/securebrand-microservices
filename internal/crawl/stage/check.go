@@ -94,7 +94,9 @@ func (s *CheckStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 			slog.Warn("mentions: a check that sent nothing still counts today", "err", err)
 		}
 	}
-	id, err := d.identity(ctx, "check", t.Stalls)
+	// An identity whose exit can load a page now: any idle one would
+	// mostly be on an exit pacing its page loads.
+	id, err := d.Pool.AcquireForPageLoad(ctx, d.tierFor("check", t.Stalls))
 	if err != nil {
 		unclaim()
 		return noIdentity(t, err, c)

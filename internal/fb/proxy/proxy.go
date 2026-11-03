@@ -210,6 +210,12 @@ func (p *Pool) PageLoad(ep Endpoint) (bool, string) {
 	return ok, why
 }
 
+// CanLoadPage reports whether ep's exit may load a page now: its gate
+// neither paces nor backs off. It takes nothing (PageLoad does).
+func (p *Pool) CanLoadPage(ep Endpoint) bool {
+	return ep.Exit == "" || p.pages.ready(ep.Exit)
+}
+
 // Available reports whether tier has a bucket that is not cooling down.
 func (p *Pool) Available(tier string) bool {
 	t, ok := p.tiers[tier]

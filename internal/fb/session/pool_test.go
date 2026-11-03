@@ -402,3 +402,100 @@ func TestAcquireDoesNotWaitWhenEveryBreakerIsOpen(t *testing.T) {
 		t.Fatalf("%v after %s, want ErrTierOpen at once", err, time.Since(start))
 	}
 }
+
+// A task whose first request is a page load gets an identity whose exit can
+// load a page now: not the idle identity on an exit that just loaded one
+// (which plain Acquire hands out first), but one on another exit; and when
+// no exit can, it waits, then says the exits are paced.
+func TestAcquireForPageLoadPicksAnExitThatCanLoad(t *testing.T) {
+	proxies, err := proxy.New(config.Proxy{
+		Tiers: []config.ProxyTier{{Name: "isp", Kind: "static_list",
+			Endpoints: []string{"http://203.0.113.10:8000", "http://198.51.100.10:8000"}}},
+		PageLoads: config.PageLoads{Interval: time.Hour, Backoff: time.Hour, MaxBackoff: time.Hour},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fpBytes, _ := configs.FS.ReadFile("fingerprints.yaml")
+	fps, _ := LoadFingerprints(fpBytes)
+	pool, err := NewPool(PoolConfig{BaseURL: "https://www.facebook.com", Profile: "chrome_146", IdentityRPS: 1, IdentityBurst: 1,
+		MaxPerTier: 4, PacedWait: 200 * time.Millisecond}, proxies,
+		fps, func(transport.Options) (transport.Doer, error) { return transport.NewStd(time.Second), nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	a, err := pool.AcquireForPageLoad(ctx, "isp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool.Release(a)
+	// Still holding the page load reserved at its creation: usable.
+	if again, err := pool.AcquireForPageLoad(ctx, "isp"); err != nil || again != a {
+		t.Fatalf("got %v, %v: want the identity holding its reservation", again, err)
+	}
+	if !a.TakeReservation() {
+		t.Fatal("no reservation")
+	}
+	pool.Release(a)
+	// Its exit loaded a page: plain Acquire would hand a out again; a page
+	// load gets a new identity on the other exit.
+	b, err := pool.AcquireForPageLoad(ctx, "isp")
+	if err != nil || b == a || b.Endpoint.Exit == a.Endpoint.Exit {
+		t.Fatalf("got %+v, %v: want a new identity on the other exit", b, err)
+	}
+	if !b.TakeReservation() {
+		t.Fatal("the new identity holds no page load")
+	}
+	pool.Release(b)
+	if c, _ := pool.Acquire(ctx, "isp"); c != b {
+		t.Fatal("plain Acquire no longer hands out the identity released last")
+	} else {
+		pool.Release(c)
+	}
+	// Both exits just loaded a page: it waits PacedWait, then gives up.
+	start := time.Now()
+	if _, err := pool.AcquireForPageLoad(ctx, "isp"); !errors.Is(err, proxy.ErrExitsPaced) {
+		t.Fatalf("%v, want ErrExitsPaced", err)
+	}
+	if d := time.Since(start); d < 200*time.Millisecond {
+		t.Fatalf("gave up after %s, want PacedWait", d)
+	}
+	if pool.live["isp"] != 2 {
+		t.Fatalf("live %d", pool.live["isp"])
+	}
+}
+
+// At the identity cap, with no idle identity whose exit can load a page, a
+// page load gives up after PacedWait instead of waiting for good.
+func TestAcquireForPageLoadAtTheCapGivesUp(t *testing.T) {
+	proxies, err := proxy.New(config.Proxy{
+		Tiers:     []config.ProxyTier{{Name: "isp", Kind: "static_list", Endpoints: []string{"http://203.0.113.10:8000"}}},
+		PageLoads: config.PageLoads{Interval: time.Hour, Backoff: time.Hour, MaxBackoff: time.Hour},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fpBytes, _ := configs.FS.ReadFile("fingerprints.yaml")
+	fps, _ := LoadFingerprints(fpBytes)
+	pool, err := NewPool(PoolConfig{BaseURL: "https://www.facebook.com", Profile: "chrome_146", IdentityRPS: 1, IdentityBurst: 1,
+		MaxPerTier: 1, PacedWait: 200 * time.Millisecond}, proxies,
+		fps, func(transport.Options) (transport.Doer, error) { return transport.NewStd(time.Second), nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := pool.Acquire(context.Background(), "isp")
+	if err != nil || !a.TakeReservation() {
+		t.Fatal(err)
+	}
+	pool.Release(a)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	if _, err := pool.AcquireForPageLoad(ctx, "isp"); !errors.Is(err, proxy.ErrExitsPaced) {
+		t.Fatalf("%v, want ErrExitsPaced", err)
+	}
+	if d := time.Since(start); d < 200*time.Millisecond || d > 2*time.Second {
+		t.Fatalf("gave up after %s, want PacedWait", d)
+	}
+}

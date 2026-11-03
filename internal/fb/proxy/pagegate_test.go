@@ -295,3 +295,38 @@ func TestResumeFindsASavedSessionsExit(t *testing.T) {
 		t.Fatal("a session resumes on an exit cooling down")
 	}
 }
+
+// CanLoadPage tells whether an exit may load a page now, without taking
+// its slot: false within the interval after a page load and during a
+// backoff after a wall, true again after.
+func TestCanLoadPage(t *testing.T) {
+	p, c := gatedPool(t, pilotGate)
+	ep, err := p.Next("isp") // takes the exit's slot
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.CanLoadPage(ep) {
+		t.Fatal("an exit that just loaded a page can load another")
+	}
+	c.add(2 * time.Minute)
+	for range 3 {
+		if !p.CanLoadPage(ep) {
+			t.Fatal("after the interval, the exit cannot load")
+		}
+	}
+	if ok, _ := p.PageLoad(ep); !ok {
+		t.Fatal("asking took the slot")
+	}
+	p.ObservePageLoad(ep, detect.LoginWall)
+	c.add(2 * time.Minute)
+	if p.CanLoadPage(ep) {
+		t.Fatal("an exit backing off after a wall can load")
+	}
+	c.add(15 * time.Minute)
+	if !p.CanLoadPage(ep) {
+		t.Fatal("after the backoff, the exit cannot load")
+	}
+	if !p.CanLoadPage(Endpoint{Tier: "res"}) {
+		t.Fatal("an ungated exit cannot load")
+	}
+}

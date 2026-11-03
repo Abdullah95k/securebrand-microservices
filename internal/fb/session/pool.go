@@ -94,6 +94,26 @@ func (p *Pool) Base() *url.URL { return p.base }
 // than going round the retry topics, which under load turns into a hot loop
 // of millions of retries.
 func (p *Pool) Acquire(ctx context.Context, tier string) (*Identity, error) {
+	return p.acquire(ctx, tier, nil)
+}
+
+// AcquireForPageLoad is Acquire for a task whose first request is a page
+// load (a mention check): it takes an idle identity only when that
+// identity's exit can load a page now, or the identity still holds the page
+// load reserved when it was created; otherwise it starts a new identity on
+// an exit that can (Next reserves the load), or waits as Acquire does.
+// Taking any idle identity, such a task would mostly find its exit pacing
+// its page loads, give up, and on its retry get the same identity back
+// (the one released last is handed out first).
+func (p *Pool) AcquireForPageLoad(ctx context.Context, tier string) (*Identity, error) {
+	return p.acquire(ctx, tier, func(id *Identity) bool {
+		return id.holdsReservation() || p.proxies.CanLoadPage(id.Endpoint)
+	})
+}
+
+// acquire is Acquire, taking only idle identities usable accepts (nil:
+// any).
+func (p *Pool) acquire(ctx context.Context, tier string, usable func(*Identity) bool) (*Identity, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	var waitUntil, createAt time.Time
@@ -115,7 +135,7 @@ func (p *Pool) Acquire(ctx context.Context, tier string) (*Identity, error) {
 				go id.Doer.Close()
 				continue
 			}
-			if id.coolingDown() {
+			if id.coolingDown() || (usable != nil && !usable(id)) {
 				continue
 			}
 			p.idle[tier] = append(list[:i], list[i+1:]...)
@@ -146,7 +166,11 @@ func (p *Pool) Acquire(ctx context.Context, tier string) (*Identity, error) {
 			createAt, pacedErr = now.Add(pacedCreateEvery), err
 		}
 		// At the cap, or no exit can start an identity: wait for a release
-		// (or a cooldown to end).
+		// (or a cooldown to end). A release may never suit a page load at
+		// the cap: that wait is bounded too.
+		if usable != nil && waitUntil.IsZero() && p.live[tier] >= p.cfg.MaxPerTier {
+			waitUntil, pacedErr = time.Now().Add(p.cfg.PacedWait), proxy.ErrExitsPaced
+		}
 		wake := time.Second
 		if !waitUntil.IsZero() {
 			left := time.Until(waitUntil)

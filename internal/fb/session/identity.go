@@ -74,6 +74,14 @@ func (id *Identity) TakeReservation() bool {
 	return r
 }
 
+// holdsReservation reports whether id still holds its creation's page
+// load, without using it.
+func (id *Identity) holdsReservation() bool {
+	id.mu.Lock()
+	defer id.mu.Unlock()
+	return id.reserved && time.Since(id.born) < reservationTTL
+}
+
 // markRetired marks id for retirement when it is released.
 func (id *Identity) markRetired(reason string) {
 	id.mu.Lock()

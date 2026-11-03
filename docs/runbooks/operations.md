@@ -337,7 +337,7 @@ The mentions flow finds every account (page or profile) our posts and comments m
    - While the traffic budget pauses backfill (`scheduler.budget`), no checks are queued.
    - A check task not finished after 6 hours is taken for lost and queued again.
 4. **Checking** (the crawler's `check` stage, `--stages ...,check`; Helm `crawler-check`; the pilot's crawler runs it). Logged out, through the identity pool and the exit's page-load gate (`fb.proxy.page_loads`), like any page load, and counted in the traffic budget and AIMD:
-   - one page load of the account, then (when it names an account) one timeline request;
+   - one page load of the account, then (when it names an account) one timeline request. The check takes an identity whose exit can load a page now (or starts one on such an exit); when none can, it waits up to 30s, then retries later without spending a check;
    - **public:** logged-out visitors see its posts, or it is a page → added to the main list (`source: mention`, `discovered_via`: why), crawled from the next planner run like a discovered page (scheduled, incremental, no backfill);
    - **private:** it exists but shows no posts logged out (`no_public_posts`, `timeline_hidden`), or its page names nothing twice in a row (`restricted`: restricted to logged-in viewers, or removed);
    - **unavailable:** not found (`not_found`);
