@@ -88,6 +88,22 @@ func (g *pageGate) take(exit string) (ok bool, why string, restore func()) {
 	}
 }
 
+// ready reports whether exit may load a page now, without taking the
+// slot.
+func (g *pageGate) ready(exit string) bool {
+	if g.off() {
+		return true
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	e := g.exits[exit]
+	if e == nil {
+		return true // not gated (a gateway, or direct)
+	}
+	now := g.now()
+	return !now.Before(e.pausedUntil) && !now.Before(e.next)
+}
+
 // observe records a page load's outcome on exit. A page that loads resets
 // the backoff (a pause already running keeps running); a failure pauses
 // the exit for the next, doubled, backoff.
