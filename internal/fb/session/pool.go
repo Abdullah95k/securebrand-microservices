@@ -131,6 +131,7 @@ func (p *Pool) acquire(ctx context.Context, tier string, usable func(*Identity) 
 				p.idle[tier] = list
 				p.live[tier]--
 				delete(p.all, id)
+				metrics.IdentityActive.WithLabelValues(tier).Set(float64(p.live[tier]))
 				metrics.IdentityRetired.WithLabelValues(tier, "breaker").Inc()
 				go id.Doer.Close()
 				continue

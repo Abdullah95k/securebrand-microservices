@@ -77,11 +77,15 @@ fb:
   identity_rps: 0.33
   identity_burst: 2
   # Requests an identity serves before it is replaced. Each replacement
-  # starts with a page load, the request Facebook walls (the pilot retired
-  # 580 identities for this in 7 hours, more than for any block); GraphQL
-  # was not rate limited more on long-lived ones.
-  identity_max_requests_min: 400
-  identity_max_requests_max: 800
+  # starts with a page load, the request Facebook walls. The first pilot
+  # retired 580 identities for this in 7 hours, more than for any block,
+  # and GraphQL was not rate limited more on long-lived ones (150-400 became
+  # 400-800). On 400-800, the 3 Nov pilot (10 ISP exits) still retired more
+  # identities at this cap than for any other reason, 43% of the page loads
+  # replacing them were walled, every exit backed off (up to 2h), and the
+  # pool shrank from 50 identities to 1: fewer page loads again.
+  identity_max_requests_min: 1500
+  identity_max_requests_max: 3000
   # Per page, fleet wide (Redis GCRA).
   page_rps: 3
   page_rps_p0: 6

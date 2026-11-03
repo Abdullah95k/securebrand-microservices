@@ -70,7 +70,74 @@ Every page of `phase0/pages.csv` is registered. Each gets a backfill of one
 week of history (low priority), then a crawl every 3 hours. The backfills
 take an hour or two.
 
-## 4. Measure
+## 4. Check it's healthy
+
+Any time, from `~/securebrand-microservices`. Every check only reads, and
+prints counts, names and sizes: never comment text, proxy addresses or
+credentials. Times are UTC unless the query adds 3 hours (Iraq time).
+
+| Check | Command | Healthy |
+|---|---|---|
+| Server | `uptime`, `free -h`, `df -h /` | load below the core count; 4 GB or more available; 5 GB or more free |
+| Biggest processes | `ps -eo rss,comm --sort=-rss \| head -6` (KB) | nothing near 1,000,000 but Redpanda; no browser |
+| Containers | `docker ps -a --filter name=fbs- --format "table {{.Names}}\t{{.Status}}"` | services `Up`; `init`, `topics`, `schemas`, `pilot-registry` `Exited (0)` |
+| Readiness | see below | every service `ready` |
+| Newest comment | `select now() - max(first_seen_at) from comments where first_seen_at > now() - interval '1 day'` | a few minutes at most |
+| Comments per hour | see below | steady from hour to hour |
+| Identities | `fbs_identity_active` | steady; not falling toward 1 |
+| Exits paused | see below | a few at a time, not all |
+| Errors | see below | 0 to a few per service per 30 minutes |
+| Disk | `du -sh /var/lib/redpanda/data` in Redpanda; `pg_database_size('fbs')` | Kafka flat from day to day; the database growing steadily |
+
+Run SQL with `docker exec fbs-postgres-1 psql -U fbs -d fbs -c "<query>"`,
+and read a crawler metric with
+`docker exec fbs-valkey-1 wget -qO- http://crawler:9090/metrics | grep '^<name>'`.
+
+```bash
+for s in api scheduler crawler persister media-downloader media-janitor registry-sync; do printf '%-18s ' $s; docker exec fbs-valkey-1 wget -q -O /dev/null -T 5 http://$s:9090/readyz && echo ready || echo NOT-READY; done
+```
+
+```bash
+docker exec fbs-postgres-1 psql -U fbs -d fbs -c "select to_char(date_trunc('hour', first_seen_at) + interval '3 hours','DD HH24:00') as iraq_hour, count(*) from comments where first_seen_at > now() - interval '8 hours' group by 1 order by 1"
+```
+
+Requests by query and outcome since the crawler started (run it twice, 10
+minutes apart: `ok` should grow; `page_html login_wall` well under half of
+`page_html`):
+
+```bash
+docker exec fbs-valkey-1 wget -qO- http://crawler:9090/metrics | grep '^fbs_fb_requests_total' | sed -E 's/.*class="([^"]*)".*query="([^"]*)".*\} ([0-9.e+]+)$/\2 \1 \3/' | awk '{a[$1" "$2]+=$3} END {for (k in a) printf "%-40s %d\n", k, a[k]}' | sort
+```
+
+Each exit's page-load pause, from the crawler's last checkpoint (counts and
+minutes only):
+
+```bash
+docker exec fbs-valkey-1 sh -c 'for k in $(valkey-cli --scan --pattern "*sessions}:snap:*"); do valkey-cli get "$k"; done' | python3 -c '
+import json, sys, datetime as d
+now = d.datetime.now(d.timezone.utc)
+for line in sys.stdin:
+    if not line.strip():
+        continue  # taken by another crawler between the scan and the read
+    s = json.loads(line)
+    print("checkpoint at", s["saved_at"][:16], "UTC; sessions saved:", len(s.get("sessions") or []))
+    exits = sorted((s.get("exits") or {}).values(), key=lambda e: e["paused_until"])
+    print("exits waiting or paused:", len(exits))
+    for i, e in enumerate(exits, 1):
+        until = d.datetime.strptime(e["paused_until"][:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=d.timezone.utc)
+        left = max(0, int((until - now).total_seconds() // 60))
+        print("  exit", i, "- paused", left, "more min; current backoff", e["backoff"] // 60000000000, "min")
+'
+```
+
+```bash
+for s in api scheduler crawler persister media-downloader media-janitor registry-sync; do printf '%-18s ' $s; docker logs --since 30m fbs-$s-1 2>&1 | grep -c '"level":"ERROR"'; done
+```
+
+When identities fall toward 1 and every exit is paused, page loads are not
+keeping up with retirements: see "Block storm" in `operations.md`, step 5.
+
+## 5. Measure
 
 After a day:
 
@@ -88,7 +155,7 @@ scheduled crawls), then:
 Use the projection to size the proxy purchase: ISP IPs for the IP count, and
 the per-GB figure for how much residential fallback could cost at worst.
 
-## 5. Stop
+## 6. Stop
 
 ```bash
 make pilot-down    # stops the stack and keeps the database
