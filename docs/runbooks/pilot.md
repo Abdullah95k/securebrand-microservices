@@ -117,6 +117,8 @@ docker exec fbs-valkey-1 sh -c 'for k in $(valkey-cli --scan --pattern "*session
 import json, sys, datetime as d
 now = d.datetime.now(d.timezone.utc)
 for line in sys.stdin:
+    if not line.strip():
+        continue  # taken by another crawler between the scan and the read
     s = json.loads(line)
     print("checkpoint at", s["saved_at"][:16], "UTC; sessions saved:", len(s.get("sessions") or []))
     exits = sorted((s.get("exits") or {}).values(), key=lambda e: e["paused_until"])
