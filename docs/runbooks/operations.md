@@ -52,6 +52,7 @@ What to check:
 2. `fbs_breaker_state{name=~"proxy:.*"}` and `fbs_fb_requests_total` by tier. If one provider or tier is affected, change `fb.proxy.routing` to prefer another.
 3. `fbs_identity_retired_total` by reason.
 4. If login walls appear at the same depth everywhere, it is coverage, not blocking: jobs report `timelines_truncated` / `posts_truncated`.
+5. `fbs_identity_active` falling toward 1 while `fbs_proxy_page_loads_deferred_total{reason="backoff"}` climbs: exits back off after walled page loads faster than they replace retired identities, and the crawler works on what is left. If `max_requests` leads `fbs_identity_retired_total`, raise `fb.identity_max_requests_min/max` (fewer page loads); if `login_wall` or `blocked` lead, add exits or lower the load. Don't shorten `fb.proxy.page_loads` to get identities back: more page loads bring more walls.
 
 To pin the ceiling by hand, for example during an incident, set the key the crawlers read (they pick it up within 5s):
 

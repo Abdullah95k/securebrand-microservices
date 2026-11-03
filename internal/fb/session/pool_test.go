@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	dto "github.com/prometheus/client_model/go"
+
 	"github.com/abdullah95k/securebrand-microservices/configs"
 	"github.com/abdullah95k/securebrand-microservices/internal/config"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/detect"
@@ -15,6 +17,7 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/proxy"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/transport"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/breaker"
+	"github.com/abdullah95k/securebrand-microservices/internal/platform/metrics"
 )
 
 func TestBreakerRetiresIdleIdentitiesAndFeedsOutcomes(t *testing.T) {
@@ -401,6 +404,51 @@ func TestAcquireDoesNotWaitWhenEveryBreakerIsOpen(t *testing.T) {
 	if _, err := pool.Acquire(context.Background(), "isp"); !errors.Is(err, proxy.ErrTierOpen) || time.Since(start) > time.Second {
 		t.Fatalf("%v after %s, want ErrTierOpen at once", err, time.Since(start))
 	}
+}
+
+// An idle identity retired because its bucket's breaker opened leaves
+// fbs_identity_active, even when no identity replaces it.
+func TestBreakerRetireUpdatesActiveGauge(t *testing.T) {
+	proxies, err := proxy.New(config.Proxy{
+		Tiers:   []config.ProxyTier{{Name: "gauge", Kind: "static_list", Endpoints: []string{"http://203.0.113.10:8000"}}},
+		Breaker: breaker.Config{MinEvents: 1, OpenRate: 0.5, Cooldown: time.Hour},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fpBytes, _ := configs.FS.ReadFile("fingerprints.yaml")
+	fps, _ := LoadFingerprints(fpBytes)
+	pool, err := NewPool(PoolConfig{BaseURL: "https://www.facebook.com", Profile: "chrome_146", IdentityRPS: 1, IdentityBurst: 1,
+		MaxPerTier: 4}, proxies,
+		fps, func(transport.Options) (transport.Doer, error) { return transport.NewStd(time.Second), nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	gauge := metrics.IdentityActive.WithLabelValues("gauge")
+	a, err := pool.Acquire(context.Background(), "gauge")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool.Release(a)
+	if v := gaugeValue(t, gauge); v != 1 {
+		t.Fatalf("active = %v with one identity", v)
+	}
+	proxies.Observe(a.Endpoint, detect.LoginWall)
+	if _, err := pool.Acquire(context.Background(), "gauge"); !errors.Is(err, proxy.ErrTierOpen) {
+		t.Fatalf("%v, want ErrTierOpen", err)
+	}
+	if v := gaugeValue(t, gauge); v != 0 || pool.live["gauge"] != 0 {
+		t.Fatalf("active = %v, live = %d after the breaker retired the only identity", v, pool.live["gauge"])
+	}
+}
+
+func gaugeValue(t *testing.T, g interface{ Write(*dto.Metric) error }) float64 {
+	t.Helper()
+	var m dto.Metric
+	if err := g.Write(&m); err != nil {
+		t.Fatal(err)
+	}
+	return m.GetGauge().GetValue()
 }
 
 // A task whose first request is a page load gets an identity whose exit can
