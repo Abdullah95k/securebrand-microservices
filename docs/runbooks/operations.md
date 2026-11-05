@@ -239,7 +239,7 @@ Pages registered without `schedule.interval_hours` are scheduled adaptively. Eve
 - **Longer intervals for quiet pages,** if cost ever matters more than freshness: raise the T1–T4 `interval`s (and `dormant_interval`) in the config. A page's next run moves after its next job.
 
 - **What a tier change does:** a faster tier pulls the next run forward; a slower one takes effect after the run already planned.
-- **Failing pages** still back off exponentially, up to 30 days.
+- **Failing pages** still back off exponentially, up to 30 days: each failed visit doubles the wait for the next. A visit fails when its job doesn't complete, or when it was blocked (a wall, a rate limit, a checkpoint) and brought nothing back: no post, comment or reply. Otherwise a page Facebook walls on every visit (often a dormant one) would cost a wall every 3 hours forever, each one dropping an identity and pausing an exit's page loads. One visit that brings anything back resets it. `GET /v1/pages/{page}` shows `consecutive_failures`.
 - **Turning it off:** a page registered or patched with `interval_hours` keeps that interval (`adaptive: false`). `PATCH /v1/pages/{page}` with `{"adaptive": true}` hands it back to the tiers.
 - **Inspect:** `GET /v1/pages/{page}` shows `tier`, `posts_per_day`, `last_post_at` and `adaptive`.
 

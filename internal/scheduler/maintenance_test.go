@@ -215,6 +215,61 @@ func TestFinalizerSendsTheEventBeforeTheJobEnds(t *testing.T) {
 	}
 }
 
+// A visit that was blocked and brought nothing back counts against the
+// page's schedule, as a failed job does; a quiet visit that was not
+// blocked, or a blocked one that brought anything back, resets the count.
+func TestFinalizerBacksOffBlockedEmptyVisits(t *testing.T) {
+	db := testenv.Postgres(t)
+	rdb := testenv.Redis(t)
+	brokers, prefix := testenv.Kafka(t), testenv.TopicPrefix()
+	ctx := context.Background()
+	up, err := kafka.NewProducer(kafka.ClientConfig{Brokers: brokers, TopicPrefix: prefix})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer up.Close()
+	tr := jobs.New(rdb)
+	f := &Finalizer{DB: db, Jobs: tr, Producer: up}
+	if _, err := db.Exec(ctx, `INSERT INTO page_schedule (page_ref, interval_seconds, next_run_at) VALUES ('v:walled.page', 10800, now())`); err != nil {
+		t.Fatal(err)
+	}
+	visit := func(counters map[string]int64) int {
+		t.Helper()
+		id := uuid.New()
+		if _, err := db.Exec(ctx, `INSERT INTO jobs (job_id, kind, lane, mode, page_ref, params, status)
+			VALUES ($1, 'scheduled', 1, 'incremental', 'v:walled.page', '{}', 'running')`, id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(ctx, `UPDATE page_schedule SET last_job_id = $1 WHERE page_ref = 'v:walled.page'`, id); err != nil {
+			t.Fatal(err)
+		}
+		if err := tr.AddCounters(ctx, id.String(), counters); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.finalize(ctx, id.String()); err != nil {
+			t.Fatal(err)
+		}
+		var n int
+		if err := db.QueryRow(ctx, `SELECT consecutive_failures FROM page_schedule WHERE page_ref = 'v:walled.page'`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	walled := map[string]int64{"requests": 2, "blocked": 1}
+	for want := 1; want <= 2; want++ {
+		if n := visit(walled); n != want {
+			t.Fatalf("blocked empty visit %d: consecutive_failures %d", want, n)
+		}
+	}
+	if n := visit(map[string]int64{"requests": 1}); n != 0 {
+		t.Fatalf("a quiet visit nothing blocked: %d", n)
+	}
+	visit(walled)
+	if n := visit(map[string]int64{"requests": 3, "blocked": 1, "comments": 4}); n != 0 {
+		t.Fatalf("a blocked visit that brought comments: %d", n)
+	}
+}
+
 // A job the reaper closes but can't announce is reopened, so the next tick
 // closes it again and sends its event. Once closed, its tasks still waiting
 // stop when they come back; while reopened, they carry on.

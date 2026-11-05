@@ -213,8 +213,8 @@ func (f *Finalizer) finalize(ctx context.Context, id string) error {
 		return err
 	}
 	if _, err := f.DB.Exec(ctx, `UPDATE page_schedule SET page_id = COALESCE(page_id, $2),
-		consecutive_failures = CASE WHEN $3 IN ('completed','partial') THEN 0 ELSE consecutive_failures + 1 END
-		WHERE last_job_id = $1`, jid, pageID, final); err != nil {
+		consecutive_failures = CASE WHEN $3 THEN consecutive_failures + 1 ELSE 0 END
+		WHERE last_job_id = $1`, jid, pageID, visitFailed(final, st.Counters)); err != nil {
 		return err
 	}
 	metrics.Jobs.WithLabelValues(final, topics.LaneName(taskLane(lane))).Inc()
@@ -442,6 +442,20 @@ func (f *Finalizer) coverage(ctx context.Context, posts []jobs.PostState, lane s
 		c.MinRatio = math.Round(c.MinRatio*1000) / 1000
 	}
 	return c, nil
+}
+
+// visitFailed says whether a finished job counts against its page's
+// schedule (consecutive_failures, which doubles the wait for the next run,
+// up to 30 days): a job that did not complete, or one that was blocked (a
+// wall, a rate limit, a checkpoint) and brought nothing back. Otherwise a
+// page Facebook walls on every visit would be visited every interval
+// forever, each wall dropping an identity and pausing an exit's page loads.
+// One visit that brings anything back resets the count.
+func visitFailed(final string, counters map[string]int64) bool {
+	if final != "completed" && final != "partial" {
+		return true
+	}
+	return counters["blocked"] > 0 && counters["posts"] == 0 && counters["comments"] == 0 && counters["replies"] == 0
 }
 
 func jobStatus(s string) fbv1.JobStatus {

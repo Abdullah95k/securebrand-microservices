@@ -44,3 +44,26 @@ func TestTopicLane(t *testing.T) {
 		}
 	}
 }
+
+// Which finished jobs count against their page's schedule.
+func TestVisitFailed(t *testing.T) {
+	blocked := map[string]int64{"requests": 2, "blocked": 1}
+	for name, c := range map[string]struct {
+		final    string
+		counters map[string]int64
+		want     bool
+	}{
+		"completed":                 {"completed", map[string]int64{"requests": 1}, false},
+		"failed":                    {"failed", nil, true},
+		"cancelled":                 {"cancelled", nil, true},
+		"blocked, nothing":          {"completed", blocked, true},
+		"blocked, partial, nothing": {"partial", blocked, true},
+		"blocked, posts":            {"completed", map[string]int64{"blocked": 1, "posts": 1}, false},
+		"blocked, comments":         {"partial", map[string]int64{"blocked": 2, "comments": 1}, false},
+		"blocked, replies":          {"completed", map[string]int64{"blocked": 1, "replies": 3}, false},
+	} {
+		if got := visitFailed(c.final, c.counters); got != c.want {
+			t.Errorf("%s: visitFailed = %v, want %v", name, got, c.want)
+		}
+	}
+}
