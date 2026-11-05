@@ -130,10 +130,16 @@ func (s *CheckStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	if !rep.OK() || page == nil {
 		return s.fail(ctx, t, ref, failDrift, true, c)
 	}
-	v.ID, v.Kind = page.PageId, mentions.KindProfile
-	if len(page.Categories) > 0 {
-		v.Kind = mentions.KindPage
+	// The account's own page says what it is; a mention of it typed Page
+	// (an old-style page) settles it as well.
+	v.ID, v.Kind = page.PageId, page.Kind
+	if v.Kind != mentions.KindPage && acc.Kind == mentions.KindPage {
+		v.Kind, rep.KindSignal = mentions.KindPage, "mention"
 	}
+	if v.Kind == "" {
+		v.Kind = mentions.KindUnknown
+	}
+	metrics.PageKinds.WithLabelValues("check", v.Kind, rep.KindSignal).Inc()
 	if s.suppressed(ref, v.ID) {
 		return s.forget(ctx, t, ref, v.ID, c)
 	}

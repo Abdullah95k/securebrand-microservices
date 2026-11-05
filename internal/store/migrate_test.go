@@ -59,3 +59,34 @@ func TestDiscoveryMigration(t *testing.T) {
 		t.Fatalf("%q %v", source, err)
 	}
 }
+
+// The profile labels the mention check gave without evidence become
+// unknown; page labels stay; pages start unknown.
+func TestPageKindMigration(t *testing.T) {
+	db := testenv.Postgres(t)
+	ctx := context.Background()
+	if err := store.MigrateDownTo(ctx, db, 9); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO checked_accounts (account_ref, kind, source, status, first_seen_at, last_seen_at) VALUES
+		('v:checked.person', 'profile', 'mention', 'public', now(), now()),
+		('v:a.page', 'page', 'mention', 'public', now(), now()),
+		('v:hinted.user', 'profile', 'mention', 'unchecked', now(), now())`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO pages (page_id, status) VALUES (100064000000001, 'active')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MigrateUp(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	var kinds string
+	if err := db.QueryRow(ctx, `SELECT string_agg(account_ref || '=' || kind, ',' ORDER BY account_ref) FROM checked_accounts`).Scan(&kinds); err != nil ||
+		kinds != "v:a.page=page,v:checked.person=unknown,v:hinted.user=unknown" {
+		t.Fatalf("%q %v", kinds, err)
+	}
+	var page string
+	if err := db.QueryRow(ctx, `SELECT kind FROM pages WHERE page_id = 100064000000001`).Scan(&page); err != nil || page != "unknown" {
+		t.Fatalf("%q %v", page, err)
+	}
+}

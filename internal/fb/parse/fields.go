@@ -21,6 +21,8 @@ import (
 type Report struct {
 	Missing  []string // required fields: the response is drifted
 	Optional []string // optional fields: metrics only
+	// KindSignal is what set a page's kind (Page): metrics only.
+	KindSignal string
 }
 
 func (r *Report) missing(field string)  { r.Missing = append(r.Missing, field) }

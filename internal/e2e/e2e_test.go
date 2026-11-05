@@ -141,8 +141,8 @@ func TestEndToEnd(t *testing.T) {
 			t.Fatalf("load report %+v, job counters %v", rep, j.Counters)
 		}
 	}
-	if n := count(t, s, `SELECT count(*) FROM pages WHERE page_id = $1 AND name = $2 AND followers_count > 0`, page.ID, page.Name); n != 1 {
-		t.Fatal("page profile not stored")
+	if n := count(t, s, `SELECT count(*) FROM pages WHERE page_id = $1 AND name = $2 AND followers_count > 0 AND kind = 'page'`, page.ID, page.Name); n != 1 {
+		t.Fatal("page profile (a page) not stored")
 	}
 	// A job belongs to the client that made it (and admins): others get 404.
 	other := s.Key(t, api.ScopeJobsWrite, api.ScopeDataRead)

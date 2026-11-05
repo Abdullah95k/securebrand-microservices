@@ -34,4 +34,9 @@ message Page {
   // Fields Facebook returned that are not modelled yet, as a JSON object.
   string extra_json = 15;
   PageStatus status = 16;
+  // page, profile (a person) or unknown: page when the HTML shows anything
+  // only a page has (a category, a Page object or its id, a page app
+  // link), profile when it says the profile has no Page object, unknown
+  // otherwise.
+  string kind = 17;
 }

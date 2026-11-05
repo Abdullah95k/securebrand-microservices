@@ -7,8 +7,11 @@ import (
 	fbv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fb/v1"
 )
 
-// Kinds of account. A mention's kind is a hint (a new-style page is often
-// tagged as a User); the check decides.
+// Kinds of account: page, profile (a person) or unknown. A mention says
+// page only for an account typed Page (an old-style page); a User may be a
+// person or a new-style page, so it says unknown. The check, and each read
+// of an added account's profile, decide from the account's own page
+// (parse.Page).
 const (
 	KindPage    = "page"
 	KindProfile = "profile"
@@ -38,13 +41,10 @@ type Options struct {
 	CommentAuthors bool
 }
 
-// kindOf maps a Facebook __typename to a kind.
+// kindOf maps a Facebook __typename to a kind: only Page tells.
 func kindOf(typename string) string {
-	switch typename {
-	case "Page":
+	if typename == "Page" {
 		return KindPage
-	case "User", "Person":
-		return KindProfile
 	}
 	return KindUnknown
 }

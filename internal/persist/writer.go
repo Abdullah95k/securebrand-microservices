@@ -580,6 +580,14 @@ func markDeleted(ctx context.Context, db execer, cs []*fbv1.Comment) (int64, err
 	return tag.RowsAffected(), nil
 }
 
+// pageKind is a page's kind as stored: page, profile or unknown.
+func pageKind(k string) string {
+	if k == "page" || k == "profile" {
+		return k
+	}
+	return "unknown"
+}
+
 // Pages upserts page profiles, records follower snapshots and resolves
 // scheduled page references to page ids.
 func (w *Writer) Pages(ctx context.Context, ps []*fbv1.Page) error {
@@ -634,11 +642,13 @@ func (w *Writer) Pages(ctx context.Context, ps []*fbv1.Page) error {
 			var changed bool
 			err := tx.QueryRow(ctx, `
 				INSERT INTO pages AS t (page_id, vanity, url, name, categories, intro, followers_count, likes_count, verified,
-					profile_pic_url, cover_url, contact, extra, status, content_hash, first_seen_at, last_scraped_at)
-				VALUES ($1, NULLIF($2,''), NULLIF($3,''), NULLIF($4,''), $5, NULLIF($6,''), $7, $8, $9, $10, $11, $12, $13, 'active', $14, $15, $15)
+					profile_pic_url, cover_url, contact, extra, status, content_hash, first_seen_at, last_scraped_at, kind)
+				VALUES ($1, NULLIF($2,''), NULLIF($3,''), NULLIF($4,''), $5, NULLIF($6,''), $7, $8, $9, $10, $11, $12, $13, 'active', $14, $15, $15, $16)
 				ON CONFLICT (page_id) DO UPDATE SET
 					vanity = COALESCE(EXCLUDED.vanity, t.vanity), url = COALESCE(EXCLUDED.url, t.url),
 					name = COALESCE(EXCLUDED.name, t.name), categories = EXCLUDED.categories, intro = EXCLUDED.intro,
+					-- A read that can't tell keeps what an earlier one found.
+					kind = CASE WHEN EXCLUDED.kind = 'unknown' THEN t.kind ELSE EXCLUDED.kind END,
 					followers_count = EXCLUDED.followers_count, likes_count = EXCLUDED.likes_count,
 					verified = EXCLUDED.verified, profile_pic_url = EXCLUDED.profile_pic_url, cover_url = EXCLUDED.cover_url,
 					contact = EXCLUDED.contact, extra = EXCLUDED.extra, status = 'active',
@@ -647,12 +657,20 @@ func (w *Writer) Pages(ctx context.Context, ps []*fbv1.Page) error {
 				RETURNING old.page_id IS NULL OR old.followers_count IS DISTINCT FROM new.followers_count
 					OR old.likes_count IS DISTINCT FROM new.likes_count OR old.name IS DISTINCT FROM new.name`,
 				p.PageId, vanity, p.Url, p.Name, p.Categories, p.Intro, p.FollowersCount, p.LikesCount, p.Verified,
-				pic, cover, jsonOf(p.Contact), extraJSON(p.ExtraJson), hash, seen).Scan(&changed)
+				pic, cover, jsonOf(p.Contact), extraJSON(p.ExtraJson), hash, seen, pageKind(p.Kind)).Scan(&changed)
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil // an erased page stays erased
 			}
 			if err != nil {
 				return err
+			}
+			// The checked-accounts list (mentions) takes the kind the
+			// account's own page shows, as each added account's profile
+			// is read.
+			if k := pageKind(p.Kind); k != "unknown" {
+				if _, err := tx.Exec(ctx, `UPDATE checked_accounts SET kind = $2 WHERE account_id = $1 AND kind <> $2`, p.PageId, k); err != nil {
+					return err
+				}
 			}
 			if changed {
 				if err := optionalInsert(ctx, tx, `INSERT INTO page_snapshots (page_id, captured_at, name, followers_count, likes_count, verified)

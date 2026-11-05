@@ -115,7 +115,7 @@ A completed job looks like this. `completeness` compares what Facebook reported 
 
 ### What is collected
 
-- **Page:** name, vanity, categories, intro, followers, likes, verified, profile and cover images, public contact fields. Follower history goes into `page_snapshots`.
+- **Page:** name, vanity, categories, kind (page, person or unknown), intro, followers, likes, verified, profile and cover images, public contact fields. Follower history goes into `page_snapshots`.
 - **Post:**
   - text with entity ranges, hashtags, links (unwrapped from `l.facebook.com`) and the shared-post reference;
   - type (status, photo, album, video, reel, link, share, event, live), pinned flag and paid-partnership flag;

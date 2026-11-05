@@ -100,7 +100,8 @@ func TestFromPost(t *testing.T) {
 		SharedOwnerId: "100064000000404", SharedOwnerType: "Page", SharedPostUrl: "https://www.facebook.com/x/posts/1",
 	}
 	want := map[string]string{
-		"id:100000000000101": "tag/profile", "v:tagged.page": "tag/page", "v:ranged.page": "link/unknown",
+		// A User may be a person or a new-style page: unknown.
+		"id:100000000000101": "tag/unknown", "v:tagged.page": "tag/page", "v:ranged.page": "link/unknown",
 		"v:linked.page": "link/unknown", "id:100000000000303": "link/unknown", "id:100064000000404": "share/page",
 	}
 	if got := refs(FromPost(p)); !reflect.DeepEqual(got, want) {
@@ -123,7 +124,7 @@ func TestFromComment(t *testing.T) {
 		t.Fatalf("without authors: %v", got)
 	}
 	got := refs(FromComment(c, Options{CommentAuthors: true}))
-	if got["id:100000000000555"] != "author/profile" || len(got) != 3 {
+	if got["id:100000000000555"] != "author/unknown" || len(got) != 3 {
 		t.Fatalf("with authors: %v", got)
 	}
 	evs := CommentEvents(c, Options{CommentAuthors: true})

@@ -697,3 +697,47 @@ func TestMentionsRecordedOncePerNewItem(t *testing.T) {
 		t.Fatalf("recorded while off: %d", n)
 	}
 }
+
+// A page's kind is stored with its profile and given to the
+// checked-accounts list (mentions); a read that can't tell keeps it.
+func TestPageKindReachesCheckedAccounts(t *testing.T) {
+	db := testenv.Postgres(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	w := &Writer{DB: db}
+	const id = 100064000000777
+	if _, err := db.Exec(ctx, `INSERT INTO checked_accounts (account_ref, account_id, kind, source, status, first_seen_at, last_seen_at)
+		VALUES ('v:some.brand', $1, 'unknown', 'mention', 'public', now(), now())`, id); err != nil {
+		t.Fatal(err)
+	}
+	kinds := func() (page, account string) {
+		t.Helper()
+		if err := db.QueryRow(ctx, `SELECT (SELECT kind FROM pages WHERE page_id = $1), (SELECT kind FROM checked_accounts WHERE account_id = $1)`,
+			id).Scan(&page, &account); err != nil {
+			t.Fatal(err)
+		}
+		return page, account
+	}
+	write := func(at time.Time, kind string) {
+		t.Helper()
+		if err := w.Pages(ctx, []*fbv1.Page{{Obs: obs(at, "k"+kind), PageId: id, Name: "Some Brand", Kind: kind}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(now, "")
+	if p, a := kinds(); p != "unknown" || a != "unknown" {
+		t.Fatalf("no kind read: page %q, account %q", p, a)
+	}
+	write(now.Add(time.Minute), "page")
+	if p, a := kinds(); p != "page" || a != "page" {
+		t.Fatalf("page read: page %q, account %q", p, a)
+	}
+	write(now.Add(2*time.Minute), "unknown")
+	if p, a := kinds(); p != "page" || a != "page" {
+		t.Fatalf("a read that can't tell changed it: page %q, account %q", p, a)
+	}
+	write(now.Add(3*time.Minute), "profile")
+	if p, a := kinds(); p != "profile" || a != "profile" {
+		t.Fatalf("person read: page %q, account %q", p, a)
+	}
+}
