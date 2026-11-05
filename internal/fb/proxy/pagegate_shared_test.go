@@ -185,6 +185,32 @@ func TestSharedGateFallsBackWhenValkeyIsDown(t *testing.T) {
 	}
 }
 
+// What Valkey last said holds when it goes away: a pod keeps the pause
+// another pod's wall started, and the interval another pod's page load
+// began, rather than loading at once on every exit.
+func TestSharedGateStateOutlivesValkey(t *testing.T) {
+	a, b, mr := sharedPools(t)
+	b.PageLoad(ep(exit1))
+	b.ObservePageLoad(ep(exit1), detect.LoginWall) // paused 15m
+	b.PageLoad(ep(exit2))                          // interval 2m
+	if a.CanLoadPage(ep(exit1)) || a.CanLoadPage(ep(exit2)) {
+		t.Fatal("not shared")
+	}
+	mr.Close()
+	mr.t = mr.t.Add(time.Minute)
+	if ok, why := a.PageLoad(ep(exit1)); ok || why != "backoff" {
+		t.Fatalf("the pause was lost with Valkey: %v %q", ok, why)
+	}
+	if ok, why := a.PageLoad(ep(exit2)); ok || why != "paced" {
+		t.Fatalf("the interval was lost with Valkey: %v %q", ok, why)
+	}
+	a.pages.now = mr.now
+	mr.t = mr.t.Add(15 * time.Minute)
+	if ok, _ := a.PageLoad(ep(exit1)); !ok {
+		t.Fatal("still paused after the pause Valkey gave")
+	}
+}
+
 // ready's answer per exit stands for readyFor (the session pool asks it
 // for each idle identity in turn), and a take or a wall forgets it.
 func TestSharedGateReadyIsRemembered(t *testing.T) {

@@ -212,9 +212,10 @@ func (f *Finalizer) finalize(ctx context.Context, id string) error {
 		WHERE job_id = $1 AND status IN ('running','cancelling','finalizing')`, jid, final, cb, compb, now); err != nil {
 		return err
 	}
+	// The tier is the one AfterJob just gave the page.
 	if _, err := f.DB.Exec(ctx, `UPDATE page_schedule SET page_id = COALESCE(page_id, $2),
-		consecutive_failures = CASE WHEN $3 THEN consecutive_failures + 1 ELSE 0 END
-		WHERE last_job_id = $1`, jid, pageID, visitFailed(final, st.Counters)); err != nil {
+		consecutive_failures = CASE WHEN $3 OR ($4 AND tier = $5) THEN consecutive_failures + 1 ELSE 0 END
+		WHERE last_job_id = $1`, jid, pageID, final != "completed" && final != "partial", blockedEmpty(st.Counters), DormantTier); err != nil {
 		return err
 	}
 	metrics.Jobs.WithLabelValues(final, topics.LaneName(taskLane(lane))).Inc()
@@ -444,17 +445,16 @@ func (f *Finalizer) coverage(ctx context.Context, posts []jobs.PostState, lane s
 	return c, nil
 }
 
-// visitFailed says whether a finished job counts against its page's
-// schedule (consecutive_failures, which doubles the wait for the next run,
-// up to 30 days): a job that did not complete, or one that was blocked (a
-// wall, a rate limit, a checkpoint) and brought nothing back. Otherwise a
-// page Facebook walls on every visit would be visited every interval
-// forever, each wall dropping an identity and pausing an exit's page loads.
-// One visit that brings anything back resets the count.
-func visitFailed(final string, counters map[string]int64) bool {
-	if final != "completed" && final != "partial" {
-		return true
-	}
+// blockedEmpty says whether a job was blocked (a wall, a rate limit, a
+// checkpoint) and brought nothing back. On a dormant page (DormantTier) it
+// counts against the page's schedule like a failed job
+// (consecutive_failures, which doubles the wait for the next run, up to 30
+// days): otherwise a page Facebook walls on every visit would be visited
+// every interval forever, each wall dropping an identity and pausing an
+// exit's page loads. Pages that post are left alone, so a block storm
+// doesn't push back every busy page. One visit that brings anything back,
+// or a post that lifts the page out of the dormant tier, resets the count.
+func blockedEmpty(counters map[string]int64) bool {
 	return counters["blocked"] > 0 && counters["posts"] == 0 && counters["comments"] == 0 && counters["replies"] == 0
 }
 

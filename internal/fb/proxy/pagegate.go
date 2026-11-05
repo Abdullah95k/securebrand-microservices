@@ -142,10 +142,6 @@ func (g *pageGate) observe(exit string, r pageResult) {
 	}
 	g.mu.Lock()
 	e := g.exits[exit]
-	if e == nil {
-		g.mu.Unlock()
-		return
-	}
 	if r == pageLoaded {
 		e.backoff = 0
 		g.mu.Unlock()
@@ -164,6 +160,25 @@ func (g *pageGate) observe(exit string, r pageResult) {
 	if pause > 0 {
 		slog.Info("proxy: page loads paused on an exit", "exit", exit, "for", pause.String())
 	}
+}
+
+// mirror keeps the shared state Valkey returned for exit (SharePageGate)
+// in this process's own pacing, whichever wait ends later, for when Valkey
+// can't be reached: the pauses after walls then hold through the outage.
+func (g *pageGate) mirror(exit string, next, paused time.Time, backoff time.Duration) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	e := g.exits[exit]
+	if e == nil {
+		return
+	}
+	if next.After(e.next) {
+		e.next = next
+	}
+	if paused.After(e.pausedUntil) {
+		e.pausedUntil = paused
+	}
+	e.backoff = backoff
 }
 
 // ExitState is an exit's page-load pacing, kept across a restart so a new

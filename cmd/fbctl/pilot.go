@@ -81,7 +81,7 @@ func reportLoad(ctx context.Context, cfg *config.Config, args []string) error {
 		return nil
 	}
 	proj := pilot.Projection{Pages: *pages, IdentityRPS: cfg.FB.IdentityRPS, CostPerGB: *cost, Headroom: *headroom,
-		PageLoadInterval: cfg.FB.Proxy.PageLoads.Interval}
+		PageLoadInterval: cfg.FB.Proxy.PageLoads.Interval, PageLoadBackoff: cfg.FB.Proxy.PageLoads.Backoff}
 	if cfg.Mentions.Enabled {
 		proj.ChecksPerDay = cfg.Mentions.MaxChecksPerDay
 	}

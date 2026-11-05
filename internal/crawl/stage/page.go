@@ -93,8 +93,7 @@ func (s *PageStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 			goto timeline
 		}
 		d.observeLoad(pl, err, t.Lane)
-		c["requests"]++
-		c["page_loads"]++
+		countPageLoad(c, pl, err)
 		if err != nil {
 			c["transport_errors"]++
 			return retry(t, st.Cursor, "30s", "page load: "+err.Error(), c)

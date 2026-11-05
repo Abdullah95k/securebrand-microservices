@@ -190,13 +190,24 @@ func (d *Deps) ensureBootstrapped(ctx context.Context, id *session.Identity, pag
 	pl, err := d.Loader.Bootstrap(ctx, id, u.String())
 	if !errors.Is(err, session.ErrPaced) { // nothing was sent
 		d.observeLoad(pl, err, lane)
-		c["requests"]++
-		c["page_loads"]++
+		countPageLoad(c, pl, err)
 		if pl != nil {
 			c["wire_bytes"] += pl.Bytes
 		}
 	}
 	return pl, err
+}
+
+// countPageLoad counts a page load sent: requests and page_loads, and
+// page_loads_failed when it paused its exit's page loads (walled, blocked
+// or unanswered: fb.proxy.page_loads.backoff), which the pilot report
+// charges against the IPs' capacity.
+func countPageLoad(c map[string]int64, pl *session.PageLoad, err error) {
+	c["requests"]++
+	c["page_loads"]++
+	if err != nil || (pl != nil && pl.Class.Blocking()) {
+		c["page_loads_failed"]++
+	}
 }
 
 // observeLoad reports an HTML page load to the traffic budget and AIMD;

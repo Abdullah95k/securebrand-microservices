@@ -215,9 +215,11 @@ func TestFinalizerSendsTheEventBeforeTheJobEnds(t *testing.T) {
 	}
 }
 
-// A visit that was blocked and brought nothing back counts against the
-// page's schedule, as a failed job does; a quiet visit that was not
-// blocked, or a blocked one that brought anything back, resets the count.
+// A visit to a dormant page that was blocked and brought nothing back
+// counts against the page's schedule, as a failed job does; a quiet visit
+// that was not blocked, or a blocked one that brought anything back,
+// resets the count. On a page that posts, a blocked empty visit (a block
+// storm) changes nothing.
 func TestFinalizerBacksOffBlockedEmptyVisits(t *testing.T) {
 	db := testenv.Postgres(t)
 	rdb := testenv.Redis(t)
@@ -230,7 +232,7 @@ func TestFinalizerBacksOffBlockedEmptyVisits(t *testing.T) {
 	defer up.Close()
 	tr := jobs.New(rdb)
 	f := &Finalizer{DB: db, Jobs: tr, Producer: up}
-	if _, err := db.Exec(ctx, `INSERT INTO page_schedule (page_ref, interval_seconds, next_run_at) VALUES ('v:walled.page', 10800, now())`); err != nil {
+	if _, err := db.Exec(ctx, `INSERT INTO page_schedule (page_ref, interval_seconds, next_run_at, tier) VALUES ('v:walled.page', 10800, now(), 'T4')`); err != nil {
 		t.Fatal(err)
 	}
 	visit := func(counters map[string]int64) int {
@@ -267,6 +269,12 @@ func TestFinalizerBacksOffBlockedEmptyVisits(t *testing.T) {
 	visit(walled)
 	if n := visit(map[string]int64{"requests": 3, "blocked": 1, "comments": 4}); n != 0 {
 		t.Fatalf("a blocked visit that brought comments: %d", n)
+	}
+	if _, err := db.Exec(ctx, `UPDATE page_schedule SET tier = 'T0' WHERE page_ref = 'v:walled.page'`); err != nil {
+		t.Fatal(err)
+	}
+	if n := visit(walled); n != 0 {
+		t.Fatalf("a busy page backed off after a blocked visit: %d", n)
 	}
 }
 

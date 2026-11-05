@@ -74,7 +74,7 @@ func TestFormatProjectsPageLoads(t *testing.T) {
 	// 4 x 5000 + 300 = 20,300 page loads; 720 per IP a day; x1.5 = 42.3.
 	// Requests: 450 x 5000 / 86400 / 0.5 x 1.5 = 78.1.
 	for _, want := range []string{"450 requests, 4.0 page loads and", "about 79 IPs at 0.5 requests/s",
-		"page loads: 20.3K a day (300 of them mention checks); at one per 2m per IP (720 a day each), about 43 IPs (50% headroom)",
+		"page loads: 20.3K a day (300 of them mention checks); at one per 2m per IP (720 a day each): about 43 IPs (50% headroom)",
 		"plan on at least 79 IPs"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q", want)
@@ -85,6 +85,14 @@ func TestFormatProjectsPageLoads(t *testing.T) {
 	if out := Format(r, p); !strings.Contains(out, "about 212 IPs (50% headroom)") || !strings.Contains(out, "plan on at least 212 IPs") {
 		t.Fatalf("page loads should set the plan:\n%s", out)
 	}
+	// 6% of page loads fail, each pausing its IP 15m (7.5 intervals of 2m):
+	// each costs 1 + 0.06 x 7.5 = 1.45 slots; 20,300 x 1.45 / 720 x 1.5 = 61.3.
+	p.PageLoadInterval, p.PageLoadBackoff = 2*time.Minute, 15*time.Minute
+	r.Rows[0].PageLoadsFailed = 72
+	if out := Format(r, p); !strings.Contains(out, "6.0% of them failing and pausing their IP for 15m or more: about 62 IPs") {
+		t.Fatalf("failed page loads not charged:\n%s", out)
+	}
+	r.Rows[0].PageLoadsFailed = 0
 	r.Rows[0].PageLoads = 0
 	if out := Format(r, p); !strings.Contains(out, "page loads: not counted by these jobs") || strings.Contains(out, "plan on") {
 		t.Fatalf("uncounted page loads:\n%s", out)

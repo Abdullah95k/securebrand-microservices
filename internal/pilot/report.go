@@ -18,20 +18,22 @@ import (
 // Row is the jobs of one kind over the measured span, for the pages now in
 // one tier (a page's past jobs count in the tier it has at report time).
 type Row struct {
-	Tier            string `json:"tier"`
-	Kind            string `json:"kind"` // backfill | scheduled | on_demand
-	Pages           int64  `json:"pages"`
-	Jobs            int64  `json:"jobs"`
-	Requests        int64  `json:"requests"`
-	WireBytes       int64  `json:"wire_bytes"`
-	Blocked         int64  `json:"blocked"`
-	PageLoads       int64  `json:"page_loads"`
-	SoftErrors      int64  `json:"soft_errors"`
-	TransportErrors int64  `json:"transport_errors"`
-	Drift           int64  `json:"drift"`
-	Posts           int64  `json:"posts"`
-	Comments        int64  `json:"comments"`
-	Replies         int64  `json:"replies"`
+	Tier      string `json:"tier"`
+	Kind      string `json:"kind"` // backfill | scheduled | on_demand
+	Pages     int64  `json:"pages"`
+	Jobs      int64  `json:"jobs"`
+	Requests  int64  `json:"requests"`
+	WireBytes int64  `json:"wire_bytes"`
+	Blocked   int64  `json:"blocked"`
+	PageLoads int64  `json:"page_loads"`
+	// PageLoadsFailed paused their exit (walled, blocked or unanswered).
+	PageLoadsFailed int64 `json:"page_loads_failed"`
+	SoftErrors      int64 `json:"soft_errors"`
+	TransportErrors int64 `json:"transport_errors"`
+	Drift           int64 `json:"drift"`
+	Posts           int64 `json:"posts"`
+	Comments        int64 `json:"comments"`
+	Replies         int64 `json:"replies"`
 }
 
 // Report is the pilot's measurement.
@@ -88,6 +90,7 @@ func (r Report) Steady() Row {
 		out.WireBytes += x.WireBytes
 		out.Blocked += x.Blocked
 		out.PageLoads += x.PageLoads
+		out.PageLoadsFailed += x.PageLoadsFailed
 		out.SoftErrors += x.SoftErrors
 		out.TransportErrors += x.TransportErrors
 		out.Drift += x.Drift
@@ -110,6 +113,7 @@ func Load(ctx context.Context, db *pgxpool.Pool, since time.Time) (Report, error
 			coalesce(sum((j.counters->>'wire_bytes')::bigint), 0),
 			coalesce(sum((j.counters->>'blocked')::bigint), 0),
 			coalesce(sum((j.counters->>'page_loads')::bigint), 0),
+			coalesce(sum((j.counters->>'page_loads_failed')::bigint), 0),
 			coalesce(sum((j.counters->>'soft_errors')::bigint), 0),
 			coalesce(sum((j.counters->>'transport_errors')::bigint), 0),
 			coalesce(sum((j.counters->>'drift')::bigint), 0),
@@ -124,7 +128,7 @@ func Load(ctx context.Context, db *pgxpool.Pool, since time.Time) (Report, error
 	}
 	for rows.Next() {
 		var x Row
-		if err := rows.Scan(&x.Tier, &x.Kind, &x.Pages, &x.Jobs, &x.Requests, &x.WireBytes, &x.Blocked, &x.PageLoads, &x.SoftErrors,
+		if err := rows.Scan(&x.Tier, &x.Kind, &x.Pages, &x.Jobs, &x.Requests, &x.WireBytes, &x.Blocked, &x.PageLoads, &x.PageLoadsFailed, &x.SoftErrors,
 			&x.TransportErrors, &x.Drift, &x.Posts, &x.Comments, &x.Replies); err != nil {
 			rows.Close()
 			return rep, err
@@ -174,6 +178,9 @@ type Projection struct {
 	// one page per interval, so page loads, not requests, can set the IPs
 	// needed.
 	PageLoadInterval time.Duration
+	// PageLoadBackoff is fb.proxy.page_loads.backoff: the least an IP waits
+	// after a page load fails, the capacity each failure costs.
+	PageLoadBackoff time.Duration
 	// ChecksPerDay are the mention checks a day (mentions.max_checks_per_day
 	// when on): a page load each, whatever the number of pages.
 	ChecksPerDay int
@@ -231,15 +238,16 @@ func Format(r Report, p Projection) string {
 			fmt.Fprintf(&b, "; all on a $%.2f/GB tier: $%.0f a day", p.CostPerGB, bytesDay*n/1e9*p.CostPerGB)
 		}
 		b.WriteString("\n")
-		formatPageLoads(&b, loadsDay*n, reqIPs, st.PageLoads > 0, p)
+		formatPageLoads(&b, loadsDay*n, ratio(st.PageLoadsFailed, st.PageLoads), reqIPs, st.PageLoads > 0, p)
 	}
 	return b.String()
 }
 
 // formatPageLoads projects the IPs the page loads need: each IP loads at
-// most one page per interval (its page-load gate), and every wall pauses it
-// for longer, so page loads can need more IPs than requests do.
-func formatPageLoads(b *strings.Builder, perDay, reqIPs float64, counted bool, p Projection) {
+// most one page per interval (its page-load gate), and each one that fails
+// (failed, the share) pauses it for at least the backoff, so page loads can
+// need more IPs than requests do.
+func formatPageLoads(b *strings.Builder, perDay, failed, reqIPs float64, counted bool, p Projection) {
 	if p.PageLoadInterval <= 0 {
 		return
 	}
@@ -249,13 +257,19 @@ func formatPageLoads(b *strings.Builder, perDay, reqIPs float64, counted bool, p
 	}
 	total := perDay + float64(p.ChecksPerDay)
 	each := 24 * time.Hour.Seconds() / p.PageLoadInterval.Seconds()
-	ips := math.Ceil(total / each * (1 + p.Headroom))
+	// A failed page load takes its slot and pauses the IP for the backoff:
+	// that many more intervals, at least (the backoff doubles).
+	cost := 1 + failed*p.PageLoadBackoff.Seconds()/p.PageLoadInterval.Seconds()
+	ips := math.Ceil(total * cost / each * (1 + p.Headroom))
 	fmt.Fprintf(b, "page loads: %s a day", count(total))
 	if p.ChecksPerDay > 0 {
 		fmt.Fprintf(b, " (%d of them mention checks)", p.ChecksPerDay)
 	}
-	fmt.Fprintf(b, "; at one per %s per IP (%.0f a day each), about %.0f IPs (%.0f%% headroom), before walls pause exits",
-		short(p.PageLoadInterval), each, ips, 100*p.Headroom)
+	fmt.Fprintf(b, "; at one per %s per IP (%.0f a day each)", short(p.PageLoadInterval), each)
+	if failed > 0 && p.PageLoadBackoff > 0 {
+		fmt.Fprintf(b, ", %.1f%% of them failing and pausing their IP for %s or more", 100*failed, short(p.PageLoadBackoff))
+	}
+	fmt.Fprintf(b, ": about %.0f IPs (%.0f%% headroom)", ips, 100*p.Headroom)
 	fmt.Fprintf(b, "\nplan on at least %.0f IPs\n", math.Max(ips, reqIPs))
 }
 

@@ -46,16 +46,17 @@ func runSync(ctx context.Context, cfg *config.Config, once bool) (int, error) {
 		return 0, err
 	}
 	defer db.Close()
-	// Valkey only shares the exits' page-load pacing with the crawlers:
-	// without it registry-sync paces its few page loads on its own.
+	// Valkey only shares the exits' page-load pacing with the crawlers.
+	// The client connects on first use: while Valkey is down registry-sync
+	// paces its few page loads on its own, counted and alerted on like a
+	// crawler pod's (fbs_proxy_page_gate_errors_total), and shares again
+	// once it is back.
 	var rdb *redis.Client
 	if cfg.FB.Proxy.PageLoads.Shared {
-		if rdb, err = app.OpenRedis(ctx, cfg); err != nil {
-			slog.Warn("registry-sync: Valkey unreachable; pacing page loads on its own", "err", err)
-			rdb = nil
-		} else {
-			defer func() { _ = rdb.Close() }()
+		if rdb, err = app.NewRedis(cfg); err != nil {
+			return 0, err
 		}
+		defer func() { _ = rdb.Close() }()
 	}
 	s, reg, err := app.NewRegistrySync(ctx, cfg, db, rdb, nil)
 	if err != nil {
