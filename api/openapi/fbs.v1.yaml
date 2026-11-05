@@ -586,7 +586,7 @@ components:
           enum: [page, profile, unknown]
           description: >-
             What the account's own page reads as: page when it shows anything only a page has (a category,
-            a Page object or its id, a page app link), profile (a person) when it says it has no Page object,
+            a Page object, its own page app link), profile (a person) when it says it has no Page object,
             unknown when it tells neither. Until it is checked or read, page only for a mention typed Page.
             A person (or unknown) needs pii:read for its reference and id.
         source: {type: string, description: '`mention`, or the source a candidate came with'}

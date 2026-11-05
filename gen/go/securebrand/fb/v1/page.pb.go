@@ -96,8 +96,8 @@ type Page struct {
 	ExtraJson string     `protobuf:"bytes,15,opt,name=extra_json,json=extraJson,proto3" json:"extra_json,omitempty"`
 	Status    PageStatus `protobuf:"varint,16,opt,name=status,proto3,enum=securebrand.fb.v1.PageStatus" json:"status,omitempty"`
 	// page, profile (a person) or unknown: page when the HTML shows anything
-	// only a page has (a category, a Page object or its id, a page app
-	// link), profile when it says the profile has no Page object, unknown
+	// only a page has (a category, a Page object, its own page app link),
+	// profile when it says the profile has no Page object, unknown
 	// otherwise.
 	Kind          string `protobuf:"bytes,17,opt,name=kind,proto3" json:"kind,omitempty"`
 	unknownFields protoimpl.UnknownFields

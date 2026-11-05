@@ -33,13 +33,15 @@ func TestPageKind(t *testing.T) {
 		extra                  string
 		kind, signal, category string
 	}{
-		"new-style page":  {map[string]any{"delegate_page": map[string]any{"id": "100064000000002"}}, "", KindPage, "delegate_page", ""},
-		"old-style page":  {map[string]any{"typename": "Page"}, "", KindPage, "page_object", ""},
-		"business page":   {map[string]any{"is_business_page_active": true}, "", KindPage, "business_page", ""},
-		"category":        {map[string]any{"category_name": "Clothing (Brand)"}, "", KindPage, "category", "Clothing (Brand)"},
-		"intro line":      {intro("Page · News & media website"), "", KindPage, "category", "News & media website"},
-		"pageID key":      {map[string]any{}, `<script>var x={"pageID":"100064000000002"};</script>`, KindPage, "page_id", ""},
-		"page app link":   {map[string]any{}, `<meta property="al:android:url" content="fb://page/100064000000002"/>`, KindPage, "page_app_link", ""},
+		"new-style page": {map[string]any{"delegate_page": map[string]any{"id": "100064000000002"}}, "", KindPage, "delegate_page", ""},
+		"old-style page": {map[string]any{"typename": "Page"}, "", KindPage, "page_object", ""},
+		"business page":  {map[string]any{"is_business_page_active": true}, "", KindPage, "business_page", ""},
+		"category":       {map[string]any{"category_name": "Clothing (Brand)"}, "", KindPage, "category", "Clothing (Brand)"},
+		"intro line":     {intro("Page · News & media website"), "", KindPage, "category", "News & media website"},
+		"page app link":  {map[string]any{}, `<meta property="al:android:url" content="fb://page/100064000000001"/>`, KindPage, "page_app_link", ""},
+		// What may name another page on anyone's profile does not count.
+		"another's link":  {map[string]any{}, `<meta property="al:android:url" content="fb://page/100064000000002"/>`, KindUnknown, "none", ""},
+		"a pageID":        {map[string]any{}, `<script>var x={"pageID":"100064000000002"};</script>`, KindUnknown, "none", ""},
 		"person":          {map[string]any{"delegate_page": nil}, `<meta property="al:android:url" content="fb://profile/100064000000001"/>`, KindProfile, "no_page_object", ""},
 		"nothing to tell": {map[string]any{}, `<meta property="al:android:url" content="fb://profile/100064000000001"/>`, KindUnknown, "none", ""},
 		// A bio that counts something is no page's like count.

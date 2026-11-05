@@ -18,11 +18,10 @@ var (
 	titleRe   = regexp.MustCompile(`(?s)<title[^>]*>(.*?)</title>`)
 	ogTitleRe = regexp.MustCompile(`<meta property="og:title" content="([^"]*)"`)
 	ogURLRe   = regexp.MustCompile(`<meta property="og:url" content="([^"]*)"`)
-	// Keys only a page's HTML holds: the older Page object's id beside a
-	// new-style page's profile, and an old-style page's app link (a
-	// person's, and a new-style page's, is fb://profile/).
-	pageIDKeyRe  = regexp.MustCompile(`\\?"pageID\\?"\s*:\s*\\?"\d{5,}`)
-	pageAppURLRe = regexp.MustCompile(`fb://page/\??(?:id=)?\d`)
+	// An old-style page's app link (a person's, and a new-style page's, is
+	// fb://profile/): only the document's own counts, as other pages'
+	// links may appear on anyone's.
+	pageAppURLRe = regexp.MustCompile(`<meta property="al:(?:android|ios):url" content="fb://page/\??(?:id=)?(\d+)`)
 )
 
 // The account kinds a page profile reads as (mentions uses the same).
@@ -171,16 +170,17 @@ func Page(html []byte, pageID, requested int64) (*fbv1.Page, Report) {
 	if p.FollowersCount == nil {
 		rep.optional("page.followers")
 	}
-	p.Kind, rep.KindSignal = pageKind(html, mine, p)
+	p.Kind, rep.KindSignal = pageKind(html, mine, idStr, p)
 	return p, rep
 }
 
-// pageKind decides whether the account is a page or a person: page on
-// anything only a page has, profile when its node says it has no Page
-// object (delegate_page null), unknown otherwise (a new-style page is a
-// profile typed User, so neither its type nor its app link tells). It
-// returns the signal that decided, for metrics.
-func pageKind(html []byte, mine []gjson.Result, p *fbv1.Page) (kind, signal string) {
+// pageKind decides whether the account (id) is a page or a person: page on
+// anything only a page has, profile when one of its nodes says it has no
+// Page object (delegate_page null), unknown otherwise (a new-style page is
+// a profile typed User, so neither its type nor its fb://profile/ link
+// tells). Keys that may name another page (pageID) don't count. It returns
+// the signal that decided, for metrics.
+func pageKind(html []byte, mine []gjson.Result, id string, p *fbv1.Page) (kind, signal string) {
 	for _, m := range mine {
 		switch {
 		case m.Get("__typename").String() == "Page":
@@ -191,16 +191,14 @@ func pageKind(html []byte, mine []gjson.Result, p *fbv1.Page) (kind, signal stri
 			return KindPage, "business_page"
 		}
 	}
-	switch {
-	case len(p.Categories) > 0:
+	if len(p.Categories) > 0 {
 		return KindPage, "category"
-	case pageIDKeyRe.Match(html):
-		return KindPage, "page_id"
-	case pageAppURLRe.Match(html):
+	}
+	if m := pageAppURLRe.FindSubmatch(html); m != nil && string(m[1]) == id {
 		return KindPage, "page_app_link"
 	}
-	if len(mine) > 0 {
-		if d := mine[0].Get("delegate_page"); d.Exists() && d.Type == gjson.Null {
+	for _, m := range mine {
+		if d := m.Get("delegate_page"); m.Get("id").String() == id && d.Exists() && d.Type == gjson.Null {
 			return KindProfile, "no_page_object"
 		}
 	}
