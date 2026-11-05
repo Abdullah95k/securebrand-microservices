@@ -21,11 +21,14 @@ import (
 
 // Page is the API view of a page.
 type Page struct {
-	PageID         int64           `json:"page_id"`
-	Vanity         *string         `json:"vanity,omitempty"`
-	URL            *string         `json:"url,omitempty"`
-	Name           *string         `json:"name,omitempty"`
-	Categories     []string        `json:"categories,omitempty"`
+	PageID     int64    `json:"page_id"`
+	Vanity     *string  `json:"vanity,omitempty"`
+	URL        *string  `json:"url,omitempty"`
+	Name       *string  `json:"name,omitempty"`
+	Categories []string `json:"categories,omitempty"`
+	// Kind is what the page's profile reads as: page, profile (a person)
+	// or unknown.
+	Kind           string          `json:"kind"`
 	Intro          *string         `json:"intro,omitempty"`
 	FollowersCount *int64          `json:"followers_count,omitempty"`
 	LikesCount     *int64          `json:"likes_count,omitempty"`
@@ -40,9 +43,9 @@ type Page struct {
 
 func (s *Server) pageByID(ctx context.Context, id int64) (*Page, error) {
 	var p Page
-	err := s.ReadDB.QueryRow(ctx, `SELECT page_id, vanity, url, name, categories, intro, followers_count, likes_count,
+	err := s.ReadDB.QueryRow(ctx, `SELECT page_id, vanity, url, name, categories, kind, intro, followers_count, likes_count,
 		verified, profile_pic_url, cover_url, contact, status, first_seen_at, last_scraped_at FROM pages WHERE page_id = $1`, id).
-		Scan(&p.PageID, &p.Vanity, &p.URL, &p.Name, &p.Categories, &p.Intro, &p.FollowersCount, &p.LikesCount,
+		Scan(&p.PageID, &p.Vanity, &p.URL, &p.Name, &p.Categories, &p.Kind, &p.Intro, &p.FollowersCount, &p.LikesCount,
 			&p.Verified, &p.ProfilePicURL, &p.CoverURL, &p.Contact, &p.Status, &p.FirstSeenAt, &p.LastScrapedAt)
 	if err != nil {
 		return nil, err

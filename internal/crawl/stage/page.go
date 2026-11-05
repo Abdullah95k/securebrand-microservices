@@ -125,6 +125,7 @@ func (s *PageStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 				return classOutcome(t, detect.SchemaDrift, fmt.Sprint(rep.Missing), "", c)
 			}
 			metrics.ParseTotal.WithLabelValues("page_html", "1", "ok").Inc()
+			metrics.PageKinds.WithLabelValues("crawl", page.Kind, rep.KindSignal).Inc()
 			if d.Suppression.PageSuppressed(page.PageId) {
 				c["pages_suppressed"]++
 				return done(c)

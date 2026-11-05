@@ -130,10 +130,10 @@ func (s *CheckStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	if !rep.OK() || page == nil {
 		return s.fail(ctx, t, ref, failDrift, true, c)
 	}
-	v.ID, v.Kind = page.PageId, mentions.KindProfile
-	if len(page.Categories) > 0 {
-		v.Kind = mentions.KindPage
-	}
+	v.ID = page.PageId
+	var signal string
+	v.Kind, signal = accountKind(page.Kind, rep.KindSignal, acc.Kind)
+	metrics.PageKinds.WithLabelValues("check", v.Kind, signal).Inc()
 	if s.suppressed(ref, v.ID) {
 		return s.forget(ctx, t, ref, v.ID, c)
 	}
@@ -165,6 +165,20 @@ func (s *CheckStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	}
 	judgeTimeline(&v, tl)
 	return s.record(ctx, t, ref, v, c)
+}
+
+// accountKind is a checked account's kind: what its own page reads as
+// (parse.Page), or page when a mention typed it Page (an old-style page)
+// and its page did not say page itself. A page that reads as a person
+// stays one.
+func accountKind(read, signal, hint string) (kind, by string) {
+	switch {
+	case read == mentions.KindPage || read == mentions.KindProfile:
+		return read, signal
+	case hint == mentions.KindPage:
+		return mentions.KindPage, "mention"
+	}
+	return mentions.KindUnknown, signal
 }
 
 // judgeLoad reads a page load: a verdict (unavailable; restricted when a

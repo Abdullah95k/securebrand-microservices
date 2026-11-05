@@ -581,7 +581,14 @@ components:
       properties:
         account_ref: {type: string, description: 'id:<n> or v:<name> (pii:read for a possible person)'}
         account_id: {type: integer, format: int64, description: 'Known from the mention or resolved by a check (pii:read for a possible person)'}
-        kind: {type: string, enum: [page, profile, unknown], description: A hint until a check decides}
+        kind:
+          type: string
+          enum: [page, profile, unknown]
+          description: >-
+            What the account's own page reads as: page when it shows anything only a page has (a category,
+            a Page object, its own page app link), profile (a person) when it says it has no Page object,
+            unknown when it tells neither. Until it is checked or read, page only for a mention typed Page.
+            A person (or unknown) needs pii:read for its reference and id.
         source: {type: string, description: '`mention`, or the source a candidate came with'}
         status: {type: string, enum: [unchecked, listed, public, private, unavailable]}
         reason:
@@ -713,6 +720,12 @@ components:
         url: {type: string}
         name: {type: string}
         categories: {type: array, items: {type: string}}
+        kind:
+          type: string
+          enum: [page, profile, unknown]
+          description: >-
+            What the profile reads as: page when it shows anything only a page has, profile (a person) when it
+            says it has no Page object, unknown when it tells neither. A read that can't tell keeps an earlier one's.
         intro: {type: string}
         followers_count: {type: integer, format: int64}
         likes_count: {type: integer, format: int64}

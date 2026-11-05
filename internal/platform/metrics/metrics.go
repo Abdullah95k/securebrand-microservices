@@ -66,6 +66,10 @@ var (
 	// minimum interval) or "backoff" (after a walled or failed page load).
 	PageLoadsDeferred = counterVec("proxy_page_loads_deferred_total", "Page loads put off by an exit's page-load gate, by reason.", "tier", "reason")
 	Bootstraps        = counterVec("bootstrap_total", "Identity bootstraps.", "method", "outcome")
+	// PageKinds counts page profiles read, by where ("check": a mention
+	// check; "crawl": a scheduled run), the kind they read as, and the
+	// signal that decided it (parse.Page).
+	PageKinds = counterVec("page_kinds_total", "Page profiles read, by where, the kind they read as and the signal that decided it.", "source", "kind", "signal")
 	// PageGateErrors counts calls to the shared page-load gate that failed,
 	// so the process paced that page load on its own.
 	PageGateErrors = counter("proxy_page_gate_errors_total", "Shared page-load gate calls that failed (the process paced on its own).")

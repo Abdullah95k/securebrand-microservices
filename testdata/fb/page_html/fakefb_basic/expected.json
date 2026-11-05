@@ -17,6 +17,7 @@
     "cover_photo": {
       "url": "https://www.facebook.com/media/cover_100064000000000.jpg"
     },
-    "status": "PAGE_STATUS_ACTIVE"
+    "status": "PAGE_STATUS_ACTIVE",
+    "kind": "page"
   }
 }

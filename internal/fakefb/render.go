@@ -358,7 +358,12 @@ func (r *renderer) pageHTML(p *Page, lsd, datr string, consent bool) []byte {
 		}},
 		"profile_intro_card": obj{"bio": obj{"text": p.Intro}},
 	}
-	if !r.noID && !p.Profile {
+	switch {
+	case p.Profile:
+		// A person: followers, no likes, and no Page object.
+		user["profile_social_context"] = obj{"content": []any{obj{"text": obj{"text": humanCount(p.Followers) + " followers"}}}}
+		user["delegate_page"] = nil
+	case !r.noID:
 		user["delegate_page"] = obj{"id": strconv.FormatInt(p.delegate(), 10), "category_name": p.Category}
 	}
 	header := obj{"require": []any{[]any{"RelayPrefetchedStreamCache", "next", []any{}, []any{

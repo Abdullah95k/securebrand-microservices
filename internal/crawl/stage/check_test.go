@@ -70,3 +70,20 @@ func TestJudgeTimeline(t *testing.T) {
 		}
 	}
 }
+
+// The page's own reading decides; a mention typed Page settles only what
+// the page left unknown.
+func TestAccountKind(t *testing.T) {
+	for _, c := range []struct{ read, hint, kind, by string }{
+		{"page", "unknown", "page", "sig"},
+		{"profile", "page", "profile", "sig"},
+		{"unknown", "page", "page", "mention"},
+		{"", "page", "page", "mention"},
+		{"unknown", "unknown", "unknown", "sig"},
+		{"", "", "unknown", "sig"},
+	} {
+		if k, by := accountKind(c.read, "sig", c.hint); k != c.kind || by != c.by {
+			t.Errorf("read %q, hint %q: %q by %q, want %q by %q", c.read, c.hint, k, by, c.kind, c.by)
+		}
+	}
+}

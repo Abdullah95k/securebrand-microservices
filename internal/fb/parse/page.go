@@ -18,7 +18,22 @@ var (
 	titleRe   = regexp.MustCompile(`(?s)<title[^>]*>(.*?)</title>`)
 	ogTitleRe = regexp.MustCompile(`<meta property="og:title" content="([^"]*)"`)
 	ogURLRe   = regexp.MustCompile(`<meta property="og:url" content="([^"]*)"`)
+	// An old-style page's app link (a person's, and a new-style page's, is
+	// fb://profile/): only the document's own counts, as other pages'
+	// links may appear on anyone's.
+	pageAppURLRe = regexp.MustCompile(`<meta property="al:(?:android|ios):url" content="fb://page/\??(?:id=)?(\d+)`)
 )
+
+// The account kinds a page profile reads as (mentions uses the same).
+const (
+	KindPage    = "page"
+	KindProfile = "profile"
+	KindUnknown = "unknown"
+)
+
+// introCategory is the intro line a page shows under its name: "Page ·
+// News & media website".
+const introCategory = "Page \u00b7 "
 
 // Page parses the page profile from its HTML. pageID may be 0, in which case
 // it is extracted from the HTML, and failing that is requested: the numeric
@@ -105,8 +120,12 @@ func Page(html []byte, pageID, requested int64) (*fbv1.Page, Report) {
 			v := Int64(l)
 			p.LikesCount = &v
 		}
-		// Social context lines such as "1.2M followers" / "980K likes".
+		// Social context lines such as "1.2M followers" / "980K likes", and
+		// a page's "Page · Category" intro line.
 		for _, t := range FindAll(m, "text") {
+			if c, ok := strings.CutPrefix(t.String(), introCategory); ok && strings.TrimSpace(c) != "" {
+				p.Categories = appendUnique(p.Categories, strings.TrimSpace(c))
+			}
 			s := strings.ToLower(t.String())
 			switch {
 			case strings.Contains(s, "follower") && p.FollowersCount == nil:
@@ -151,7 +170,39 @@ func Page(html []byte, pageID, requested int64) (*fbv1.Page, Report) {
 	if p.FollowersCount == nil {
 		rep.optional("page.followers")
 	}
+	p.Kind, rep.KindSignal = pageKind(html, mine, idStr, p)
 	return p, rep
+}
+
+// pageKind decides whether the account (id) is a page or a person: page on
+// anything only a page has, profile when one of its nodes says it has no
+// Page object (delegate_page null), unknown otherwise (a new-style page is
+// a profile typed User, so neither its type nor its fb://profile/ link
+// tells). Keys that may name another page (pageID) don't count. It returns
+// the signal that decided, for metrics.
+func pageKind(html []byte, mine []gjson.Result, id string, p *fbv1.Page) (kind, signal string) {
+	for _, m := range mine {
+		switch {
+		case m.Get("__typename").String() == "Page":
+			return KindPage, "page_object"
+		case m.Get("delegate_page.id").String() != "":
+			return KindPage, "delegate_page"
+		case m.Get("is_business_page_active").Bool() || m.Get("delegate_page.is_business_page_active").Bool():
+			return KindPage, "business_page"
+		}
+	}
+	if len(p.Categories) > 0 {
+		return KindPage, "category"
+	}
+	if m := pageAppURLRe.FindSubmatch(html); m != nil && string(m[1]) == id {
+		return KindPage, "page_app_link"
+	}
+	for _, m := range mine {
+		if d := m.Get("delegate_page"); m.Get("id").String() == id && d.Exists() && d.Type == gjson.Null {
+			return KindProfile, "no_page_object"
+		}
+	}
+	return KindUnknown, "none"
 }
 
 func appendUnique(xs []string, s string) []string {

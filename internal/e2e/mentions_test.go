@@ -161,8 +161,13 @@ func TestMentionsCheckAccountsAndAddPublicOnes(t *testing.T) {
 	if added != 2 {
 		t.Fatalf("%d accounts added, want the daily cap of 2", added)
 	}
+	// The kinds the accounts' own pages show (a person's has no Page
+	// object; a page's has one).
 	if a := get(refs["person"]); a.Kind != mentions.KindProfile {
 		t.Fatalf("public profile: %+v", a)
+	}
+	if a := get(refs["page"]); a.Kind != mentions.KindPage {
+		t.Fatalf("public page: %+v", a)
 	}
 	if n := count(t, s, `SELECT checks FROM mention_check_days`); n != 7 {
 		t.Fatalf("%d checks counted, want 7 (six accounts, the restricted one twice)", n)
