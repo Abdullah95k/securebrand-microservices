@@ -110,6 +110,19 @@ groups:
             provider; remove the endpoints or route around the tier.
           runbook_url: https://github.com/abdullah95k/securebrand-microservices/blob/main/docs/runbooks/operations.md#block-storm-block-rate--10
 
+      - alert: FbsPageGateUnshared
+        expr: sum by (pod) (rate(fbs_proxy_page_gate_errors_total[10m])) > 0
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.pod }} paces its page loads on its own"
+          description: >-
+            It can't reach the shared page-load gate in Valkey, so its page
+            loads are paced apart from the other crawler pods: an exit can
+            see more page loads than fb.proxy.page_loads allows, and walls.
+            Check the pod's connection to Valkey.
+          runbook_url: https://github.com/abdullah95k/securebrand-microservices/blob/main/docs/runbooks/operations.md#block-storm-block-rate--10
+
       - alert: FbsBrowserFallbackSaturated
         expr: sum(rate(fbs_bootstrap_total{method="browser", outcome=~"capped|busy"}[15m])) > 0.05
         for: 30m

@@ -202,8 +202,10 @@ components:
     terminationGracePeriodSeconds: 90
     resources: {requests: {cpu: 200m, memory: 256Mi}, limits: {memory: 512Mi}}
   # Mention checks: enable with config.mentions.enabled. Each check loads
-  # one page through the proxies (the crawlers' egress). The page-load gate
-  # is per process, so keep one replica.
+  # one page through the proxies (the crawlers' egress), paced with every
+  # other crawler pod through the shared page-load gate
+  # (config.fb.proxy.page_loads.shared); one replica is plenty for the
+  # daily cap.
   crawler-check:
     enabled: false
     command: ["/usr/local/bin/fbs-crawler", "--stages", "check"]

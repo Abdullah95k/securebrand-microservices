@@ -15,6 +15,8 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/abdullah95k/securebrand-microservices/internal/app"
 	"github.com/abdullah95k/securebrand-microservices/internal/config"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/httpserver"
@@ -44,7 +46,18 @@ func runSync(ctx context.Context, cfg *config.Config, once bool) (int, error) {
 		return 0, err
 	}
 	defer db.Close()
-	s, reg, err := app.NewRegistrySync(ctx, cfg, db, nil)
+	// Valkey only shares the exits' page-load pacing with the crawlers:
+	// without it registry-sync paces its few page loads on its own.
+	var rdb *redis.Client
+	if cfg.FB.Proxy.PageLoads.Shared {
+		if rdb, err = app.OpenRedis(ctx, cfg); err != nil {
+			slog.Warn("registry-sync: Valkey unreachable; pacing page loads on its own", "err", err)
+			rdb = nil
+		} else {
+			defer func() { _ = rdb.Close() }()
+		}
+	}
+	s, reg, err := app.NewRegistrySync(ctx, cfg, db, rdb, nil)
 	if err != nil {
 		return 0, err
 	}

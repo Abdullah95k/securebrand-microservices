@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/abdullah95k/securebrand-microservices/configs"
 	"github.com/abdullah95k/securebrand-microservices/internal/config"
@@ -22,7 +23,9 @@ import (
 // on the configured tier (by default the first tier routed for the
 // "registry_sync" class), and the registry for the client parameters.
 // Callers run reg.Reload before each sync, or reg.Run alongside.
-func NewRegistrySync(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, doers session.DoerFactory) (*registrysync.Sync, *registry.DB, error) {
+// rdb, when set, shares the exits' page-load pacing with the crawlers
+// (fb.proxy.page_loads.shared); nil paces registry-sync's page loads alone.
+func NewRegistrySync(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, doers session.DoerFactory) (*registrysync.Sync, *registry.DB, error) {
 	seedBytes, err := configs.FS.ReadFile(cfg.FB.RegistrySeed)
 	if err != nil {
 		return nil, nil, fmt.Errorf("registry seed: %w", err)
@@ -43,6 +46,9 @@ func NewRegistrySync(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, 
 	proxies, err := proxy.New(cfg.FB.Proxy)
 	if err != nil {
 		return nil, nil, err
+	}
+	if cfg.FB.Proxy.PageLoads.Shared && rdb != nil {
+		proxies.SharePageGate(rdb, cfg.Kafka.TopicPrefix)
 	}
 	rc := cfg.RegistrySync
 	if rc.Tier == "" {

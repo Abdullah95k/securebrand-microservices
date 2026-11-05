@@ -292,6 +292,9 @@ type PageLoads struct {
 	// doubling up to MaxBackoff; a page that loads resets it.
 	Backoff    time.Duration `koanf:"backoff"`
 	MaxBackoff time.Duration `koanf:"max_backoff"`
+	// Shared paces each exit together with every process that shares
+	// Valkey (crawler pods, registry-sync); off, each process paces alone.
+	Shared bool `koanf:"shared"`
 }
 
 type ProxyTier struct {

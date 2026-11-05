@@ -70,7 +70,7 @@ func start(t *testing.T, faults fakefb.Faults, tweak func(*config.Config)) *fixt
 	if tweak != nil {
 		tweak(cfg)
 	}
-	s, reg, err := app.NewRegistrySync(ctx, cfg, db, nil)
+	s, reg, err := app.NewRegistrySync(ctx, cfg, db, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

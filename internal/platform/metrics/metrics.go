@@ -29,6 +29,12 @@ func histVec(name, help string, buckets []float64, labels ...string) *prometheus
 	return h
 }
 
+func counter(name, help string) prometheus.Counter {
+	c := prometheus.NewCounter(prometheus.CounterOpts{Namespace: "fbs", Name: name, Help: help})
+	Registry.MustRegister(c)
+	return c
+}
+
 func gauge(name, help string) prometheus.Gauge {
 	g := prometheus.NewGauge(prometheus.GaugeOpts{Namespace: "fbs", Name: name, Help: help})
 	Registry.MustRegister(g)
@@ -60,6 +66,9 @@ var (
 	// minimum interval) or "backoff" (after a walled or failed page load).
 	PageLoadsDeferred = counterVec("proxy_page_loads_deferred_total", "Page loads put off by an exit's page-load gate, by reason.", "tier", "reason")
 	Bootstraps        = counterVec("bootstrap_total", "Identity bootstraps.", "method", "outcome")
+	// PageGateErrors counts calls to the shared page-load gate that failed,
+	// so the process paced that page load on its own.
+	PageGateErrors = counter("proxy_page_gate_errors_total", "Shared page-load gate calls that failed (the process paced on its own).")
 
 	// Discovery: keyword searches by outcome (ok, error, unavailable),
 	// posts they returned, and what became of each: a mention of a page

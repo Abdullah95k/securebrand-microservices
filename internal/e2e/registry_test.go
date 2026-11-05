@@ -47,7 +47,7 @@ func TestRegistrySyncHealsRotation(t *testing.T) {
 
 	cfg := *s.Cfg
 	cfg.RegistrySync.CanaryPages = []string{pages[1].Vanity}
-	sync, reg, err := app.NewRegistrySync(ctx, &cfg, s.DB, nil)
+	sync, reg, err := app.NewRegistrySync(ctx, &cfg, s.DB, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
