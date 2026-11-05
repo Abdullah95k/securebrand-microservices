@@ -59,6 +59,38 @@ func TestFormatProjects(t *testing.T) {
 	}
 }
 
+// Each IP loads at most one page per interval, so the page loads can need
+// more IPs than the requests: the plan takes the larger. Jobs from before
+// page loads were counted say so rather than project none.
+func TestFormatProjectsPageLoads(t *testing.T) {
+	since := time.Date(2026, 11, 4, 0, 0, 0, 0, time.UTC)
+	r := Report{Since: since, Until: since.Add(24 * time.Hour), Rows: []Row{
+		// 300 pages, 4 page loads and 450 requests each a day.
+		{Tier: "T1", Kind: "scheduled", Pages: 300, Jobs: 2400, Requests: 135000, PageLoads: 1200, WireBytes: 8_000_000_000},
+	}}
+	p := Projection{Pages: 5000, IdentityRPS: 0.5, Headroom: 0.5, PageLoadInterval: 2 * time.Minute, ChecksPerDay: 300}
+	out := Format(r, p)
+	t.Log("\n" + out)
+	// 4 x 5000 + 300 = 20,300 page loads; 720 per IP a day; x1.5 = 42.3.
+	// Requests: 450 x 5000 / 86400 / 0.5 x 1.5 = 78.1.
+	for _, want := range []string{"450 requests, 4.0 page loads and", "about 79 IPs at 0.5 requests/s",
+		"page loads: 20.3K a day (300 of them mention checks); at one per 2m per IP (720 a day each), about 43 IPs (50% headroom)",
+		"plan on at least 79 IPs"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+	// A slower gate (one per 10m): the page loads set the plan.
+	p.PageLoadInterval = 10 * time.Minute
+	if out := Format(r, p); !strings.Contains(out, "about 212 IPs (50% headroom)") || !strings.Contains(out, "plan on at least 212 IPs") {
+		t.Fatalf("page loads should set the plan:\n%s", out)
+	}
+	r.Rows[0].PageLoads = 0
+	if out := Format(r, p); !strings.Contains(out, "page loads: not counted by these jobs") || strings.Contains(out, "plan on") {
+		t.Fatalf("uncounted page loads:\n%s", out)
+	}
+}
+
 // Three cycles of a page every 3 hours cover 9 hours: the daily traffic is
 // the cycles' over 9 hours, not over the 6 between the first one's start
 // and the last one's end.
@@ -79,7 +111,7 @@ func TestSteadyStateCoversWholeCycles(t *testing.T) {
 	for i := range 3 {
 		created := t0.Add(time.Duration(i) * 3 * time.Hour)
 		if _, err := db.Exec(ctx, `INSERT INTO jobs (job_id, kind, lane, mode, page_ref, params, status, counters, created_at, finished_at)
-			VALUES (gen_random_uuid(), 'scheduled', 1, 'incremental', 'v:a', '{}', 'completed', '{"requests":100}', $1, $2)`,
+			VALUES (gen_random_uuid(), 'scheduled', 1, 'incremental', 'v:a', '{}', 'completed', '{"requests":100,"page_loads":2}', $1, $2)`,
 			created, created.Add(10*time.Minute)); err != nil {
 			t.Fatal(err)
 		}
@@ -93,5 +125,8 @@ func TestSteadyStateCoversWholeCycles(t *testing.T) {
 	}
 	if perDay := float64(r.Steady().Requests) / r.SteadyDays(); math.Abs(perDay-800) > 1e-6 {
 		t.Fatalf("%.1f requests a day, want 800 (100 per 3 hours)", perDay)
+	}
+	if n := r.Steady().PageLoads; n != 6 {
+		t.Fatalf("%d page loads, want 6", n)
 	}
 }

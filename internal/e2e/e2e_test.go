@@ -120,7 +120,8 @@ func TestEndToEnd(t *testing.T) {
 	if j.Completeness.MedianRatio != 1 || j.Completeness.MinRatio != 1 || j.Completeness.CommentsCollected != int64(wantComments) {
 		t.Fatalf("completeness = %+v (want all 1.0, %d comments)", j.Completeness, wantComments)
 	}
-	if j.Counters["requests"] == 0 || j.Counters["wire_bytes"] == 0 || j.PageID == nil || *j.PageID != page.ID {
+	// A first crawl loads the page (its profile, and the session's tokens).
+	if j.Counters["requests"] == 0 || j.Counters["wire_bytes"] == 0 || j.Counters["page_loads"] == 0 || j.PageID == nil || *j.PageID != page.ID {
 		t.Fatalf("counters/page id = %v %v", j.Counters, j.PageID)
 	}
 	// The pilot's load report reads the same counters from the jobs table.
@@ -132,9 +133,11 @@ func TestEndToEnd(t *testing.T) {
 			total.Jobs += r.Jobs
 			total.Requests += r.Requests
 			total.WireBytes += r.WireBytes
+			total.PageLoads += r.PageLoads
 			total.Posts += r.Posts
 		}
-		if total.Jobs == 0 || total.Requests < j.Counters["requests"] || total.WireBytes < j.Counters["wire_bytes"] || total.Posts == 0 {
+		if total.Jobs == 0 || total.Requests < j.Counters["requests"] || total.WireBytes < j.Counters["wire_bytes"] ||
+			total.PageLoads < j.Counters["page_loads"] || total.Posts == 0 {
 			t.Fatalf("load report %+v, job counters %v", rep, j.Counters)
 		}
 	}

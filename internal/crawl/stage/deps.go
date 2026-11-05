@@ -180,8 +180,9 @@ func (d *Deps) tierFor(class string, stalls uint32) string {
 }
 
 // ensureBootstrapped loads a page on an identity without tokens to obtain
-// them (session.ErrPaced when its exit can't load a page now).
-func (d *Deps) ensureBootstrapped(ctx context.Context, id *session.Identity, pageID int64, lane taskv1.Lane) (*session.PageLoad, error) {
+// them (session.ErrPaced when its exit can't load a page now). A page load
+// sent counts in c (requests, page_loads, wire_bytes).
+func (d *Deps) ensureBootstrapped(ctx context.Context, id *session.Identity, pageID int64, lane taskv1.Lane, c map[string]int64) (*session.PageLoad, error) {
 	if id.Bootstrapped() {
 		return nil, nil
 	}
@@ -189,6 +190,11 @@ func (d *Deps) ensureBootstrapped(ctx context.Context, id *session.Identity, pag
 	pl, err := d.Loader.Bootstrap(ctx, id, u.String())
 	if !errors.Is(err, session.ErrPaced) { // nothing was sent
 		d.observeLoad(pl, err, lane)
+		c["requests"]++
+		c["page_loads"]++
+		if pl != nil {
+			c["wire_bytes"] += pl.Bytes
+		}
 	}
 	return pl, err
 }

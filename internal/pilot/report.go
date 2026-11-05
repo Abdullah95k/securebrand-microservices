@@ -25,6 +25,7 @@ type Row struct {
 	Requests        int64  `json:"requests"`
 	WireBytes       int64  `json:"wire_bytes"`
 	Blocked         int64  `json:"blocked"`
+	PageLoads       int64  `json:"page_loads"`
 	SoftErrors      int64  `json:"soft_errors"`
 	TransportErrors int64  `json:"transport_errors"`
 	Drift           int64  `json:"drift"`
@@ -86,6 +87,7 @@ func (r Report) Steady() Row {
 		out.Requests += x.Requests
 		out.WireBytes += x.WireBytes
 		out.Blocked += x.Blocked
+		out.PageLoads += x.PageLoads
 		out.SoftErrors += x.SoftErrors
 		out.TransportErrors += x.TransportErrors
 		out.Drift += x.Drift
@@ -107,6 +109,7 @@ func Load(ctx context.Context, db *pgxpool.Pool, since time.Time) (Report, error
 			coalesce(sum((j.counters->>'requests')::bigint), 0),
 			coalesce(sum((j.counters->>'wire_bytes')::bigint), 0),
 			coalesce(sum((j.counters->>'blocked')::bigint), 0),
+			coalesce(sum((j.counters->>'page_loads')::bigint), 0),
 			coalesce(sum((j.counters->>'soft_errors')::bigint), 0),
 			coalesce(sum((j.counters->>'transport_errors')::bigint), 0),
 			coalesce(sum((j.counters->>'drift')::bigint), 0),
@@ -121,7 +124,7 @@ func Load(ctx context.Context, db *pgxpool.Pool, since time.Time) (Report, error
 	}
 	for rows.Next() {
 		var x Row
-		if err := rows.Scan(&x.Tier, &x.Kind, &x.Pages, &x.Jobs, &x.Requests, &x.WireBytes, &x.Blocked, &x.SoftErrors,
+		if err := rows.Scan(&x.Tier, &x.Kind, &x.Pages, &x.Jobs, &x.Requests, &x.WireBytes, &x.Blocked, &x.PageLoads, &x.SoftErrors,
 			&x.TransportErrors, &x.Drift, &x.Posts, &x.Comments, &x.Replies); err != nil {
 			rows.Close()
 			return rep, err
@@ -167,6 +170,13 @@ type Projection struct {
 	IdentityRPS float64 // fb.identity_rps: requests per second per IP
 	CostPerGB   float64 // a per-GB tier's price, e.g. residential
 	Headroom    float64 // IPs beyond the average need, for peaks (0.5 = 50%)
+	// PageLoadInterval is fb.proxy.page_loads.interval: an IP loads at most
+	// one page per interval, so page loads, not requests, can set the IPs
+	// needed.
+	PageLoadInterval time.Duration
+	// ChecksPerDay are the mention checks a day (mentions.max_checks_per_day
+	// when on): a page load each, whatever the number of pages.
+	ChecksPerDay int
 }
 
 // Format renders the report and, with p.Pages, the projection.
@@ -195,8 +205,13 @@ func Format(r Report, p Projection) string {
 	}
 	reqDay := float64(st.Requests) / float64(st.Pages) / days
 	bytesDay := float64(st.WireBytes) / float64(st.Pages) / days
-	fmt.Fprintf(&b, "\nsteady state (scheduled jobs over %.1f days): %.0f requests and %s per page per day; block rate %.2f%%\n",
-		days, reqDay, human(bytesDay), 100*ratio(st.Blocked, st.Requests))
+	loadsDay := float64(st.PageLoads) / float64(st.Pages) / days
+	loads := ""
+	if st.PageLoads > 0 {
+		loads = fmt.Sprintf(", %.1f page loads", loadsDay)
+	}
+	fmt.Fprintf(&b, "\nsteady state (scheduled jobs over %.1f days): %.0f requests%s and %s per page per day; block rate %.2f%%\n",
+		days, reqDay, loads, human(bytesDay), 100*ratio(st.Blocked, st.Requests))
 	if r.Posts > 0 {
 		fmt.Fprintf(&b, "comment completeness: %.1f%% over %d posts with comments", 100*r.MeanCompleteness, r.Posts)
 		if r.SettledPosts > 0 {
@@ -207,16 +222,56 @@ func Format(r Report, p Projection) string {
 	if p.Pages > 0 {
 		n := float64(p.Pages)
 		fmt.Fprintf(&b, "\nfor %d pages: %.2fM requests and %s per day", p.Pages, reqDay*n/1e6, human(bytesDay*n))
+		var reqIPs float64
 		if p.IdentityRPS > 0 {
-			ips := reqDay * n / 86400 / p.IdentityRPS * (1 + p.Headroom)
-			fmt.Fprintf(&b, "; about %.0f IPs at %.2g requests/s each (%.0f%% headroom)", math.Ceil(ips), p.IdentityRPS, 100*p.Headroom)
+			reqIPs = math.Ceil(reqDay * n / 86400 / p.IdentityRPS * (1 + p.Headroom))
+			fmt.Fprintf(&b, "; about %.0f IPs at %.2g requests/s each (%.0f%% headroom)", reqIPs, p.IdentityRPS, 100*p.Headroom)
 		}
 		if p.CostPerGB > 0 {
 			fmt.Fprintf(&b, "; all on a $%.2f/GB tier: $%.0f a day", p.CostPerGB, bytesDay*n/1e9*p.CostPerGB)
 		}
 		b.WriteString("\n")
+		formatPageLoads(&b, loadsDay*n, reqIPs, st.PageLoads > 0, p)
 	}
 	return b.String()
+}
+
+// formatPageLoads projects the IPs the page loads need: each IP loads at
+// most one page per interval (its page-load gate), and every wall pauses it
+// for longer, so page loads can need more IPs than requests do.
+func formatPageLoads(b *strings.Builder, perDay, reqIPs float64, counted bool, p Projection) {
+	if p.PageLoadInterval <= 0 {
+		return
+	}
+	if !counted {
+		b.WriteString("page loads: not counted by these jobs (crawlers before page_loads were counted): the IPs above cover requests only\n")
+		return
+	}
+	total := perDay + float64(p.ChecksPerDay)
+	each := 24 * time.Hour.Seconds() / p.PageLoadInterval.Seconds()
+	ips := math.Ceil(total / each * (1 + p.Headroom))
+	fmt.Fprintf(b, "page loads: %s a day", count(total))
+	if p.ChecksPerDay > 0 {
+		fmt.Fprintf(b, " (%d of them mention checks)", p.ChecksPerDay)
+	}
+	fmt.Fprintf(b, "; at one per %s per IP (%.0f a day each), about %.0f IPs (%.0f%% headroom), before walls pause exits",
+		short(p.PageLoadInterval), each, ips, 100*p.Headroom)
+	fmt.Fprintf(b, "\nplan on at least %.0f IPs\n", math.Max(ips, reqIPs))
+}
+
+// short drops a duration's zero tail: 2m, not 2m0s.
+func short(d time.Duration) string {
+	return strings.TrimSuffix(strings.TrimSuffix(d.String(), "0s"), "0m")
+}
+
+func count(x float64) string {
+	switch {
+	case x >= 1e6:
+		return fmt.Sprintf("%.2fM", x/1e6)
+	case x >= 1e4:
+		return fmt.Sprintf("%.1fK", x/1e3)
+	}
+	return fmt.Sprintf("%.0f", x)
 }
 
 func ratio(a, b int64) float64 {

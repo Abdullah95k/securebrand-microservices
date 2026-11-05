@@ -7,7 +7,7 @@ scheduler, crawler, persister, registry-sync) against real Facebook on one
 machine, on the Phase 0 pages and proxies, and measures it:
 - requests, proxy bytes and blocks per page per day, by activity tier;
 - comment completeness (collected against Facebook's counts);
-- a projection to the production page count: requests and GB per day, IPs needed, and the cost on a per-GB tier.
+- a projection to the production page count: requests, page loads and GB per day, IPs needed for each, and the cost on a per-GB tier.
 
 Run it **after** the Phase 0 run has finished, and not beside the cost
 experiments (`make phase0-trim`, `make phase0-rate`): they share the proxy
@@ -148,12 +148,14 @@ make pilot-report PILOT_SINCE=48h PILOT_PROJECT=10000 PILOT_COST_PER_GB=4
 
 It prints one row per job kind and page tier (backfills apart from the
 scheduled crawls), then:
-- **steady state**: requests and bytes per page per day over the scheduled jobs, and the block rate;
+- **steady state**: requests, page loads and bytes per page per day over the scheduled jobs, and the block rate;
 - **comment completeness**: over the posts first seen in the window, and over those seen a day or more ago (whose refreshes have run);
-- **projection**: requests and GB per day for `PILOT_PROJECT` pages, the IPs needed at the pilot's requests/s per IP with 50% headroom, and what that traffic would cost on a per-GB tier at `PILOT_COST_PER_GB`.
+- **projection**: requests and GB per day for `PILOT_PROJECT` pages, the IPs needed at the pilot's requests/s per IP with 50% headroom, and what that traffic would cost on a per-GB tier at `PILOT_COST_PER_GB`;
+- **page loads**: the page loads a day for `PILOT_PROJECT` pages, plus the mention checks' daily cap when they are on (a page load each), and the IPs they need: an IP loads at most one page per `fb.proxy.page_loads.interval` (2m: 720 a day), with 50% headroom. Walls pause an exit for 15 minutes or more, so a pilot with walled page loads needs more than this. "plan on at least" is the larger of the two IP counts. Jobs run by a crawler older than the page-load count show "not counted": measure only the time since the upgrade (`PILOT_SINCE`).
 
-Use the projection to size the proxy purchase: ISP IPs for the IP count, and
-the per-GB figure for how much residential fallback could cost at worst.
+Use the projection to size the proxy purchase: ISP IPs for the "plan on at
+least" count, and the per-GB figure for how much residential fallback could
+cost at worst.
 
 ## 6. Stop
 

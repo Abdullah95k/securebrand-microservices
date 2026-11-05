@@ -80,6 +80,11 @@ func reportLoad(ctx context.Context, cfg *config.Config, args []string) error {
 		printJSON(rep)
 		return nil
 	}
-	fmt.Print(pilot.Format(rep, pilot.Projection{Pages: *pages, IdentityRPS: cfg.FB.IdentityRPS, CostPerGB: *cost, Headroom: *headroom}))
+	proj := pilot.Projection{Pages: *pages, IdentityRPS: cfg.FB.IdentityRPS, CostPerGB: *cost, Headroom: *headroom,
+		PageLoadInterval: cfg.FB.Proxy.PageLoads.Interval}
+	if cfg.Mentions.Enabled {
+		proj.ChecksPerDay = cfg.Mentions.MaxChecksPerDay
+	}
+	fmt.Print(pilot.Format(rep, proj))
 	return nil
 }
