@@ -114,7 +114,7 @@ func (s *CheckStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 		return pacedRetry(t, "", err, c)
 	}
 	d.observeLoad(pl, err, t.Lane)
-	c["requests"]++
+	countPageLoad(c, pl, err)
 	if err != nil {
 		return s.fail(ctx, t, ref, failTransport, true, c)
 	}

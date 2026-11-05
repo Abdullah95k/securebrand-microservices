@@ -95,6 +95,9 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 	if err != nil {
 		return nil, err
 	}
+	if cfg.FB.Proxy.PageLoads.Shared {
+		proxies.SharePageGate(rdb, cfg.Kafka.TopicPrefix)
+	}
 	slots := cfg.Crawler.Slots
 	if slots <= 0 {
 		for _, v := range cfg.Crawler.Lanes {

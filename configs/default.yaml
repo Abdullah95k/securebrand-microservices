@@ -158,11 +158,16 @@ fb:
     # most one page per interval. After a walled or failed page load it loads
     # none for backoff, doubling up to max_backoff; a page that loads resets
     # it. Page-load walls don't count against the exit's breaker, so its
-    # sessions keep serving GraphQL. Per crawler process. Zeros turn it off.
+    # sessions keep serving GraphQL. Zeros turn it off. shared: every
+    # process using Valkey (crawler pods, registry-sync) paces each exit
+    # together; off, each process paces alone, so N pods load up to N pages
+    # per interval on an exit. A process that can't reach Valkey paces alone
+    # until it can (fbs_proxy_page_gate_errors_total).
     page_loads:
       interval: 2m
       backoff: 15m
       max_backoff: 2h
+      shared: true
   # Circuit breaker per (query, doc_id): when responses keep failing to parse
   # (schema drift) or the doc_id is rejected, stop sending that query (tasks
   # retry later) instead of spending requests until a registry or parser

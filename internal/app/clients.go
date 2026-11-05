@@ -42,3 +42,13 @@ func OpenRedis(ctx context.Context, cfg *config.Config) (*redis.Client, error) {
 	}
 	return redisx.Open(ctx, cfg.Redis.Addr, cfg.Redis.Password, cfg.Redis.DB, tc)
 }
+
+// NewRedis is OpenRedis without the ping: the client connects on first
+// use, so a process that can do without Valkey starts while it is down.
+func NewRedis(cfg *config.Config) (*redis.Client, error) {
+	tc, err := cfg.Redis.TLS.Config()
+	if err != nil {
+		return nil, fmt.Errorf("redis: %w", err)
+	}
+	return redisx.New(cfg.Redis.Addr, cfg.Redis.Password, cfg.Redis.DB, tc), nil
+}

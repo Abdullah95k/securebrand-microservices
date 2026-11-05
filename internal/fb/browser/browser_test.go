@@ -22,14 +22,18 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/graphql"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/htmlx"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/session"
+	"github.com/abdullah95k/securebrand-microservices/internal/testenv"
 )
 
+// chromium returns the Chromium binary, once no other test package is
+// running Chromium (testenv.Chromium).
 func chromium(t *testing.T) string {
 	t.Helper()
 	bin, err := FindBinary("")
 	if err != nil {
 		t.Skip(err)
 	}
+	testenv.Chromium(t)
 	return bin
 }
 

@@ -70,7 +70,7 @@ func start(t *testing.T, faults fakefb.Faults, tweak func(*config.Config)) *fixt
 	if tweak != nil {
 		tweak(cfg)
 	}
-	s, reg, err := app.NewRegistrySync(ctx, cfg, db, nil)
+	s, reg, err := app.NewRegistrySync(ctx, cfg, db, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -385,6 +385,7 @@ func TestSyncRendersOperationsTheBundlesOmit(t *testing.T) {
 	if _, err := browser.FindBinary(""); err != nil {
 		t.Skip(err)
 	}
+	testenv.Chromium(t)
 	f := start(t, fakefb.Faults{}, func(c *config.Config) {
 		c.FB.Browser.Enabled = true
 		c.FB.Browser.Timeout = time.Minute

@@ -50,7 +50,7 @@ func (s *PostStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 		return noIdentity(t, err, c)
 	}
 	defer d.Pool.Release(id)
-	if pl, err := d.ensureBootstrapped(ctx, id, sc.PageId, t.Lane); err != nil {
+	if pl, err := d.ensureBootstrapped(ctx, id, sc.PageId, t.Lane, c); err != nil {
 		switch {
 		case pl != nil:
 			return classOutcome(t, pl.Class, pl.Reason, t.Cursor, c)
@@ -394,7 +394,7 @@ func (s *ThreadStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 		return noIdentity(t, err, c)
 	}
 	defer d.Pool.Release(id)
-	if pl, err := d.ensureBootstrapped(ctx, id, sc.PageId, t.Lane); err != nil {
+	if pl, err := d.ensureBootstrapped(ctx, id, sc.PageId, t.Lane, c); err != nil {
 		switch {
 		case pl != nil:
 			return classOutcome(t, pl.Class, pl.Reason, t.Cursor, c)

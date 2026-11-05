@@ -8,6 +8,7 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/config"
 	"github.com/abdullah95k/securebrand-microservices/internal/fakefb"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/browser"
+	"github.com/abdullah95k/securebrand-microservices/internal/testenv"
 )
 
 // TestBrowserBootstrapCrawl: pages whose tokens only appear after their
@@ -17,6 +18,7 @@ func TestBrowserBootstrapCrawl(t *testing.T) {
 	if _, err := browser.FindBinary(""); err != nil {
 		t.Skip(err)
 	}
+	testenv.Chromium(t)
 	s := Start(t, Options{
 		Spec:   fakefb.Spec{Seed: 21, Pages: 1, PostsPerPage: 4, PostSpacing: 20 * time.Hour, MaxComments: 15, ReplyProbability: 0.3, MaxReplies: 4},
 		Faults: fakefb.Faults{JSOnlyTokens: true},

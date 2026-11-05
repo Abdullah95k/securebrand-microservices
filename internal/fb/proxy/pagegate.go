@@ -25,6 +25,10 @@ type pageGate struct {
 
 	mu    sync.Mutex
 	exits map[string]*gateExit // gated exits only (tier|host:port of static endpoints)
+	// shared, when set (SharePageGate), paces the exits together with every
+	// other process sharing it; exits then fall back to this process's own
+	// pacing (exits) only while it can't be reached.
+	shared *sharedGate
 }
 
 type gateExit struct {
@@ -56,20 +60,31 @@ func (g *pageGate) gate(exit string) {
 	}
 }
 
+// gated reports whether exit is paced (a static exit of this pool).
+func (g *pageGate) gated(exit string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.exits[exit] != nil
+}
+
 // take reserves the next page load on exit. It reports why not ("paced"
 // or "backoff") when the exit must wait; restore undoes a reservation that
 // went unused.
 func (g *pageGate) take(exit string) (ok bool, why string, restore func()) {
 	noop := func() {}
-	if g.off() {
-		return true, "", noop
+	if g.off() || !g.gated(exit) {
+		return true, "", noop // not gated (a gateway, or direct)
+	}
+	if g.shared != nil && g.shared.up() {
+		ok, why, restore, err := g.shared.take(exit, g.cfg.Interval)
+		if err == nil {
+			return ok, why, restore
+		}
+		g.shared.failed(err)
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	e := g.exits[exit]
-	if e == nil {
-		return true, "", noop // not gated (a gateway, or direct)
-	}
 	now := g.now()
 	switch {
 	case now.Before(e.pausedUntil):
@@ -91,15 +106,19 @@ func (g *pageGate) take(exit string) (ok bool, why string, restore func()) {
 // ready reports whether exit may load a page now, without taking the
 // slot.
 func (g *pageGate) ready(exit string) bool {
-	if g.off() {
-		return true
+	if g.off() || !g.gated(exit) {
+		return true // not gated (a gateway, or direct)
+	}
+	if g.shared != nil && g.shared.up() {
+		ok, err := g.shared.ready(exit)
+		if err == nil {
+			return ok
+		}
+		g.shared.failed(err)
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	e := g.exits[exit]
-	if e == nil {
-		return true // not gated (a gateway, or direct)
-	}
 	now := g.now()
 	return !now.Before(e.pausedUntil) && !now.Before(e.next)
 }
@@ -108,15 +127,21 @@ func (g *pageGate) ready(exit string) bool {
 // the backoff (a pause already running keeps running); a failure pauses
 // the exit for the next, doubled, backoff.
 func (g *pageGate) observe(exit string, r pageResult) {
-	if g.off() {
+	if g.off() || !g.gated(exit) {
 		return
+	}
+	if g.shared != nil && g.shared.up() {
+		pause, err := g.shared.observe(exit, r == pageFailed, g.cfg.Backoff, g.cfg.MaxBackoff)
+		if err == nil {
+			if pause > 0 {
+				slog.Info("proxy: page loads paused on an exit", "exit", exit, "for", pause.String())
+			}
+			return
+		}
+		g.shared.failed(err)
 	}
 	g.mu.Lock()
 	e := g.exits[exit]
-	if e == nil {
-		g.mu.Unlock()
-		return
-	}
 	if r == pageLoaded {
 		e.backoff = 0
 		g.mu.Unlock()
@@ -135,6 +160,25 @@ func (g *pageGate) observe(exit string, r pageResult) {
 	if pause > 0 {
 		slog.Info("proxy: page loads paused on an exit", "exit", exit, "for", pause.String())
 	}
+}
+
+// mirror keeps the shared state Valkey returned for exit (SharePageGate)
+// in this process's own pacing, whichever wait ends later, for when Valkey
+// can't be reached: the pauses after walls then hold through the outage.
+func (g *pageGate) mirror(exit string, next, paused time.Time, backoff time.Duration) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	e := g.exits[exit]
+	if e == nil {
+		return
+	}
+	if next.After(e.next) {
+		e.next = next
+	}
+	if paused.After(e.pausedUntil) {
+		e.pausedUntil = paused
+	}
+	e.backoff = backoff
 }
 
 // ExitState is an exit's page-load pacing, kept across a restart so a new

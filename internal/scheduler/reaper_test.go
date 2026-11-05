@@ -44,3 +44,22 @@ func TestTopicLane(t *testing.T) {
 		}
 	}
 }
+
+// Which finished jobs were blocked and brought nothing back.
+func TestBlockedEmpty(t *testing.T) {
+	for name, c := range map[string]struct {
+		counters map[string]int64
+		want     bool
+	}{
+		"quiet":             {map[string]int64{"requests": 1}, false},
+		"no counters":       {nil, false},
+		"blocked, nothing":  {map[string]int64{"requests": 2, "blocked": 1}, true},
+		"blocked, posts":    {map[string]int64{"blocked": 1, "posts": 1}, false},
+		"blocked, comments": {map[string]int64{"blocked": 2, "comments": 1}, false},
+		"blocked, replies":  {map[string]int64{"blocked": 1, "replies": 3}, false},
+	} {
+		if got := blockedEmpty(c.counters); got != c.want {
+			t.Errorf("%s: blockedEmpty = %v, want %v", name, got, c.want)
+		}
+	}
+}
