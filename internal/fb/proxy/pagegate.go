@@ -75,7 +75,7 @@ func (g *pageGate) take(exit string) (ok bool, why string, restore func()) {
 	if g.off() || !g.gated(exit) {
 		return true, "", noop // not gated (a gateway, or direct)
 	}
-	if g.shared != nil {
+	if g.shared != nil && g.shared.up() {
 		ok, why, restore, err := g.shared.take(exit, g.cfg.Interval)
 		if err == nil {
 			return ok, why, restore
@@ -109,7 +109,7 @@ func (g *pageGate) ready(exit string) bool {
 	if g.off() || !g.gated(exit) {
 		return true // not gated (a gateway, or direct)
 	}
-	if g.shared != nil {
+	if g.shared != nil && g.shared.up() {
 		ok, err := g.shared.ready(exit)
 		if err == nil {
 			return ok
@@ -130,7 +130,7 @@ func (g *pageGate) observe(exit string, r pageResult) {
 	if g.off() || !g.gated(exit) {
 		return
 	}
-	if g.shared != nil {
+	if g.shared != nil && g.shared.up() {
 		pause, err := g.shared.observe(exit, r == pageFailed, g.cfg.Backoff, g.cfg.MaxBackoff)
 		if err == nil {
 			if pause > 0 {

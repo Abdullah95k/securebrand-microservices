@@ -20,19 +20,38 @@ const (
 	exit2 = "isp|isp.proxy.example:10002"
 )
 
+// valkey is a Valkey stand-in and the one clock it and the gates read.
+type valkey struct {
+	*miniredis.Miniredis
+	t time.Time
+}
+
+func (v *valkey) now() time.Time { return v.t }
+
+// SetTime moves the clock of Valkey and of the gates alike.
+func (v *valkey) SetTime(t time.Time) {
+	v.t = t
+	v.Miniredis.SetTime(t)
+}
+
 // sharedPools returns two pools (two crawler pods) sharing one Valkey, and
 // the Valkey, whose clock the gate reads.
-func sharedPools(t *testing.T) (a, b *Pool, mr *miniredis.Miniredis) {
+func sharedPools(t *testing.T) (a, b *Pool, mr *valkey) {
 	t.Helper()
-	mr = miniredis.RunT(t)
+	mr = &valkey{Miniredis: miniredis.RunT(t)}
 	mr.SetTime(time.Date(2026, 11, 6, 3, 0, 0, 0, time.UTC))
+	a, b = sharedPool(t, mr, "pilot."), sharedPool(t, mr, "pilot.")
+	return a, b, mr
+}
+
+func sharedPool(t *testing.T, mr *valkey, ns string) *Pool {
+	t.Helper()
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = rdb.Close() })
-	a, _ = gatedPool(t, pilotGate)
-	b, _ = gatedPool(t, pilotGate)
-	a.SharePageGate(rdb, "pilot.")
-	b.SharePageGate(rdb, "pilot.")
-	return a, b, mr
+	p, _ := gatedPool(t, pilotGate)
+	p.SharePageGate(rdb, ns)
+	p.pages.shared.now = mr.now
+	return p
 }
 
 func ep(exit string) Endpoint { return Endpoint{Tier: "isp", Exit: exit} }
@@ -143,7 +162,8 @@ func TestSharedGateRestore(t *testing.T) {
 	}
 }
 
-// Without Valkey each process paces on its own again, and counts it.
+// Without Valkey each process paces on its own again, and counts it; it
+// tries Valkey again after sharedRetry, not on every call.
 func TestSharedGateFallsBackWhenValkeyIsDown(t *testing.T) {
 	a, _, mr := sharedPools(t)
 	mr.Close()
@@ -154,8 +174,39 @@ func TestSharedGateFallsBackWhenValkeyIsDown(t *testing.T) {
 	if ok, why := a.PageLoad(ep(exit1)); ok || why != "paced" {
 		t.Fatalf("the process's own pacing is off without Valkey: %v %q", ok, why)
 	}
-	if gateErrors()-before < 2 {
-		t.Fatal("fallbacks not counted")
+	a.CanLoadPage(ep(exit2))
+	if n := gateErrors() - before; n != 1 {
+		t.Fatalf("%v failed calls, want 1: Valkey is skipped for a while after one", n)
+	}
+	mr.t = mr.t.Add(sharedRetry)
+	a.CanLoadPage(ep(exit2))
+	if n := gateErrors() - before; n != 2 {
+		t.Fatalf("%v failed calls, want 2: Valkey is tried again after sharedRetry", n)
+	}
+}
+
+// ready's answer per exit stands for readyFor (the session pool asks it
+// for each idle identity in turn), and a take or a wall forgets it.
+func TestSharedGateReadyIsRemembered(t *testing.T) {
+	a, b, mr := sharedPools(t)
+	if !a.CanLoadPage(ep(exit1)) {
+		t.Fatal("a fresh exit is not ready")
+	}
+	b.PageLoad(ep(exit1))
+	if !a.CanLoadPage(ep(exit1)) {
+		t.Fatal("the answer was not remembered")
+	}
+	mr.t = mr.t.Add(readyFor)
+	if a.CanLoadPage(ep(exit1)) {
+		t.Fatal("remembered beyond readyFor")
+	}
+	mr.SetTime(mr.t.Add(2 * time.Minute))
+	if !a.CanLoadPage(ep(exit2)) {
+		t.Fatal("exit2 not ready")
+	}
+	a.ObservePageLoad(ep(exit2), detect.LoginWall)
+	if a.CanLoadPage(ep(exit2)) {
+		t.Fatal("a wall did not forget the answer")
 	}
 }
 
@@ -163,25 +214,16 @@ func TestSharedGateFallsBackWhenValkeyIsDown(t *testing.T) {
 // pacing, and a gate turned off shares nothing.
 func TestSharedGateNamespaces(t *testing.T) {
 	a, _, mr := sharedPools(t)
-	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	defer func() { _ = rdb.Close() }()
-	other, _ := gatedPool(t, pilotGate)
-	other.SharePageGate(rdb, "staging.")
+	other := sharedPool(t, mr, "staging.")
 	a.PageLoad(ep(exit1))
 	if ok, _ := other.PageLoad(ep(exit1)); !ok {
 		t.Fatal("namespaces share pacing")
 	}
 	off, _ := gatedPool(t, config.PageLoads{})
-	off.SharePageGate(rdb, "pilot.")
+	off.SharePageGate(redis.NewClient(&redis.Options{Addr: mr.Addr()}), "pilot.")
 	if off.pages.shared != nil {
 		t.Fatal("a gate turned off was shared")
 	}
-}
-
-func gateErrors() float64 {
-	var m dto.Metric
-	_ = metrics.PageGateErrors.Write(&m)
-	return m.GetCounter().GetValue()
 }
 
 // The scripts on a real Valkey (FBS_TEST_REDIS_ADDR): its clock can't be
@@ -214,4 +256,10 @@ func TestSharedGateOnValkey(t *testing.T) {
 	if n := gateErrors() - before; n != 0 {
 		t.Fatalf("%v calls fell back", n)
 	}
+}
+
+func gateErrors() float64 {
+	var m dto.Metric
+	_ = metrics.PageGateErrors.Write(&m)
+	return m.GetCounter().GetValue()
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -25,7 +26,7 @@ func (p *Pool) SharePageGate(rdb *redis.Client, ns string) {
 	if rdb == nil || p.pages.off() {
 		return
 	}
-	p.pages.shared = &sharedGate{rdb: rdb, prefix: ns + "fbs:pagegate:"}
+	p.pages.shared = &sharedGate{rdb: rdb, prefix: ns + "fbs:pagegate:", now: time.Now, seen: map[string]readyAt{}}
 }
 
 // sharedGate keeps each exit's pacing in a Valkey hash: next (no page load
@@ -34,13 +35,35 @@ func (p *Pool) SharePageGate(rdb *redis.Client, ns string) {
 type sharedGate struct {
 	rdb    *redis.Client
 	prefix string
+	now    func() time.Time
 	warned atomic.Int64 // Unix seconds of the last fallback warning
+	// downUntil (Unix nanoseconds): after a failed call, every call skips
+	// Valkey until then, so an unreachable Valkey costs one timeout per
+	// sharedRetry rather than one per call.
+	downUntil atomic.Int64
+
+	mu sync.Mutex
+	// seen remembers ready's answer per exit for readyFor: the session pool
+	// asks it, holding its lock, for every idle identity in turn, and many
+	// share an exit. take and observe forget the exit's answer.
+	seen map[string]readyAt
+}
+
+type readyAt struct {
+	ok bool
+	at time.Time
 }
 
 const (
 	// sharedTimeout bounds one call: the gate is consulted while picking an
 	// exit, so a slow Valkey must not stall the crawl.
 	sharedTimeout = 300 * time.Millisecond
+	// sharedRetry is how long a process paces on its own after a failed
+	// call before it tries Valkey again.
+	sharedRetry = 5 * time.Second
+	// readyFor is how long ready's answer for an exit stands. It is advice:
+	// the page load itself takes the slot, and waits when it was wrong.
+	readyFor = 500 * time.Millisecond
 	// sharedTTL keeps an exit's state while it is in use: far longer than
 	// any interval or pause, so only an exit idle for a day forgets its
 	// backoff.
@@ -103,7 +126,17 @@ var errBadReply = errors.New("proxy: shared page-load gate: unexpected reply")
 
 func (s *sharedGate) key(exit string) string { return s.prefix + exit }
 
+// up reports whether to call Valkey: not within sharedRetry of a failure.
+func (s *sharedGate) up() bool { return s.now().UnixNano() >= s.downUntil.Load() }
+
+func (s *sharedGate) forget(exit string) {
+	s.mu.Lock()
+	delete(s.seen, exit)
+	s.mu.Unlock()
+}
+
 func (s *sharedGate) take(exit string, interval time.Duration) (ok bool, why string, restore func(), err error) {
+	s.forget(exit)
 	ctx, cancel := context.WithTimeout(context.Background(), sharedTimeout)
 	defer cancel()
 	res, err := takeScript.Run(ctx, s.rdb, []string{s.key(exit)}, interval.Milliseconds(), sharedTTL.Milliseconds()).Slice()
@@ -130,13 +163,27 @@ func (s *sharedGate) take(exit string, interval time.Duration) (ok bool, why str
 }
 
 func (s *sharedGate) ready(exit string) (bool, error) {
+	now := s.now()
+	s.mu.Lock()
+	r, ok := s.seen[exit]
+	s.mu.Unlock()
+	if ok && now.Sub(r.at) < readyFor {
+		return r.ok, nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), sharedTimeout)
 	defer cancel()
 	n, err := readyScript.Run(ctx, s.rdb, []string{s.key(exit)}).Int()
-	return n == 1, err
+	if err != nil {
+		return false, err
+	}
+	s.mu.Lock()
+	s.seen[exit] = readyAt{ok: n == 1, at: now}
+	s.mu.Unlock()
+	return n == 1, nil
 }
 
 func (s *sharedGate) observe(exit string, failed bool, backoff, maxBackoff time.Duration) (time.Duration, error) {
+	s.forget(exit)
 	ctx, cancel := context.WithTimeout(context.Background(), sharedTimeout)
 	defer cancel()
 	f := "0"
@@ -148,9 +195,10 @@ func (s *sharedGate) observe(exit string, failed bool, backoff, maxBackoff time.
 	return time.Duration(ms) * time.Millisecond, err
 }
 
-// failed counts a call that fell back to this process's own pacing, and
-// warns at most once a minute.
+// failed counts a call that fell back to this process's own pacing, skips
+// Valkey for sharedRetry, and warns at most once a minute.
 func (s *sharedGate) failed(err error) {
+	s.downUntil.Store(s.now().Add(sharedRetry).UnixNano())
 	metrics.PageGateErrors.Inc()
 	now := time.Now().Unix()
 	if last := s.warned.Load(); now-last >= 60 && s.warned.CompareAndSwap(last, now) {
