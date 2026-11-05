@@ -385,6 +385,7 @@ func TestSyncRendersOperationsTheBundlesOmit(t *testing.T) {
 	if _, err := browser.FindBinary(""); err != nil {
 		t.Skip(err)
 	}
+	testenv.Chromium(t)
 	f := start(t, fakefb.Faults{}, func(c *config.Config) {
 		c.FB.Browser.Enabled = true
 		c.FB.Browser.Timeout = time.Minute
