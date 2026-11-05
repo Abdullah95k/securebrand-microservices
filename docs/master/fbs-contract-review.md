@@ -2,7 +2,7 @@
 
 **For:** the master session (platform lead). **From:** the fbs session, 6 November 2026 (Iraq time).
 **Reviewed:** `Abdullah95k/securebrand-contracts` pull request #1, branch `claude/securebrand-platform-integration-4iiwlr` at `3a75c8b`: `README.md`, `proto/securebrand/**`, `docs/field-matrix.md` (the fb column), `samples/*.fb.json`, `registry/extras.yaml`, `registry/topics.yaml`.
-**Checked against:** fbs `main` at `4ac96d8`: protos `api/proto/securebrand/fb/v1`, parsers `internal/fb/parse`, emitter `internal/crawl/emit`, crawl stages, finalizer, mentions.
+**Checked against:** fbs `main` at `4ac96d8`, with the corrections in section 10 for `864ee9f` (PR #52): protos `api/proto/securebrand/fb/v1`, parsers `internal/fb/parse`, emitter `internal/crawl/emit`, crawl stages, finalizer, mentions.
 
 Examples are synthetic. Decisions are the owner's. This file reports, and changes no code.
 
@@ -57,14 +57,14 @@ The Kafka key is in brackets after each message name.
 | fbs field | Contract field | Verdict |
 |---|---|---|
 | `page_id` | `envelope.id` / `native_id` | agree |
-| page | `type = ACCOUNT_TYPE_PAGE` | agree |
+| `kind` (page / profile / unknown, since PR #52) | `type` = PAGE / PERSON / UNSPECIFIED | **change** (section 10): a registered account isn't always a page. Discovery adds people's public profiles too. |
 | `vanity` | `handle` | agree |
 | `name` | `display_name` | agree |
 | `url` | `url` | agree |
 | `intro` | `bio` (Text, no spans) | agree |
 | `contact["website"]` | `links[]`, source `LINK_SOURCE_WEBSITE_FIELD` | agree. Today only the first website is kept; all of them after fix E9. |
 | `contact["email"]`, `["phone"]`, `["address"]` | `contact.emails`, `phones`, `addresses` | agree |
-| `categories` | `categories` | agree |
+| `categories` | `categories` | agree. Rarely filled: section 10. |
 | `verified` | `verified` | agree |
 | (pages are public) | `is_private = false` | agree, as in the sample. A page is never private: that's known, not absent. |
 | `status` active / unavailable / restricted | `status.availability` VISIBLE / UNAVAILABLE / RESTRICTED | agree. `restricted` = logged-in viewers only, by age or country. |
@@ -224,7 +224,9 @@ One snapshot is published per profile read: daily, matching `crawler.profile_ref
 | Comment: flags.pinned, liked_by_creator | — | **N** | Not served logged out, or not seen. |
 | Provenance: exit_country | — | **A** | From the proxy tier's configured `country` (`fb.proxy.tiers[].country`) |
 | Provenance: raw_ref | failures only | failures only; **1% sample: X** | The D-004 sample is a change (section 5) |
-| Discovery: private second list | `private` | `private`, reasons `no_public_posts`, `timeline_hidden`, **`restricted`** | See question 8 |
+| Discovery: private second list | `private` | `private`, reasons `no_public_posts` and `timeline_hidden`; **`restricted` → DORMANT** | Owner's decision (section 9) |
+| Account: categories | **O** | **R** | PR #52 found that Facebook's logged-out pages no longer carry the category fields: none of the pilot's 150 pages had one. |
+| Account: type | page **A** | page, profile or unknown **A** | Since PR #52, `pages.kind`. A User-typed mention alone says unknown. |
 
 The rest of the fb column is correct.
 
@@ -250,7 +252,7 @@ The rest of the fb column is correct.
 6. **The media hand-off moves to `content.media.*`.** The downloader publishes `content.media.ready.v1`, and the janitor reads `content.media.processed.v1`, during migration alongside `fb.media.*`. About 1.5 days.
 7. **`perceptual_hash`.** Can't fill today; optional, about 1 day if wanted.
 8. **`video.live_status`, account `created_at`, `stated_country`, `platform_language`:** can't fill logged out. Left unset.
-9. **No caps in production (D-008) and the mention checker.** fbs's caps are `max_checks_per_day` (300) and `max_new_per_day` (50). Both can be set to 0 (none) by configuration, no code. But **every check is a page load, the request Facebook walls.** Without the check cap, checks compete with collection for page loads on the same IPs: on 3 Nov, walled page loads emptied the identity pool. The shared page-load gate still paces each IP, so it won't burst, but checks would take page loads from crawling. **For the owner and the master:** run checks on their own IP pool, or keep a share limit (for example, at most 20% of page loads), which is a pacing rule rather than a discovery cap.
+9. **No caps in production (D-008) and the mention checker.** fbs's caps are `max_checks_per_day` (300) and `max_new_per_day` (50). Both can be set to 0 (none) by configuration, no code. But **every check is a page load, the request Facebook walls.** Without the check cap, checks compete with collection for page loads on the same IPs: on 3 Nov, walled page loads emptied the identity pool. The shared page-load gate still paces each IP, so it won't burst, but checks would take page loads from crawling. **Decided by the owner (6 Nov), section 9:** no daily caps. Checks are paced by a share of page loads, and run on their own IP pool once one is bought.
 
 ## 6. Effort to adopt, updated
 
@@ -275,12 +277,12 @@ This replaces our earlier "1–2 weeks". The extra comes from the owner's decisi
    - **For dashboards:** label it "reactions" on Facebook, or a client reads "likes 1,200" and sees only 1,000 👍. That's a display note for the client app, not a contract change.
    - Types fbs reads: `like`, `love`, `haha`, `wow`, `sad`, `angry`, `care`.
 2. **Text and links.**
-   - **Right:** `text_ranges` → TextSpans with `OFFSET_UNIT_UTF16`. Entity `__typename` Page → MENTION with AccountRef type PAGE; User → MENTION with type PERSON; Hashtag → HASHTAG; external URLs → LINK.
+   - **Right:** `text_ranges` → TextSpans with `OFFSET_UNIT_UTF16`. Entity `__typename` Page → MENTION with AccountRef type PAGE; **User → MENTION with type UNSPECIFIED**, since a User can be a person or a new-style page (section 10); Hashtag → HASHTAG; external URLs → LINK.
    - The span's AccountRef gets `fb:account:<entity_id>` for pages and people alike.
    - **One correction:** `facebook_links` come only from **attachments** (facebook.com link attachments that aren't external links), so their source is always `LINK_SOURCE_ATTACHMENT`. Links in the text are LINK spans from `text_ranges`, and also become `links[]` with `LINK_SOURCE_TEXT`.
    - **Right:** link attachments → Links with source ATTACHMENT, `title`, `description`, `image_url`; the attachment's `source` (the shown domain) → `display_url` and `domain`.
 3. **Authors.**
-   - **Right:** `__typename` User → PERSON, Page → PAGE.
+   - **Corrected** (section 10): `__typename` Page → PAGE. **User → UNSPECIFIED**, not PERSON: Facebook types new-style pages as User too. PERSON only when the account's own page read says profile (`pages.kind`).
    - Other typenames, rare: Group → GROUP; anything else unspecified.
    - A comment with no author object → `Author.hidden = true`, with `account` unset.
 4. **Shares. Right:** `Reshare{type: SHARE, post_id: fb:post:<shared_post_id>, post_url, owner: AccountRef{id: fb:account:<shared_owner_id>, url, type from shared_owner_type}}`.
@@ -316,7 +318,7 @@ This replaces our earlier "1–2 weeks". The extra comes from the owner's decisi
      | **unchecked** (waiting, or retrying after failed checks) | PENDING |
      | **parked** (10 failed checks in a row, still unchecked) | **DORMANT**, reason `unreadable` |
 
-   - **Question:** fbs's `private` has three reasons: `no_public_posts` and `timeline_hidden`, which are private, and **`restricted`**. A restricted page names nothing twice: it's limited to logged-in viewers by age or country, or removed. It isn't really a private person. We suggest `restricted` → **DORMANT**, reason `restricted`, rather than SECOND_LIST, so the second list holds only private accounts. The owner decides.
+   - **Decided by the owner (6 Nov):** of fbs's `private` reasons, `no_public_posts` and `timeline_hidden` → **SECOND_LIST**, and **`restricted` → DORMANT, reason `restricted`**. A restricted page names nothing twice: it's limited to logged-in viewers by age or country, or removed. The second list holds only private accounts.
    - **Note on D-008:** see section 5, item 9. Without the check cap, checks take page loads from collection.
 9. **Extras.**
    - The five fb keys are **right and complete for what fbs emits**.
@@ -333,3 +335,29 @@ This replaces our earlier "1–2 weeks". The extra comes from the owner's decisi
   - In `comment.fb.deleted.json`, `status.since` is when the comment was first found missing, which is fbs's `deleted_at`. Right.
 - **`registry/topics.yaml`:** `content.metrics.v1` is keyed by **post ID** (a comment's post). fbs already keys `fb.comment.v1` by post. Agreed.
 - **`envelope.version` = `observed_at` µs:** agreed. Two pods reading the same post in the same microsecond are fine: the content hash tells whether anything changed.
+
+## 9. The owner's decisions (6 Nov 2026, Iraq time)
+
+The owner answered the two points this review raised: "yes for both".
+
+1. **Mention checks and page loads (D-008):**
+   - **No daily caps** in production: `max_checks_per_day` and `max_new_per_day` are 0 (none).
+   - Instead, **checks are paced by a share of page-load capacity**, at most about 20% of what the exits can load, so they can never starve collection.
+   - Checks move to **their own IP pool** once one is bought (separate Decodo ports for checks).
+
+   This is a pacing rule, not a discovery cap: every account found is still checked, only spread out. **fbs builds the share limit** as part of its pre-production work, about 1 day. Until then the mention checker stays off in the pilot.
+2. **Restricted pages:** fbs `private` with reason `restricted` → `OUTCOME_DORMANT`, reason `restricted`. Only `no_public_posts` and `timeline_hidden` go to the **second list** (`OUTCOME_SECOND_LIST`, scope PROFILE_ONLY).
+
+## 10. Corrections after fbs `main` moved (PR #52, `864ee9f`)
+
+PR #52 merged after this review was first written. It changes three answers above, already updated in place:
+
+1. **Account type.** fbs now reads what each registered account is (`pages.kind`):
+   - `page` when the page has something only a page has: a Page-typed node, a delegate page ID, a business page flag, a category, a "Page · …" intro, a page ID key, or an `fb://page/` app link;
+   - `profile` when the header says it has no page object;
+   - `unknown` otherwise.
+
+   Mapping: page → `ACCOUNT_TYPE_PAGE`, profile → `ACCOUNT_TYPE_PERSON`, unknown → `ACCOUNT_TYPE_UNSPECIFIED`. Discovery adds people's public profiles, so `fb:account:…` isn't always a page.
+2. **`__typename` User isn't a person.** Facebook types new-style pages as User too. Authors and mentions typed User map to `ACCOUNT_TYPE_UNSPECIFIED`; only Page tells. An account's own page read (above) settles it later.
+3. **Categories are rare.** None of the pilot's 150 pages carried the category fields logged out, so the fb mark for `categories` is **R**, not O.
+
