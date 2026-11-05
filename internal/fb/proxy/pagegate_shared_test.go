@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -66,7 +67,7 @@ func TestSharedGatePacesAcrossPods(t *testing.T) {
 	if e, err := a.Next("isp"); err != nil || e.Exit != exit2 {
 		t.Fatalf("Next: %v %q, want the exit not paced", err, e.Exit)
 	}
-	if _, err := b.Next("isp"); err != ErrExitsPaced {
+	if _, err := b.Next("isp"); !errors.Is(err, ErrExitsPaced) {
 		t.Fatalf("Next with both exits paced: %v", err)
 	}
 }
