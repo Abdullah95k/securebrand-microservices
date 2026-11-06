@@ -115,7 +115,8 @@ keda:
   authParams: [sasl, username, password]
 
 # Hooks run `fbctl migrate up`, `fbctl kafka apply` and, when enabled,
-# `fbctl schemas apply` before installs and upgrades.
+# `fbctl schemas apply` before installs and upgrades, and `fbctl pages
+# seed` after them.
 hooks:
   migrate: true
   topics: true
@@ -124,6 +125,10 @@ hooks:
   # config.kafka.schema_registry.url (BACKWARD_TRANSITIVE). An incompatible
   # contract change fails the hook, and with it the upgrade.
   schemas: false
+  # After each install and upgrade, `fbctl pages seed` registers
+  # config.pages.seed: pages already scheduled are left as they are; each
+  # new one is backfilled (config.pages.seed_backfill).
+  seedPages: false
 
 api:
   service:

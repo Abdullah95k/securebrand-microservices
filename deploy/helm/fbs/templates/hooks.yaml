@@ -1,8 +1,12 @@
 {{- $root := . -}}
 {{- $jobs := list -}}
-{{- if .Values.hooks.migrate }}{{ $jobs = append $jobs (dict "name" "migrate" "args" (list "migrate" "up")) }}{{ end -}}
-{{- if .Values.hooks.topics }}{{ $jobs = append $jobs (dict "name" "topics" "args" (list "kafka" "apply" "--replicas" (toString .Values.hooks.topicReplicas))) }}{{ end -}}
-{{- if .Values.hooks.schemas }}{{ $jobs = append $jobs (dict "name" "schemas" "args" (list "schemas" "apply")) }}{{ end -}}
+{{- $pre := dict "hook" "pre-install,pre-upgrade" "weight" "-5" -}}
+{{- $post := dict "hook" "post-install,post-upgrade" "weight" "5" -}}
+{{- if .Values.hooks.migrate }}{{ $jobs = append $jobs (merge (dict "name" "migrate" "args" (list "migrate" "up")) $pre) }}{{ end -}}
+{{- if .Values.hooks.topics }}{{ $jobs = append $jobs (merge (dict "name" "topics" "args" (list "kafka" "apply" "--replicas" (toString .Values.hooks.topicReplicas))) $pre) }}{{ end -}}
+{{- if .Values.hooks.schemas }}{{ $jobs = append $jobs (merge (dict "name" "schemas" "args" (list "schemas" "apply")) $pre) }}{{ end -}}
+{{- /* After the release is up: registers config.pages.seed. */ -}}
+{{- if .Values.hooks.seedPages }}{{ $jobs = append $jobs (merge (dict "name" "seed-pages" "args" (list "pages" "seed")) $post) }}{{ end -}}
 {{- range $jobs }}
 ---
 apiVersion: batch/v1
@@ -11,8 +15,8 @@ metadata:
   name: {{ include "fbs.fullname" $root }}-{{ .name }}
   labels: {{- include "fbs.labels" $root | nindent 4 }}
   annotations:
-    helm.sh/hook: pre-install,pre-upgrade
-    helm.sh/hook-weight: "-5"
+    helm.sh/hook: {{ .hook }}
+    helm.sh/hook-weight: {{ .weight | quote }}
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 spec:
   backoffLimit: 3

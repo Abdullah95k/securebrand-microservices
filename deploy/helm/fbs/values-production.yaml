@@ -52,19 +52,180 @@ config:
     proxy:
       routing:
         default: [isp]
-  # The owner's canary pages (at least three public pages that post daily
-  # and get reply threads) can also come in the proxies Secret, as
-  # registry_sync.canary_pages: until there are some, fbs-registry-sync
-  # can't follow doc_id rotations and FbsRegistrySyncNotRunning fires.
+  # fbs-registry-sync finds the real query ids on these public pages, which
+  # post daily and get reply threads, and follows them when they rotate. A
+  # new database starts with placeholder ids: without canary pages nothing
+  # is collected. The pilot's canaries, the first three pages below.
   registry_sync:
-    canary_pages: []
+    canary_pages:
+      - "https://www.facebook.com/Baghdadtodayiq"
+      - "https://www.facebook.com/964Arabic"
+      - "https://www.facebook.com/samarratv1"
+  # The owner's list (Phase 0's, 150 public pages), registered by the hook
+  # hooks.seedPages after every deploy: pages already scheduled are left as
+  # they are, each new one is backfilled. More pages come through the API
+  # and discovery.
+  pages:
+    seed:
+      - "https://www.facebook.com/Baghdadtodayiq"  # news
+      - "https://www.facebook.com/964Arabic"  # news
+      - "https://www.facebook.com/samarratv1"  # news
+      - "https://www.facebook.com/onenewsiq"  # news
+      - "https://www.facebook.com/alawla.tv1"  # news
+      - "https://www.facebook.com/profile.php?id=100076173813866"  # exchange
+      - "https://www.facebook.com/profile.php?id=100018442013011"  # exchange
+      - "https://www.facebook.com/araktt"  # exchange
+      - "https://www.facebook.com/profile.php?id=100072249354822"  # exchange
+      - "https://www.facebook.com/dollaraliraq"  # exchange
+      - "https://www.facebook.com/2028ha"  # exchange
+      - "https://www.facebook.com/kukh.alomlat"  # exchange
+      - "https://www.facebook.com/profile.php?id=100067980911673"  # exchange
+      - "https://www.facebook.com/profile.php?id=100089334207809"  # exchange
+      - "https://www.facebook.com/profile.php?id=100094758022997"  # exchange
+      - "https://www.facebook.com/profile.php?id=100063578236680"  # exchange
+      - "https://www.facebook.com/profile.php?id=100089607937269"  # exchange
+      - "https://www.facebook.com/alaiqtisad.aleiraqi"  # exchange
+      - "https://www.facebook.com/alsawacompany"  # exchange
+      - "https://www.facebook.com/profile.php?id=61593953519936"  # exchange
+      - "https://www.facebook.com/gold2today"  # exchange
+      - "https://www.facebook.com/MANSSAIQ"  # exchange
+      - "https://www.facebook.com/nabdaldinar"  # exchange
+      - "https://www.facebook.com/profile.php?id=61580385107240"  # exchange
+      - "https://www.facebook.com/profile.php?id=61572338020168"  # exchange
+      - "https://www.facebook.com/USDVSIQD"  # exchange
+      - "https://www.facebook.com/profile.php?id=100064020370415"  # exchange
+      - "https://www.facebook.com/profile.php?id=100063473349973"  # exchange
+      - "https://www.facebook.com/Dollar.For.Import.eg"  # exchange
+      - "https://www.facebook.com/towtor1"  # exchange
+      - "https://www.facebook.com/profile.php?id=61590145492771"  # exchange
+      - "https://www.facebook.com/profile.php?id=61591602773981"  # exchange
+      - "https://www.facebook.com/profile.php?id=100083300894346"  # government
+      - "https://www.facebook.com/iraqicp"  # government
+      - "https://www.facebook.com/profile.php?id=61572842733811"  # government
+      - "https://www.facebook.com/amirkamel57"  # government
+      - "https://www.facebook.com/IraqiPMO"  # government
+      - "https://www.facebook.com/bdalhmzhmnmalkhfajy.2025"  # government
+      - "https://www.facebook.com/Hameedoip"  # government
+      - "https://www.facebook.com/ishraka.krb.info"  # government
+      - "https://www.facebook.com/parliament.iq"  # government
+      - "https://www.facebook.com/drmuqdadiq"  # government
+      - "https://www.facebook.com/profile.php?id=61587355110863"  # government
+      - "https://www.facebook.com/profile.php?id=100092019582627"  # government
+      - "https://www.facebook.com/aldewanaiih"  # government
+      - "https://www.facebook.com/HealthSniper"  # government
+      - "https://www.facebook.com/iraqnews2026"  # government
+      - "https://www.facebook.com/profile.php?id=100064056612417"  # government
+      - "https://www.facebook.com/iraqe.iiq"  # government
+      - "https://www.facebook.com/profile.php?id=61555398676791"  # business
+      - "https://www.facebook.com/org.oid"  # business
+      - "https://www.facebook.com/waffir.iq"  # business
+      - "https://www.facebook.com/albaseerfinancial"  # business
+      - "https://www.facebook.com/skywtour"  # business
+      - "https://www.facebook.com/profile.php?id=61580223144128"  # business
+      - "https://www.facebook.com/content.iqq"  # entertainment
+      - "https://www.facebook.com/Alljokesiq"  # entertainment
+      - "https://www.facebook.com/swalf.mslaweya"  # entertainment
+      - "https://www.facebook.com/ArbilLifeArabic"  # entertainment
+      - "https://www.facebook.com/trende24"  # entertainment
+      - "https://www.facebook.com/butiktajmil"  # entertainment
+      - "https://www.facebook.com/Iraqtrend22"  # entertainment
+      - "https://www.facebook.com/profile.php?id=100091069907193"  # entertainment
+      - "https://www.facebook.com/alrased.news24"  # news
+      - "https://www.facebook.com/profile.php?id=61594597241605"  # news
+      - "https://www.facebook.com/profile.php?id=100057451749312"  # news
+      - "https://www.facebook.com/marsad.iraqi"  # news
+      - "https://www.facebook.com/bgw24news"  # news
+      - "https://www.facebook.com/profile.php?id=61573567748562"  # news
+      - "https://www.facebook.com/Jareda.iq"  # news
+      - "https://www.facebook.com/Basmaya2020"  # news
+      - "https://www.facebook.com/titlenewsiq"  # news
+      - "https://www.facebook.com/profile.php?id=61587095835693"  # news
+      - "https://www.facebook.com/profile.php?id=61554918222881"  # news
+      - "https://www.facebook.com/ausatnews"  # news
+      - "https://www.facebook.com/altaghiertv"  # news
+      - "https://www.facebook.com/baghdadnetworktoday"  # news
+      - "https://www.facebook.com/profile.php?id=100069244656206"  # news
+      - "https://www.facebook.com/08Azd"  # news
+      - "https://www.facebook.com/ajel.dz"  # news
+      - "https://www.facebook.com/sliek.area3"  # news
+      - "https://www.facebook.com/profile.php?id=61583994177966"  # news
+      - "https://www.facebook.com/INAwebsite"  # news
+      - "https://www.facebook.com/wtvhdbasra"  # news
+      - "https://www.facebook.com/alnahrainnews.iq"  # news
+      - "https://www.facebook.com/profile.php?id=100088087579538"  # news
+      - "https://www.facebook.com/profile.php?id=100067892480687"  # news
+      - "https://www.facebook.com/samarra.tvv"  # news
+      - "https://www.facebook.com/reyad.albazoni"  # news
+      - "https://www.facebook.com/profile.php?id=61582039136190"  # news
+      - "https://www.facebook.com/Maslawya.News"  # news
+      - "https://www.facebook.com/ssttredghjhdddhhhgfdsiiuyrewwbbnkkoitr"  # news
+      - "https://www.facebook.com/onefm1"  # news
+      - "https://www.facebook.com/2Sail.news"  # news
+      - "https://www.facebook.com/knhnewss"  # news
+      - "https://www.facebook.com/non14news"  # news
+      - "https://www.facebook.com/makmornewz"  # news
+      - "https://www.facebook.com/profile.php?id=100080228456737"  # news
+      - "https://www.facebook.com/iraqalhadath.et"  # news
+      - "https://www.facebook.com/DiyalaMN"  # news
+      - "https://www.facebook.com/wkalaalsharqnews"  # news
+      - "https://www.facebook.com/rafidainnews"  # news
+      - "https://www.facebook.com/altaleea.tv"  # news
+      - "https://www.facebook.com/alnahrainchannel"  # news
+      - "https://www.facebook.com/BasraTV"  # news
+      - "https://www.facebook.com/symbolism2"  # news
+      - "https://www.facebook.com/Iraqww23"  # news
+      - "https://www.facebook.com/iraqi.Exchange"  # news
+      - "https://www.facebook.com/kirkukevery"  # news
+      - "https://www.facebook.com/FallujahTV"  # news
+      - "https://www.facebook.com/profile.php?id=61551934321813"  # news
+      - "https://www.facebook.com/Baghdad9000"  # news
+      - "https://www.facebook.com/kerkuk.now1"  # news
+      - "https://www.facebook.com/3raqiiq"  # news
+      - "https://www.facebook.com/miliqnews"  # news
+      - "https://www.facebook.com/yallaiq"  # news
+      - "https://www.facebook.com/alsumariatv"  # news
+      - "https://www.facebook.com/alrabiaatv"  # news
+      - "https://www.facebook.com/Baghdad.Plus.News"  # community
+      - "https://www.facebook.com/profile.php?id=100092673464617"  # community
+      - "https://www.facebook.com/baghdadopening"  # community
+      - "https://www.facebook.com/aleiraqayn"  # community
+      - "https://www.facebook.com/techiraq"  # community
+      - "https://www.facebook.com/Nabozbaghdad"  # community
+      - "https://www.facebook.com/profile.php?id=61553583546841"  # community
+      - "https://www.facebook.com/profile.php?id=100064687060408"  # community
+      - "https://www.facebook.com/Multaqa.Ahl.ALfallujah"  # community
+      - "https://www.facebook.com/profile.php?id=100064837385612"  # community
+      - "https://www.facebook.com/AliraqNet.Net"  # community
+      - "https://www.facebook.com/profile.php?id=100071820168838"  # community
+      - "https://www.facebook.com/IRAQI.expatriate"  # community
+      - "https://www.facebook.com/Thiqari"  # community
+      - "https://www.facebook.com/AlArabiya.Iraq"  # community
+      - "https://www.facebook.com/AJA.Iraq"  # community
+      - "https://www.facebook.com/eyurupyd"  # community
+      - "https://www.facebook.com/aniraq2"  # community
+      - "https://www.facebook.com/profile.php?id=100086924902452"  # community
+      - "https://www.facebook.com/RoyaIraq"  # community
+      - "https://www.facebook.com/BaghdadMediaPage"  # community
+      - "https://www.facebook.com/Zuqaq.Plus"  # community
+      - "https://www.facebook.com/MAOSUAT.BAGHDAD"  # community
+      - "https://www.facebook.com/profile.php?id=61552652430931"  # community
+      - "https://www.facebook.com/USAiraqiss"  # community
+      - "https://www.facebook.com/baghdad7city"  # community
+      - "https://www.facebook.com/BabAltoob"  # community
+      - "https://www.facebook.com/zagrosnews.net"  # community
+      - "https://www.facebook.com/Xiraq24"  # community
+      - "https://www.facebook.com/mnkirkukcity"  # community
+      - "https://www.facebook.com/streets.alkarkh"  # community
+      - "https://www.facebook.com/herosishere"  # community
 
 # The platform creates the topics; fb.v1 schemas are not registered in the
-# shared Schema Registry. Migrations run as before.
+# shared Schema Registry. Migrations run before each deploy, and the page
+# list is registered after it.
 hooks:
   migrate: true
   topics: false
   schemas: false
+  seedPages: true
 
 # No KEDA on the platform cluster: fixed replicas, sized for the first
 # collection (a few hundred pages through about ten ISP exits, where the

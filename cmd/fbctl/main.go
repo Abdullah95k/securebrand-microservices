@@ -47,6 +47,7 @@ commands:
   fixtures scrub --dir DIR
   media ack --consumer NAME [--status processed|failed_permanent|failed_retryable] [--max N]
   pages import --api URL --key KEY [--interval-hours N] [--rps 5] [--backfill=false] FILE
+  pages seed [--wait 25m]   (registers the config's pages.seed; already scheduled pages are left alone)
   discovery keywords seed | discovery keywords import --file F | discovery keywords list [--language L] [--group G]`)
 	os.Exit(2)
 }
@@ -100,6 +101,8 @@ func main() {
 		err = mediaAck(ctx, cfg, rest)
 	case "discovery keywords":
 		err = discoveryKeywords(ctx, cfg, rest)
+	case "pages seed":
+		err = pagesSeed(ctx, cfg, rest)
 	case "pages import":
 		// Long imports outlive the 30-minute command timeout; Ctrl-C stops them.
 		ictx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

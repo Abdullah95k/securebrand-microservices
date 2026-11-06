@@ -45,9 +45,21 @@ type Config struct {
 	Mentions Mentions `koanf:"mentions"`
 	// Platform: the shared production platform's conventions.
 	Platform Platform `koanf:"platform"`
+	Pages    Pages    `koanf:"pages"`
 }
 
 // Platform holds what the SecureBrand platform provides.
+// Pages are pages registered from configuration (`fbctl pages seed`, run
+// by the Helm hook hooks.seedPages), besides those clients register.
+type Pages struct {
+	// Seed lists page references (URLs, vanity names, ids). A page already
+	// scheduled is left as it is.
+	Seed []string `koanf:"seed"`
+	// SeedBackfill backfills each page a seed adds, as a registration does;
+	// off, the planner crawls it right away instead.
+	SeedBackfill bool `koanf:"seed_backfill"`
+}
+
 type Platform struct {
 	// CredentialsDir is where the platform's credentials secret is mounted,
 	// one file per key (POSTGRES_*, KAFKA_*, VALKEY_*, S3_*, *_CA_CERT as

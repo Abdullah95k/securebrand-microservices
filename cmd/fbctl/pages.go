@@ -15,6 +15,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/abdullah95k/securebrand-microservices/internal/app"
+	"github.com/abdullah95k/securebrand-microservices/internal/config"
+	"github.com/abdullah95k/securebrand-microservices/internal/crawl/jobs"
+	"github.com/abdullah95k/securebrand-microservices/internal/crawl/task"
+	"github.com/abdullah95k/securebrand-microservices/internal/dispatch"
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/registry"
+	"github.com/abdullah95k/securebrand-microservices/internal/platform/kafka"
+	"github.com/abdullah95k/securebrand-microservices/internal/platform/pg"
 	"github.com/abdullah95k/securebrand-microservices/internal/spike"
 )
 
@@ -138,5 +146,92 @@ func (im importer) register(ctx context.Context, body map[string]any) (created b
 			}
 		}
 		backoff *= 2
+	}
+}
+
+// pagesSeed registers the pages of the config's pages.seed, without the API
+// or a client: the Helm hook hooks.seedPages runs it on every install and
+// upgrade. A page already scheduled is left as it is, and only the pages it
+// adds are backfilled (pages.seed_backfill), so it runs any number of times.
+// Page references that aren't valid fail it, after the valid ones are in.
+//
+// Against real Facebook it first waits (--wait) until every query has a
+// real doc_id: on a new database fbs-registry-sync discovers them on the
+// canary pages within minutes of starting, and until then every request
+// would fail.
+func pagesSeed(ctx context.Context, cfg *config.Config, args []string) error {
+	fs := flag.NewFlagSet("pages seed", flag.ContinueOnError)
+	wait := fs.Duration("wait", 25*time.Minute, "how long to wait for real doc_ids (real Facebook only)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if len(cfg.Pages.Seed) == 0 {
+		printJSON(dispatch.SeedResult{})
+		return nil
+	}
+	db, err := pg.Open(ctx, cfg.Postgres.DSN, 4)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	if spike.IsFacebook(cfg.FB.BaseURL) {
+		list := func(ctx context.Context) ([]registry.Query, error) { return registry.List(ctx, db) }
+		if err := waitRegistryReady(ctx, list, 15*time.Second, *wait); err != nil {
+			return err
+		}
+	}
+	rdb, err := app.OpenRedis(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rdb.Close() }()
+	kcfg, err := app.KafkaClient(cfg, "-fbctl")
+	if err != nil {
+		return err
+	}
+	producer, err := kafka.NewProducer(kcfg)
+	if err != nil {
+		return err
+	}
+	defer producer.Close()
+	d := &dispatch.Dispatcher{DB: db, Jobs: jobs.New(rdb), Producer: producer, BaseURL: cfg.FB.BaseURL}
+	opts := dispatch.SeedOptions{Interval: cfg.Scheduler.DefaultInterval}
+	if cfg.Pages.SeedBackfill {
+		opts.Backfill = task.DefaultLimits(cfg.Limits, true)
+	}
+	res, err := d.Seed(ctx, cfg.Pages.Seed, opts)
+	printJSON(res)
+	if err != nil {
+		return err
+	}
+	if len(res.Invalid) > 0 {
+		return fmt.Errorf("pages.seed: %d entries aren't page references: %q", len(res.Invalid), res.Invalid)
+	}
+	return nil
+}
+
+// waitRegistryReady polls the registry until every query has an active,
+// real doc_id, or gives up after timeout naming the queries still missing.
+func waitRegistryReady(ctx context.Context, list func(context.Context) ([]registry.Query, error), every, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		qs, err := list(ctx)
+		if err != nil {
+			return err
+		}
+		missing := registry.NotReady(qs)
+		if len(missing) == 0 {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("after %s the registry still has no real doc_id for %v: check fbs-registry-sync's runs "+
+				"(GET /v1/admin/registry-sync/runs) and registry_sync.canary_pages; the pages are seeded on the next deploy", timeout, missing)
+		}
+		slog.Info("pages seed: waiting for real doc_ids from fbs-registry-sync", "queries", missing)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(every):
+		}
 	}
 }

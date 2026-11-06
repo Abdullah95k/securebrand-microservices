@@ -125,6 +125,29 @@ func PlaceholderQueries(s Seed) []string {
 	return out
 }
 
+// NotReady returns the queries without an active entry that real Facebook
+// would accept: no active entry, or one still carrying a seed placeholder
+// (a new database, before fbs-registry-sync's first discovery).
+func NotReady(qs []Query) []string {
+	ready := map[string]bool{}
+	for _, q := range qs {
+		if _, seen := ready[q.Name]; !seen {
+			ready[q.Name] = false
+		}
+		if q.Status == "active" && !IsPlaceholderDocID(q.DocID) {
+			ready[q.Name] = true
+		}
+	}
+	var out []string
+	for name, ok := range ready {
+		if !ok {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // MarshalSeed renders s in the seed YAML format read by ParseSeed.
 func MarshalSeed(s Seed) ([]byte, error) {
 	var y seedYAML

@@ -194,6 +194,8 @@ def main():
     docs = render(args)
     configmaps = {d["metadata"]["name"]: d.get("data") or {} for d in docs if d["kind"] == "ConfigMap"}
     hooks = [d for d in docs if d["kind"] == "Job"]
+    post_hooks = [j for j in hooks if "post-" in j["metadata"].get("annotations", {}).get("helm.sh/hook", "")]
+    pre_hooks = [j for j in hooks if j not in post_hooks]
     deployments = [d for d in docs if d["kind"] == "Deployment"]
     print(f"rendered: {len(deployments)} deployments, {len(hooks)} hook jobs, configmaps {sorted(configmaps)}")
     pods = [d["spec"]["template"]["spec"] for d in hooks + deployments]
@@ -201,9 +203,10 @@ def main():
     uses_secret_env = any(c.get("envFrom") for p in pods for c in p["containers"])
     config = yaml.safe_load(configmaps["fbs-config"]["config.yaml"])
     media_prefix = (config.get("s3") or {}).get("media_prefix") or ""
+    seeded = [p.lower() for p in (config.get("pages") or {}).get("seed") or []] if post_hooks else []
     # Without the chart's topics hook the platform makes the topics: so does
     # this script, and fbs must not add any.
-    platform_topics = not any(j["metadata"]["name"].endswith("-topics") for j in hooks)
+    platform_topics = not any(j["metadata"]["name"].endswith("-topics") for j in pre_hooks)
     if platform_topics:
         with open("configs/topics.yaml") as f:
             names = [TOPIC_PREFIX + t["name"] for t in yaml.safe_load(f)["topics"]]
@@ -249,8 +252,7 @@ def main():
 
     failures = []
     try:
-        # Hooks (pre-install), in order, each must exit 0.
-        for job in sorted(hooks, key=lambda j: j["metadata"]["name"].endswith("-topics")):
+        def run_hook(job):
             name = job["metadata"]["name"]
             pod = job["spec"]["template"]["spec"]
             a = docker_args(name, name, pod, pod["containers"][0], configmaps, secret_dirs, secret_env, args.network)
@@ -261,6 +263,10 @@ def main():
             print(f"hook {name}: exit {code}")
             if code != "0":
                 raise SystemExit(f"hook {name} failed:\n{logs[-3000:]}")
+
+        # Pre-install hooks, in order, each must exit 0.
+        for job in sorted(pre_hooks, key=lambda j: j["metadata"]["name"].endswith("-topics")):
+            run_hook(job)
 
         for d in deployments:
             name = d["metadata"]["name"]
@@ -278,6 +284,9 @@ def main():
         if pending:
             raise SystemExit(f"not ready after 120s: {sorted(pending)}")
         print(f"all {len(deployments)} deployments ready")
+        # Post-install hooks, once the release is up (the page seed).
+        for job in post_hooks:
+            run_hook(job)
 
         # An API key, as the go-live runbook creates it.
         out = sh("docker", "exec", PREFIX + "fbs-api", "/usr/local/bin/fbctl", "apikey", "create", "--name", "smoke",
@@ -292,8 +301,10 @@ def main():
                  "--api", "http://fbs-api:8080", "--key", key, "/pages.csv").stdout
         imported = json.loads(out[out.index("{"):])
         print(f"pages import: {imported}")
-        if imported.get("created") != len(PAGES):
-            failures.append(f"pages import created {imported.get('created')}, want {len(PAGES)}")
+        # The pages the seed hook registered are there already.
+        want = len([p for p in PAGES if p not in seeded])
+        if imported.get("created") != want or imported.get("existing", 0) != len(PAGES) - want:
+            failures.append(f"pages import: {imported}, want {want} created, {len(PAGES) - want} there already")
         # Importing again changes nothing.
         out = sh("docker", "run", "--rm", "--network", args.network, "-v", f"{pages_file}:/pages.csv:ro",
                  "--entrypoint", "/usr/local/bin/fbctl", args.image, "pages", "import",
