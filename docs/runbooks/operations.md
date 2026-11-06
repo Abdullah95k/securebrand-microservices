@@ -52,7 +52,7 @@ What to check:
 2. `fbs_breaker_state{name=~"proxy:.*"}` and `fbs_fb_requests_total` by tier. If one provider or tier is affected, change `fb.proxy.routing` to prefer another.
 3. `fbs_identity_retired_total` by reason.
 4. If login walls appear at the same depth everywhere, it is coverage, not blocking: jobs report `timelines_truncated` / `posts_truncated`.
-5. `fbs_identity_active` falling toward 1 while `fbs_proxy_page_loads_deferred_total{reason="backoff"}` climbs: exits back off after walled page loads faster than they replace retired identities, and the crawler works on what is left. If `max_requests` leads `fbs_identity_retired_total`, raise `fb.identity_max_requests_min/max` (fewer page loads); if `login_wall` or `blocked` lead, add exits or lower the load. Don't shorten `fb.proxy.page_loads` to get identities back: more page loads bring more walls.
+5. `fbs_identity_active` falling toward 1 while `fbs_proxy_page_loads_deferred_total{reason="backoff"}` climbs (alerts `FbsIdentityPoolLow` and `FbsIdentityPoolCritical`; see "Identity pool low"): exits back off after walled page loads faster than they replace retired identities, and the crawler works on what is left. If `max_requests` leads `fbs_identity_retired_total`, raise `fb.identity_max_requests_min/max` (fewer page loads); if `login_wall` or `blocked` lead, add exits or lower the load. Don't shorten `fb.proxy.page_loads` to get identities back: more page loads bring more walls.
 
 To pin the ceiling by hand, for example during an incident, set the key the crawlers read (they pick it up within 5s):
 
@@ -63,6 +63,30 @@ redis-cli SET "${KAFKA_TOPIC_PREFIX}aimd:global_rps" 20
 AIMD keeps adjusting from that value. To stop it, set `fb.aimd.enabled: false`. Crawlers then use the fixed `fb.global_rps`.
 
 Adding pods never adds load: every pod paces against the same fleet ceiling.
+
+## Identity pool low
+
+`FbsIdentityPoolLow` (under half the pool's peak of the last 6 hours, for 15 minutes) and `FbsIdentityPoolCritical` (a fifth of it or less, with crawl tasks waiting, for 10 minutes): identities retire faster than they are replaced. A new identity starts with a page load, and an exit loads one page per `fb.proxy.page_loads.interval` and none during a backoff after a wall, so when many exits back off at once the crawlers are left with few identities and the work slows to what they can do.
+
+What to check:
+
+1. `fbs_identity_retired_total` by reason:
+   - `max_requests` leading: identities live too short; raise `fb.identity_max_requests_min/max` (fewer page loads per request).
+   - `login_wall` or `blocked` leading: the exits are walled; see "Block storm". Lower the load (the AIMD ceiling, `fb.identity_rps`) or add exits.
+   - `transport`: the proxy provider is failing; check its status and the exits' breakers (`fbs_breaker_state{name=~"proxy:.*"}`).
+2. `fbs_proxy_page_loads_deferred_total{reason="backoff"}` rising: exits pausing after walled page loads.
+3. Don't shorten `fb.proxy.page_loads` to get identities back: more page loads bring more walls.
+
+The pool recovers by itself as backoffs end; the alerts clear once it is back above half (or a fifth) of its peak.
+
+## No new comments
+
+`FbsNoNewComments`: the crawlers ran tasks for 30 minutes, and not one comment (new, or a new version of one) was stored. Across a full page list some comments arrive every few minutes, so this means the data stopped, not the pages:
+
+1. `fbs:parse_drift_ratio:rate15m{query=~"comments.*"}` and `FbsSchemaDrift`: the parser no longer reads the responses (see "Schema drift").
+2. `fbs_fb_requests_total{query=~"comments.*"}` by class: `registry_stale` (the doc_id rotated: see "Registry stale"), blocks (see "Block storm").
+3. The persister: `FbsPersisterLag`, its logs, and `fbs_persist_rows_total{entity="comment"}` by `op` (`rejected` rising means records it can't write).
+4. `fbs_identity_active` (see "Identity pool low"): with almost no identities, only page profiles may be read.
 
 ## Registry stale (doc_id rotated)
 

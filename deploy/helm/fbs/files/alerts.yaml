@@ -73,6 +73,52 @@ groups:
             A quarter of responses are blocks even with AIMD backing off.
             Consider pinning the ceiling low and moving routing to another tier.
           runbook_url: https://github.com/abdullah95k/securebrand-microservices/blob/main/docs/runbooks/operations.md#block-storm-block-rate--10
+      - alert: FbsIdentityPoolLow
+        # Against the pool's own peak of the last 6 hours: its size follows
+        # the exits and the load, so no fixed number fits every fleet.
+        expr: |
+          sum(fbs_identity_active) < 0.5 * max_over_time(sum(fbs_identity_active)[6h:5m])
+            and on () max_over_time(sum(fbs_identity_active)[6h:5m]) >= 4
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $value }} live identities, under half the pool's peak of the last 6 hours"
+          description: >-
+            Identities retire faster than walled exits can load pages for
+            new ones (each exit loads one page per interval, none during a
+            backoff), and the crawlers work on what is left. Check
+            fbs_identity_retired_total by reason and
+            fbs_proxy_page_loads_deferred_total{reason="backoff"}.
+          runbook_url: https://github.com/abdullah95k/securebrand-microservices/blob/main/docs/runbooks/operations.md#identity-pool-low
+      - alert: FbsIdentityPoolCritical
+        expr: |
+          sum(fbs_identity_active) <= 0.2 * max_over_time(sum(fbs_identity_active)[6h:5m])
+            and on () max_over_time(sum(fbs_identity_active)[6h:5m]) >= 4
+            and on () sum(fbs:leader:kafka_consumer_lag{group=~"fbs-crawler-.*"}) > 0
+        for: 10m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $value }} live identities left, a fifth of the pool's peak, with crawl tasks waiting"
+          description: >-
+            Almost every exit is backing off after walled page loads, or
+            retired: collection is nearly stopped. Don't shorten
+            fb.proxy.page_loads to get identities back; see the runbook.
+          runbook_url: https://github.com/abdullah95k/securebrand-microservices/blob/main/docs/runbooks/operations.md#identity-pool-low
+      - alert: FbsNoNewComments
+        # Freshness: crawlers at work for 30 minutes, and not one comment
+        # (new or a new version) stored.
+        expr: |
+          (sum(increase(fbs_persist_rows_total{entity="comment",op="written"}[30m])) or vector(0)) == 0
+            and on () sum(rate(fbs_tasks_total[30m])) > 0
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: No new comment stored in 30 minutes while the crawlers work
+          description: >-
+            Tasks run but nothing new reaches the database: the comments
+            query is failing or rotated, the parser drifted, the persister
+            is stuck, or every page is quiet (rare across a full list).
+          runbook_url: https://github.com/abdullah95k/securebrand-microservices/blob/main/docs/runbooks/operations.md#no-new-comments
       - alert: FbsCrawlersIdleWithBacklog
         # Tasks, not requests: fbs-registry-sync's own requests every 30m
         # would otherwise keep resetting the for timer.

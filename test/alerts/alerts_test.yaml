@@ -1,0 +1,93 @@
+# promtool unit tests for deploy/helm/fbs/files/alerts.yaml (make
+# chart-check runs them): the identity-pool and freshness alerts fire when
+# they should, and stay quiet when they shouldn't.
+rule_files:
+  - ../../deploy/helm/fbs/files/alerts.yaml
+evaluation_interval: 1m
+tests:
+  # The pool falls from 10 identities to 3 after 6 hours: under half its
+  # peak, so the warning fires after 15 minutes. Not a fifth: no critical.
+  - interval: 5m
+    input_series:
+      - series: 'fbs_identity_active{tier="isp",instance="crawler-a"}'
+        values: '10x72 3x12'
+      - series: 'fbs_kafka_consumer_lag{group="fbs-crawler-page-p1",topic="fbs.task.page.p1",instance="scheduler-a"}'
+        values: '50x84'
+      - series: 'fbs_scheduler_leader{instance="scheduler-a"}'
+        values: '1x84'
+    alert_rule_test:
+      - eval_time: 6h10m
+        alertname: FbsIdentityPoolLow
+        exp_alerts: []
+      - eval_time: 6h30m
+        alertname: FbsIdentityPoolLow
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "3 live identities, under half the pool's peak of the last 6 hours"
+              description: "Identities retire faster than walled exits can load pages for new ones (each exit loads one page per interval, none during a backoff), and the crawlers work on what is left. Check fbs_identity_retired_total by reason and fbs_proxy_page_loads_deferred_total{reason=\"backoff\"}."
+              runbook_url: "https://github.com/abdullah95k/securebrand-microservices/blob/main/docs/runbooks/operations.md#identity-pool-low"
+      - eval_time: 6h30m
+        alertname: FbsIdentityPoolCritical
+        exp_alerts: []
+
+  # Down to one identity with crawl tasks waiting: critical (and the warning).
+  - interval: 5m
+    input_series:
+      - series: 'fbs_identity_active{tier="isp",instance="crawler-a"}'
+        values: '10x72 1x12'
+      - series: 'fbs_kafka_consumer_lag{group="fbs-crawler-page-p1",topic="fbs.task.page.p1",instance="scheduler-a"}'
+        values: '50x84'
+      - series: 'fbs_scheduler_leader{instance="scheduler-a"}'
+        values: '1x84'
+    alert_rule_test:
+      - eval_time: 6h30m
+        alertname: FbsIdentityPoolCritical
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: "1 live identities left, a fifth of the pool's peak, with crawl tasks waiting"
+              description: "Almost every exit is backing off after walled page loads, or retired: collection is nearly stopped. Don't shorten fb.proxy.page_loads to get identities back; see the runbook."
+              runbook_url: "https://github.com/abdullah95k/securebrand-microservices/blob/main/docs/runbooks/operations.md#identity-pool-low"
+
+  # The same drop with no crawl task waiting: not critical. A small pool
+  # (a peak under 4) never alerts.
+  - interval: 5m
+    input_series:
+      - series: 'fbs_identity_active{tier="isp",instance="crawler-a"}'
+        values: '10x72 1x12'
+      - series: 'fbs_identity_active{tier="isp",instance="crawler-b"}'
+        values: '0x84'
+    alert_rule_test:
+      - eval_time: 6h30m
+        alertname: FbsIdentityPoolCritical
+        exp_alerts: []
+  - interval: 5m
+    input_series:
+      - series: 'fbs_identity_active{tier="isp",instance="crawler-a"}'
+        values: '3x72 1x12'
+    alert_rule_test:
+      - eval_time: 6h30m
+        alertname: FbsIdentityPoolLow
+        exp_alerts: []
+
+  # Tasks run but no comment is stored for 30 minutes: the freshness alert
+  # fires; while comments keep coming it stays quiet.
+  - interval: 1m
+    input_series:
+      - series: 'fbs_tasks_total{kind="thread",outcome="done",instance="crawler-a"}'
+        values: '0+10x90'
+      - series: 'fbs_persist_rows_total{entity="comment",op="written",instance="persister-a"}'
+        values: '0+20x30 600x60'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: FbsNoNewComments
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: FbsNoNewComments
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: "No new comment stored in 30 minutes while the crawlers work"
+              description: "Tasks run but nothing new reaches the database: the comments query is failing or rotated, the parser drifted, the persister is stuck, or every page is quiet (rare across a full list)."
+              runbook_url: "https://github.com/abdullah95k/securebrand-microservices/blob/main/docs/runbooks/operations.md#no-new-comments"

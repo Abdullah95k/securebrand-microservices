@@ -85,13 +85,17 @@ KUBECONFORM_ARGS = -strict -summary -kubernetes-version 1.30.0 -schema-location 
 	-schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
 
 PROD_VALUES = -f deploy/helm/fbs/values-production.yaml
+PROMTOOL ?= docker run --rm --entrypoint promtool -v $(CURDIR):/repo:ro -w /repo prom/prometheus:v2.53.0
 ## Lint the Helm chart and validate its renders (defaults, every optional
 ## object, the staging example, the production values) against the
-## Kubernetes and CRD schemas.
+## Kubernetes and CRD schemas; check the alert rules and run their unit
+## tests (test/alerts) with promtool.
 chart-check:
 	$(HELM) lint deploy/helm/fbs
 	$(HELM) lint deploy/helm/fbs -f deploy/helm/fbs/examples/fakefb.yaml
 	$(HELM) lint deploy/helm/fbs $(PROD_VALUES)
+	$(PROMTOOL) check rules deploy/helm/fbs/files/alerts.yaml
+	$(PROMTOOL) test rules test/alerts/alerts_test.yaml
 	set -o pipefail; $(HELM) template fbs deploy/helm/fbs -n fbs $(PROD_VALUES) --set image.tag=0000000000000000000000000000000000000000 \
 	  | $(KUBECONFORM) $(KUBECONFORM_ARGS)
 	set -o pipefail; $(HELM) template fbs deploy/helm/fbs | $(KUBECONFORM) $(KUBECONFORM_ARGS)
