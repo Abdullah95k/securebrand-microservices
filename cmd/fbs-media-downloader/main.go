@@ -41,7 +41,9 @@ func runDownloader(ctx context.Context, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
-	media.Lifecycle(ctx, s3, cfg.S3.MediaBucket, cfg.Media.TTL)
+	if cfg.S3.BucketLifecycle {
+		media.Lifecycle(ctx, s3, cfg.S3.MediaBucket, cfg.S3.MediaPrefix, cfg.Media.TTL)
+	}
 	kcfg, err := app.KafkaClient(cfg, "-media")
 	if err != nil {
 		return err
@@ -52,7 +54,8 @@ func runDownloader(ctx context.Context, cfg *config.Config) error {
 	}
 	defer producer.Close()
 	d := &media.Downloader{DB: db, S3: s3, Bucket: cfg.S3.MediaBucket, Producer: producer, HTTP: media.NewHTTPClient(),
-		TTL: cfg.Media.TTL, MaxBytes: cfg.Media.MaxBytes, Presign: cfg.Media.Presign, PresignTTL: cfg.Media.PresignTTL}
+		TTL: cfg.Media.TTL, MaxBytes: cfg.Media.MaxBytes, Presign: cfg.Media.Presign, PresignTTL: cfg.Media.PresignTTL,
+		Prefix: cfg.S3.MediaPrefix}
 	c, err := kafka.NewConsumer(kafka.ConsumerConfig{ClientConfig: kcfg, Group: "fbs-media-downloader",
 		Topics: []string{topics.TaskMedia}, MaxInflight: cfg.Media.Concurrency, DrainTimeout: 60 * time.Second}, d.Handle)
 	if err != nil {

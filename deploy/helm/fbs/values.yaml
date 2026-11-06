@@ -63,6 +63,14 @@ secretFiles:
 tlsFiles:
   existingSecret: ""
   mountPath: /etc/fbs-tls
+# The SecureBrand platform's credentials Secret (platform-credentials): one
+# key per value (POSTGRES_*, KAFKA_*, VALKEY_*, S3_*, SCHEMA_REGISTRY_URL;
+# the *_CA_CERT keys are PEM certificates). Mounted as files at mountPath
+# and read through config.platform.credentials_dir; its values win over
+# config. Empty: not used.
+platformCredentials:
+  existingSecret: ""
+  mountPath: /etc/platform-credentials
 
 podSecurityContext:
   runAsNonRoot: true

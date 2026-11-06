@@ -52,7 +52,8 @@ func runJanitor(ctx context.Context, cfg *config.Config) error {
 	}
 	defer producer.Close()
 	j := &media.Janitor{DB: db, S3: s3, Bucket: cfg.S3.MediaBucket, Producer: producer,
-		RequiredConsumers: cfg.Media.RequiredConsumers, MaxRetryableFailures: cfg.Media.MaxRetryableFailures, TTL: cfg.Media.TTL}
+		RequiredConsumers: cfg.Media.RequiredConsumers, MaxRetryableFailures: cfg.Media.MaxRetryableFailures, TTL: cfg.Media.TTL,
+		Prefix: cfg.S3.MediaPrefix}
 	c, err := kafka.NewConsumer(kafka.ConsumerConfig{ClientConfig: kcfg, Group: "fbs-media-janitor",
 		Topics: []string{topics.MediaProcessd}, MaxInflight: 32, DrainTimeout: 20 * time.Second}, j.Handle)
 	if err != nil {

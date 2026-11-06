@@ -1,0 +1,110 @@
+# fbs on the SecureBrand platform's production cluster (namespace fbs),
+# layered over values.yaml. The platform's conventions are in
+# securebrand-platform-data-collection/infra/README.md:
+#
+#   - credentials: the Secret platform-credentials, one key per value,
+#     mounted as files (platformCredentials below);
+#   - proxies: the Secret proxies, key proxies.yaml, holding the owner's
+#     PROXIES_FBS as pasted: fb.proxy.tiers in fbs's format, layered over
+#     config.yaml like any config file;
+#   - the platform creates every Kafka topic (infra/production/kafka.tf);
+#   - raw responses under fbs/keep/ (kept) and fbs/30d/ in S3_BUCKET_RAW;
+#   - media under fbs/ in S3_BUCKET_MEDIA.
+#
+# The platform's gitops file (gitops/services/fbs.yaml) sets image.repository
+# and image.tag to the image it built from the pinned commit.
+
+image:
+  repository: registry.digitalocean.com/securebrand/fbs
+  tag: ""        # set by the platform: the pinned commit
+
+platformCredentials:
+  existingSecret: platform-credentials
+  mountPath: /etc/platform-credentials
+
+# Nothing else is secret: the credentials come from platform-credentials,
+# and in full mode (D-003) no author key is needed.
+secretEnv:
+  existingSecret: ""
+secretFiles:
+  existingSecret: proxies
+  key: proxies.yaml
+
+config:
+  service: {env: prod}
+  kafka:
+    # Brokers, SASL (SCRAM-SHA-256), TLS and its CA come from
+    # platform-credentials. Topics have their plain names.
+    topic_prefix: ""
+    auto_create_topics: false
+  redis:
+    # One Valkey serves every service: fbs keeps its keys in its own
+    # logical database. The number is agreed with the platform.
+    db: 1
+  s3:
+    # Endpoint, region, keys and buckets come from platform-credentials.
+    media_prefix: "fbs/"
+    raw_prefix: "fbs"
+    # The buckets are shared: a lifecycle configuration would replace every
+    # other service's rules. The platform owns the buckets' rules.
+    bucket_lifecycle: false
+  fb:
+    proxy:
+      routing:
+        default: [isp]
+  # The owner's canary pages (at least three public pages that post daily
+  # and get reply threads) can also come in the proxies Secret, as
+  # registry_sync.canary_pages: until there are some, fbs-registry-sync
+  # can't follow doc_id rotations and FbsRegistrySyncNotRunning fires.
+  registry_sync:
+    canary_pages: []
+
+# The platform creates the topics; fb.v1 schemas are not registered in the
+# shared Schema Registry. Migrations run as before.
+hooks:
+  migrate: true
+  topics: false
+  schemas: false
+
+# No KEDA on the platform cluster: fixed replicas, sized for the first
+# collection (a few hundred pages through about ten ISP exits, where the
+# exits, not the pods, set the pace). Limits stay as measured in
+# values.yaml; requests are what the first weeks are expected to use.
+keda:
+  enabled: false
+
+serviceMonitor:
+  enabled: true
+alerts:
+  enabled: true
+dashboards:
+  enabled: true
+
+components:
+  api:
+    replicas: 2
+    resources: {requests: {cpu: 100m, memory: 128Mi}}
+  scheduler:
+    replicas: 2
+    resources: {requests: {cpu: 50m, memory: 128Mi}}
+  crawler-page:
+    replicas: 1
+    resources: {requests: {cpu: 250m, memory: 256Mi}}
+  crawler-post:
+    replicas: 1
+    resources: {requests: {cpu: 250m, memory: 256Mi}}
+  crawler-thread:
+    replicas: 1
+    resources: {requests: {cpu: 250m, memory: 256Mi}}
+  crawler-retry:
+    resources: {requests: {cpu: 50m, memory: 64Mi}}
+  persister:
+    replicas: 1
+    resources: {requests: {cpu: 200m, memory: 256Mi}}
+  media-downloader:
+    replicas: 1
+    resources: {requests: {cpu: 200m, memory: 256Mi}}
+  media-janitor:
+    resources: {requests: {cpu: 50m, memory: 64Mi}}
+  registry-sync:
+    resources: {requests: {cpu: 50m, memory: 128Mi}}

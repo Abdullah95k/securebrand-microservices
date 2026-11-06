@@ -43,6 +43,9 @@ type ClientConfig struct {
 	// TLS, when set, encrypts the broker connections; SASL authenticates.
 	TLS  *tls.Config
 	SASL sasl.Mechanism
+	// NoAutoTopicCreation stops a produce from creating a missing topic:
+	// where a platform creates every topic, a missing one is an error.
+	NoAutoTopicCreation bool
 }
 
 // Opts are the client options every client of this config needs: brokers,
@@ -70,8 +73,10 @@ func NewProducer(cfg ClientConfig, extra ...kgo.Opt) (*Producer, error) {
 		kgo.ProducerBatchCompression(kgo.ZstdCompression(), kgo.Lz4Compression(), kgo.NoCompression()),
 		kgo.ProducerLinger(cfg.Linger),
 		kgo.ProducerBatchMaxBytes(1<<20),
-		kgo.AllowAutoTopicCreation(),
 	)
+	if !cfg.NoAutoTopicCreation {
+		opts = append(opts, kgo.AllowAutoTopicCreation())
+	}
 	opts = append(opts, extra...)
 	cl, err := kgo.NewClient(opts...)
 	if err != nil {

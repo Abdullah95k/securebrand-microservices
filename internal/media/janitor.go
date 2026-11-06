@@ -33,6 +33,9 @@ type Janitor struct {
 	RequiredConsumers    []string
 	MaxRetryableFailures int
 	TTL                  time.Duration
+	// Prefix bounds the orphan scan: the janitor never lists or deletes
+	// outside it (the bucket may be shared with other services).
+	Prefix string
 }
 
 // Handle consumes fb.media.processed.v1.
@@ -201,7 +204,11 @@ func (j *Janitor) Sweep(ctx context.Context) error {
 // than the TTL plus a grace period.
 func (j *Janitor) Orphans(ctx context.Context) error {
 	cutoff := time.Now().Add(-j.TTL - time.Hour)
-	for obj := range j.S3.ListObjects(ctx, j.Bucket, minio.ListObjectsOptions{Prefix: "media/", Recursive: true}) {
+	prefix := j.Prefix
+	if prefix == "" {
+		prefix = DefaultPrefix
+	}
+	for obj := range j.S3.ListObjects(ctx, j.Bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: true}) {
 		if obj.Err != nil {
 			return obj.Err
 		}
@@ -254,9 +261,14 @@ func derefInt32(v *int32) int32 {
 }
 
 // Lifecycle installs the bucket lifecycle rule (whole days only) that backs
-// up the janitor's TTL. Stores without lifecycle support log and continue.
-func Lifecycle(ctx context.Context, s3 *minio.Client, bucket string, ttl time.Duration) {
-	setLifecycle(ctx, s3, bucket, lifecycleConfig("fbs-media-ttl", "media/", int(ttl.Hours()/24)+1))
+// up the janitor's TTL, on prefix. Stores without lifecycle support log and
+// continue. It replaces every rule of the bucket: never on a bucket shared
+// with other services (s3.bucket_lifecycle).
+func Lifecycle(ctx context.Context, s3 *minio.Client, bucket, prefix string, ttl time.Duration) {
+	if prefix == "" {
+		prefix = DefaultPrefix
+	}
+	setLifecycle(ctx, s3, bucket, lifecycleConfig("fbs-media-ttl", prefix, int(ttl.Hours()/24)+1))
 }
 
 // RawLifecycle expires every object of the raw bucket (raw/ and

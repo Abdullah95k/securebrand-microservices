@@ -32,6 +32,9 @@ kafka:
   topic_prefix: ""        # prepended to every topic name (useful for shared clusters)
   produce_linger: 5ms
   compression: zstd
+  # Producing to a missing topic creates it with the brokers' defaults. Off
+  # where a platform creates every topic (values-production.yaml).
+  auto_create_topics: true
   # TLS to the brokers: the system roots, plus ca_file when set; cert_file
   # and key_file for mutual TLS; server_name to override the verified name.
   tls:
@@ -62,6 +65,14 @@ s3:
   region: "us-east-1"
   media_bucket: "fbs-media"
   raw_bucket: "fbs-raw"
+  media_prefix: "media/"   # "fbs/media/" on the platform's shared bucket
+  raw_prefix: ""           # "" = raw/ and raw-failures/; "fbs" = fbs/keep/failures/ and fbs/30d/all/
+  bucket_lifecycle: true   # false on a shared bucket: a lifecycle config replaces every rule of the bucket
+
+platform:
+  # The platform's credentials secret, mounted one file per key; set by the
+  # Helm chart (platformCredentials). Empty: not on the platform.
+  credentials_dir: ""
 
 fb:
   # Base URL of the Facebook web surface. Tests and local dev point this at fakefb.

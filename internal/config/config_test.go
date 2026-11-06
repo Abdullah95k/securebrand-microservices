@@ -31,20 +31,21 @@ func TestLoadLayers(t *testing.T) {
 	}
 }
 
-// The author key must be a real secret in prod, and wherever authors are
-// pseudonymised outside dev: not empty, not the dev key, not short.
+// The author key must be a real secret wherever authors are pseudonymised
+// outside dev: not empty, not the dev key, not short. In full mode (the
+// owner's D-003: author ids and names are ordinary data) it hides nothing.
 func TestValidate(t *testing.T) {
 	for name, tc := range map[string]struct {
 		env, mode, key string
 		ok             bool
 	}{
-		"prod, dev key":            {"prod", "full", "dev-only-change-me", false},
-		"prod, empty key":          {"prod", "full", "", false},
-		"prod, short key":          {"prod", "full", "0123456789", false},
-		"prod, real key":           {"prod", "full", "0123456789abcdef0123456789abcdef", true},
-		"pilot, pseudonymised":     {"pilot", "pseudonymized", "dev-only-change-me", false},
-		"pilot, full names stored": {"pilot", "full", "dev-only-change-me", true},
-		"dev":                      {"dev", "pseudonymized", "dev-only-change-me", true},
+		"prod, full, dev key":            {"prod", "full", "dev-only-change-me", true},
+		"prod, pseudonymised":            {"prod", "pseudonymized", "dev-only-change-me", false},
+		"prod, pseudonymised, short key": {"prod", "pseudonymized", "0123456789", false},
+		"prod, pseudonymised, real key":  {"prod", "pseudonymized", "0123456789abcdef0123456789abcdef", true},
+		"pilot, pseudonymised":           {"pilot", "pseudonymized", "dev-only-change-me", false},
+		"pilot, full names stored":       {"pilot", "full", "dev-only-change-me", true},
+		"dev":                            {"dev", "pseudonymized", "dev-only-change-me", true},
 	} {
 		c, _ := Load("")
 		c.Service.Env, c.Privacy.PIIMode, c.Privacy.AuthorHMACKey = tc.env, tc.mode, tc.key

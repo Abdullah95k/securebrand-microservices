@@ -28,6 +28,10 @@ app.kubernetes.io/component: {{ .name }}
 {{- define "fbs.env" -}}
 - name: FBS_CONFIG
   value: {{ include "fbs.configFiles" . | quote }}
+{{- if .Values.platformCredentials.existingSecret }}
+- name: FBS_PLATFORM__CREDENTIALS_DIR
+  value: {{ .Values.platformCredentials.mountPath | quote }}
+{{- end }}
 {{- end -}}
 
 {{- define "fbs.envFrom" -}}
@@ -50,6 +54,11 @@ envFrom:
 {{- if .Values.tlsFiles.existingSecret }}
 - name: tls-files
   mountPath: {{ .Values.tlsFiles.mountPath }}
+  readOnly: true
+{{- end }}
+{{- if .Values.platformCredentials.existingSecret }}
+- name: platform-credentials
+  mountPath: {{ .Values.platformCredentials.mountPath }}
   readOnly: true
 {{- end }}
 - name: tmp
@@ -78,6 +87,11 @@ envFrom:
 - name: tls-files
   secret:
     secretName: {{ $root.Values.tlsFiles.existingSecret }}
+{{- end }}
+{{- if $root.Values.platformCredentials.existingSecret }}
+- name: platform-credentials
+  secret:
+    secretName: {{ $root.Values.platformCredentials.existingSecret }}
 {{- end }}
 - name: tmp
   emptyDir: {}

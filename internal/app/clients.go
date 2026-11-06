@@ -21,7 +21,8 @@ func KafkaClient(cfg *config.Config, id string) (kafka.ClientConfig, error) {
 		return kafka.ClientConfig{}, fmt.Errorf("kafka: %w", err)
 	}
 	kc := kafka.ClientConfig{Brokers: cfg.Kafka.Brokers, ClientID: cfg.Kafka.ClientID + id,
-		TopicPrefix: cfg.Kafka.TopicPrefix, Linger: cfg.Kafka.ProduceLinger, TLS: tc}
+		TopicPrefix: cfg.Kafka.TopicPrefix, Linger: cfg.Kafka.ProduceLinger, TLS: tc,
+		NoAutoTopicCreation: !cfg.Kafka.AutoCreateTopics}
 	s := cfg.Kafka.SASL
 	switch s.Mechanism {
 	case "plain":
