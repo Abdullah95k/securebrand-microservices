@@ -3,6 +3,7 @@ package discovery_test
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -246,5 +247,25 @@ func TestSinkDailyCap(t *testing.T) {
 	}
 	if len(ms) != 2 {
 		t.Errorf("%d mentions, want 2", len(ms))
+	}
+}
+
+// Without a cap (0), more posters than the old default cap (200) are added
+// in one day.
+func TestSinkNoLimit(t *testing.T) {
+	db := testenv.Postgres(t)
+	ctx := context.Background()
+	kw, _, _ := discovery.AddKeyword(ctx, db, "Basra", "en", "", true)
+	now := time.Now()
+	q := discovery.Query{KeywordID: kw.ID, Normalized: kw.Normalized, Since: now.Add(-time.Hour), Until: now}
+	sink := &discovery.Sink{DB: db, Cfg: config.Discovery{MaxNewPerDay: 0, IncludeProfiles: true}, Interval: time.Hour}
+	const n = 210
+	results := make([]discovery.Result, n)
+	for i := range results {
+		results[i] = discovery.Result{PostID: strconv.Itoa(i + 1), PostTime: now.Add(-time.Minute), OwnerRef: "poster" + strconv.Itoa(i), OwnerKind: "page"}
+	}
+	st, err := sink.Record(ctx, q, results)
+	if err != nil || st.Added != n || st.Capped != 0 {
+		t.Fatalf("%+v %v, want %d added and none capped", st, err, n)
 	}
 }

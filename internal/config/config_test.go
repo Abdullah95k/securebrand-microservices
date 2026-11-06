@@ -171,3 +171,47 @@ func TestDefaultsKeepEverything(t *testing.T) {
 		}
 	}
 }
+
+// The check tier's static exits set the page-load capacity the share is
+// taken from: its own routing first, else the default's first tier; a
+// gateway or direct tier has none. The share is a fraction with a window.
+func TestStaticExitsAndShare(t *testing.T) {
+	p := Proxy{
+		Tiers: []ProxyTier{
+			{Name: "isp", Kind: "static_list", Endpoints: []string{"http://a:1", "http://a:2", "http://a:3"}},
+			{Name: "checks", Kind: "static_list", Endpoints: []string{"http://b:1"}},
+			{Name: "res", Kind: "gateway", Gateway: "http://gw:7777"},
+		},
+		Routing: map[string][]string{"default": {"isp", "res"}},
+	}
+	if n := p.StaticExits("check"); n != 3 {
+		t.Fatalf("check on the default route: %d exits, want 3", n)
+	}
+	p.Routing["check"] = []string{"checks"}
+	if n := p.StaticExits("check"); n != 1 {
+		t.Fatalf("check on its own tier: %d exits, want 1", n)
+	}
+	p.Routing["check"] = []string{"res"}
+	if n := p.StaticExits("check"); n != 0 {
+		t.Fatalf("check on a gateway: %d exits, want 0", n)
+	}
+
+	c, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Mentions.PageLoadShare != 0.2 || c.Mentions.ShareWindow <= 0 {
+		t.Fatalf("default share %v every %s, want 20%%", c.Mentions.PageLoadShare, c.Mentions.ShareWindow)
+	}
+	c.Mentions.Enabled = true
+	for _, share := range []float64{-0.1, 1.5} {
+		c.Mentions.PageLoadShare = share
+		if err := c.Validate(); err == nil {
+			t.Errorf("share %v accepted", share)
+		}
+	}
+	c.Mentions.PageLoadShare, c.Mentions.MaxChecksPerDay, c.Mentions.MaxNewPerDay = 0.2, 0, 0
+	if err := c.Validate(); err != nil {
+		t.Errorf("no caps with a share: %v", err)
+	}
+}

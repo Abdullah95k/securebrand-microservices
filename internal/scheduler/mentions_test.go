@@ -115,3 +115,60 @@ func TestMentionsQueueRespectsCapsBudgetAndErasures(t *testing.T) {
 		t.Fatalf("queued past the day's cap: %v %v", queued(), err)
 	}
 }
+
+// Without a daily cap (0) checks are still queued, more than the old
+// default cap allows by now; the page-load share keeps no more than one
+// window's checks in flight.
+func TestMentionsQueueWithoutCap(t *testing.T) {
+	db := testenv.Postgres(t)
+	ctx := context.Background()
+	prod, err := kafka.NewProducer(kafka.ClientConfig{Brokers: testenv.Kafka(t), TopicPrefix: testenv.TopicPrefix()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prod.Close()
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Mentions.Enabled, cfg.Mentions.MaxChecksPerDay = true, 0
+	m := NewMentions(db, prod, cfg)
+	if m.PerWindow != 0 {
+		t.Fatalf("a share without static exits (the default direct tier): %d", m.PerWindow)
+	}
+	loc := cfg.Mentions.Location()
+	start := time.Now().In(loc)
+	m.Now = func() time.Time { return time.Date(start.Year(), start.Month(), start.Day(), 0, 5, 0, 0, loc) } // early in the day
+	for i := range 60 {
+		if _, err := db.Exec(ctx, `INSERT INTO checked_accounts (account_ref, source, first_seen_at, last_seen_at, priority)
+			VALUES ($1, 'mention', now(), now(), 1)`, fmt.Sprintf("v:account.%d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	inFlight := func() int {
+		t.Helper()
+		n, err := mentions.InFlight(ctx, db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	// Five minutes into the day the old cap (300) allowed 13 checks; with
+	// no cap, a full batch goes out.
+	if err := m.Queue(ctx); err != nil || inFlight() != queueBatch {
+		t.Fatalf("queued %d without a cap (%v), want %d", inFlight(), err, queueBatch)
+	}
+	// The share: ten exits loading a page every two minutes give two
+	// checks a minute, ten in a ten-minute window; no more go out until
+	// those are done.
+	if _, err := db.Exec(ctx, `UPDATE checked_accounts SET queued_at = NULL`); err != nil {
+		t.Fatal(err)
+	}
+	m.PerWindow = mentions.SharePerWindow(0.2, 10, 2*time.Minute, 10*time.Minute)
+	if err := m.Queue(ctx); err != nil || inFlight() != 10 {
+		t.Fatalf("queued %d under the share (%v), want 10", inFlight(), err)
+	}
+	if err := m.Queue(ctx); err != nil || inFlight() != 10 {
+		t.Fatalf("queued more with a window's checks in flight: %d %v", inFlight(), err)
+	}
+}

@@ -32,6 +32,9 @@ type CheckStage struct {
 	Cfg     config.Mentions
 	Adder   *mentions.Adder
 	HMACKey []byte
+	// Share, when set, holds checks to a share of the exits' page loads
+	// (mentions.page_load_share), fleet-wide.
+	Share *mentions.Share
 }
 
 // NewCheckStage configures the stage from cfg.
@@ -73,15 +76,40 @@ func (s *CheckStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	if s.suppressed(ref, known) {
 		return s.forget(ctx, t, ref, known, c)
 	}
-	// The day's check first: past the cap, no identity is taken (a new one
-	// reserves a page load on its exit).
+	// The page-load share and the day's check first: past either, no
+	// identity is taken (a new one reserves a page load on its exit), and
+	// the account is queued again later.
+	var share string
+	if s.Share != nil {
+		key, ok, err := s.Share.Take(ctx)
+		if err != nil {
+			return retry(t, "", "30s", "check share: "+err.Error(), c)
+		}
+		if !ok {
+			metrics.MentionChecks.WithLabelValues("share").Inc()
+			if err := mentions.Release(ctx, d.DB, ref); err != nil {
+				return retry(t, "", "30s", err.Error(), c)
+			}
+			return done(c)
+		}
+		share = key
+	}
+	giveShare := func() {
+		if s.Share != nil {
+			if err := s.Share.Give(ctx, share); err != nil {
+				slog.Warn("mentions: a check that sent nothing still counts in its share window", "err", err)
+			}
+		}
+	}
 	day := mentions.DayStart(d.now(), s.Cfg.Location())
 	claimed, err := mentions.ClaimCheck(ctx, d.DB, day, s.Cfg.MaxChecksPerDay)
 	if err != nil {
+		giveShare()
 		return retry(t, "", "30s", "check cap: "+err.Error(), c)
 	}
 	if !claimed {
 		// Today's checks are used up: queued again tomorrow.
+		giveShare()
 		metrics.MentionChecks.WithLabelValues("capped").Inc()
 		if err := mentions.Release(ctx, d.DB, ref); err != nil {
 			return retry(t, "", "30s", err.Error(), c)
@@ -90,6 +118,7 @@ func (s *CheckStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	}
 	// unclaim gives the check back when nothing was sent.
 	unclaim := func() {
+		giveShare()
 		if err := mentions.UnclaimCheck(ctx, d.DB, day); err != nil {
 			slog.Warn("mentions: a check that sent nothing still counts today", "err", err)
 		}

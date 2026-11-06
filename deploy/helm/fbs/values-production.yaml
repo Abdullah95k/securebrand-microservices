@@ -52,6 +52,19 @@ config:
     proxy:
       routing:
         default: [isp]
+  # No daily caps in production (D-008; the owner, 7 November): 0 means no
+  # limit. Mention checks are held to 20% of the exits' page loads instead
+  # (mentions.page_load_share), so collection keeps the rest. The checker
+  # is turned on (here and components.crawler-check) after the first
+  # 48-hour run, which measures collection alone; then the owner's trial
+  # week.
+  mentions:
+    enabled: false
+    max_checks_per_day: 0
+    max_new_per_day: 0
+    page_load_share: 0.2
+  discovery:
+    max_new_per_day: 0
   # fbs-registry-sync finds the real query ids on these public pages, which
   # post daily and get reply threads, and follows them when they rotate. A
   # new database starts with placeholder ids: without canary pages nothing

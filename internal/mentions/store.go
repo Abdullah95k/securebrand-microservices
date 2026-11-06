@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"time"
 
@@ -263,10 +264,11 @@ func ChecksOn(ctx context.Context, db DB, day time.Time) (int, error) {
 }
 
 // ClaimCheck takes one of day's checks, or reports the cap reached. It is
-// the hard cap: called right before the page load.
+// the hard cap: called right before the page load. A limit of 0 or less is
+// no limit: the check is counted and always taken.
 func ClaimCheck(ctx context.Context, db DB, day time.Time, limit int) (bool, error) {
 	if limit <= 0 {
-		return false, nil
+		limit = math.MaxInt32
 	}
 	var n int
 	err := db.QueryRow(ctx, `INSERT INTO mention_check_days AS d (day, checks) VALUES ($1::date, 1)
@@ -444,7 +446,8 @@ func Forget(ctx context.Context, db DB, refs []string, id int64) (int64, error) 
 // scheduler.
 const addLock = 4_200_202
 
-// Adder adds public accounts to the main list under the daily cap.
+// Adder adds public accounts to the main list, under the daily cap when
+// MaxNewPerDay is positive (0 or less: no limit).
 type Adder struct {
 	MaxNewPerDay int
 	// Interval is the schedule interval of an added page
@@ -596,7 +599,7 @@ func (ad *Adder) add(ctx context.Context, tx pgx.Tx, ref string) (AddResult, err
 		DayStart(ad.now(), ad.Loc)).Scan(&today); err != nil {
 		return 0, err
 	}
-	if today >= ad.MaxNewPerDay {
+	if ad.MaxNewPerDay > 0 && today >= ad.MaxNewPerDay {
 		return Capped, nil
 	}
 	via, _ := json.Marshal(Via{AccountRef: a.Ref, Source: a.Source, Vias: a.Vias, Mentions: a.Mentions, Pages: a.Pages,

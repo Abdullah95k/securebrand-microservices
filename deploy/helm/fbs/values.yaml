@@ -217,8 +217,9 @@ components:
   # Mention checks: enable with config.mentions.enabled. Each check loads
   # one page through the proxies (the crawlers' egress), paced with every
   # other crawler pod through the shared page-load gate
-  # (config.fb.proxy.page_loads.shared); one replica is plenty for the
-  # daily cap.
+  # (config.fb.proxy.page_loads.shared), and held to
+  # config.mentions.page_load_share of their page loads; one replica is
+  # plenty for that share.
   crawler-check:
     enabled: false
     command: ["/usr/local/bin/fbs-crawler", "--stages", "check"]

@@ -366,7 +366,7 @@ discovery:
   enabled: false
   interval: 1h
   window: 6h             # at least `interval`, so searches overlap
-  max_new_per_day: 200   # pages and profiles added per UTC day; 0 adds none
+  max_new_per_day: 200   # pages and profiles added per UTC day; 0 = no limit
   include_profiles: true # people's public profiles as well as pages
   concurrency: 2         # searches a crawler runs at once
   mentions_days: 0       # mentions kept; 0 = for good (D-004)
@@ -391,8 +391,15 @@ discovery:
 mentions:
   enabled: false
   include_comment_authors: true
-  max_checks_per_day: 300    # hard cap on checks (page loads); 0 = none
-  max_new_per_day: 50        # pages and profiles added; 0 = none
+  max_checks_per_day: 300    # cap on checks (page loads) a day; 0 = no limit (production)
+  max_new_per_day: 50        # cap on pages and profiles added a day; 0 = no limit (production)
+  # Checks use at most this share of the page-load capacity of the check
+  # tier's exits (one page load per fb.proxy.page_loads.interval each),
+  # fleet-wide, in each share_window: collection always keeps the rest.
+  # 0 = no share limit. Checks move to their own exits (routing: check)
+  # once there is a tier for them.
+  page_load_share: 0.2
+  share_window: 10m
   time_zone: Asia/Baghdad    # where a day starts for both caps (Iraq time)
   recheck_after: 4380h       # ~6 months: a not-public account is checked again after this
   retry_backoff: 1h          # after a failed check, doubling up to:
