@@ -15,6 +15,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/abdullah95k/securebrand-microservices/internal/app"
+	"github.com/abdullah95k/securebrand-microservices/internal/config"
+	"github.com/abdullah95k/securebrand-microservices/internal/crawl/jobs"
+	"github.com/abdullah95k/securebrand-microservices/internal/crawl/task"
+	"github.com/abdullah95k/securebrand-microservices/internal/dispatch"
+	"github.com/abdullah95k/securebrand-microservices/internal/platform/kafka"
+	"github.com/abdullah95k/securebrand-microservices/internal/platform/pg"
 	"github.com/abdullah95k/securebrand-microservices/internal/spike"
 )
 
@@ -139,4 +146,49 @@ func (im importer) register(ctx context.Context, body map[string]any) (created b
 		}
 		backoff *= 2
 	}
+}
+
+// pagesSeed registers the pages of the config's pages.seed, without the API
+// or a client: the Helm hook hooks.seedPages runs it on every install and
+// upgrade. A page already scheduled is left as it is, and only the pages it
+// adds are backfilled (pages.seed_backfill), so it runs any number of times.
+// Page references that aren't valid fail it, after the valid ones are in.
+func pagesSeed(ctx context.Context, cfg *config.Config) error {
+	if len(cfg.Pages.Seed) == 0 {
+		printJSON(dispatch.SeedResult{})
+		return nil
+	}
+	db, err := pg.Open(ctx, cfg.Postgres.DSN, 4)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	rdb, err := app.OpenRedis(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rdb.Close() }()
+	kcfg, err := app.KafkaClient(cfg, "-fbctl")
+	if err != nil {
+		return err
+	}
+	producer, err := kafka.NewProducer(kcfg)
+	if err != nil {
+		return err
+	}
+	defer producer.Close()
+	d := &dispatch.Dispatcher{DB: db, Jobs: jobs.New(rdb), Producer: producer, BaseURL: cfg.FB.BaseURL}
+	opts := dispatch.SeedOptions{Interval: cfg.Scheduler.DefaultInterval}
+	if cfg.Pages.SeedBackfill {
+		opts.Backfill = task.DefaultLimits(cfg.Limits, true)
+	}
+	res, err := d.Seed(ctx, cfg.Pages.Seed, opts)
+	printJSON(res)
+	if err != nil {
+		return err
+	}
+	if len(res.Invalid) > 0 {
+		return fmt.Errorf("pages.seed: %d entries aren't page references: %q", len(res.Invalid), res.Invalid)
+	}
+	return nil
 }

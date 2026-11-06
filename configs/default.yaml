@@ -69,6 +69,14 @@ s3:
   raw_prefix: ""           # "" = raw/ and raw-failures/; "fbs" = fbs/keep/failures/ and fbs/30d/all/
   bucket_lifecycle: true   # false on a shared bucket: a lifecycle config replaces every rule of the bucket
 
+# Pages registered from configuration by `fbctl pages seed` (the Helm hook
+# hooks.seedPages runs it on every install and upgrade), besides those
+# clients register through the API. A page already scheduled is left as it
+# is; each page a seed adds is backfilled when seed_backfill is on.
+pages:
+  seed: []
+  seed_backfill: true
+
 platform:
   # The platform's credentials secret, mounted one file per key; set by the
   # Helm chart (platformCredentials). Empty: not on the platform.
