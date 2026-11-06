@@ -9,16 +9,16 @@
 | # | Fix | PR | Status | Evidence |
 |---|---|---|---|---|
 | 1 | Keep the shared server's data (copy to the backups bucket), then stop fbs there | — | blocked: needs the backups bucket's name, endpoint and how the owner signs in to it | Commands in `docs/master/fbs-req001-answers.md` once known |
-| 2 | Keep everything: every retention setting 0, no lifecycle rule on raw files | this PR | in progress | `TestDefaultsKeepEverything` (`internal/config`), `TestDefaultsDeleteNothing` (`internal/scheduler`); both fail if a deleting default returns |
+| 2 | Keep everything: every retention setting 0, no lifecycle rule on raw files | [#54](https://github.com/Abdullah95k/securebrand-microservices/pull/54) | done | `TestDefaultsKeepEverything` (`internal/config`), `TestDefaultsDeleteNothing` (`internal/scheduler`); both fail if a deleting default returns |
 | 3 | Per-IP cost model in `make pilot-report` | — | not started | |
-| 4 | Production wiring, then the clean 48-hour run on the production cluster | — | not started | |
+| 4 | Production wiring, then the clean 48-hour run on the production cluster | [#55](https://github.com/Abdullah95k/securebrand-microservices/pull/55) (wiring) | wiring in progress; the run is blocked on the cluster, the canary pages, `PROXIES_FBS` and the page list | `make chart-smoke`, second run: `values-production.yaml` against fakefb through a stand-in `platform-credentials`, topics made beforehand, no topic created by fbs, every media file under `fbs/`. `TestApplyPlatform*` (`internal/config`), `TestAutoTopicCreation` (`internal/platform/kafka`), `TestOrphansStayInsideThePrefix` (`internal/media`), `TestFolder` (`internal/crawl/rawsink`) |
 | 5 | Alerts: identity pool low and near zero; no new comments for 30 minutes | — | not started | |
 | 6 | Security in CI: gitleaks, Dependabot, govulncheck, image scan | — | not started | |
 | 7 | Every website and the page's social links | — | not started | |
 | 8 | Raw sample: failures and 1% of successes, with parser version, separate prefixes | — | not started | |
 | 9 | Exits named `<tier>#<n>` in logs, metric labels and Valkey keys | — | not started | |
 | 10 | NetworkPolicy egress, on in production values | — | not started | |
-| 11 | `docs/status.md`, kept current | this PR | in progress | `docs/status.md` |
+| 11 | `docs/status.md`, kept current | [#54](https://github.com/Abdullah95k/securebrand-microservices/pull/54) | done; updated with each PR | `docs/status.md` |
 | 12 | Mention checker: 0 means no limit (REQ-017), 20% share of page loads, checks only on spare capacity | — | not started | |
 | 13 | Per-IP request cap shared through Valkey | — | not started | |
 

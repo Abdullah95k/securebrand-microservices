@@ -1,0 +1,19 @@
+# The production values against fakefb, for scripts/chart-smoke.py (make
+# chart-smoke). Layered over values-production.yaml, it changes only what a
+# test machine can't have: Facebook is fakefb, reached through the proxies
+# Secret's tier "isp" (direct here), and there are no canary pages. The
+# script writes the Secrets platform-credentials and proxies for the local
+# services and creates the topics, as the platform does.
+#
+#   python3 scripts/chart-smoke.py --image fbs:dev \
+#     --values deploy/helm/fbs/values-production.yaml \
+#     --values deploy/helm/fbs/examples/production-smoke.yaml
+config:
+  fb:
+    base_url: "http://fakefb:8090"
+    identity_rps: 20
+    page_rps: 20
+
+components:
+  # Without canary pages there is nothing for it to check.
+  registry-sync: {enabled: false}

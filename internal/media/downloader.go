@@ -44,6 +44,8 @@ type Downloader struct {
 	MaxBytes   int64
 	Presign    bool
 	PresignTTL time.Duration
+	// Prefix is the key prefix of every stored file (ObjectKey).
+	Prefix string
 }
 
 // NewHTTPClient returns a client for CDN downloads.
@@ -58,8 +60,16 @@ func NewHTTPClient() *http.Client {
 	}
 }
 
-// ObjectKey is the deterministic storage key of a media item.
-func ObjectKey(m *fbv1.Media, contentType string) string {
+// DefaultPrefix is where media files go when no prefix is configured.
+const DefaultPrefix = "media/"
+
+// ObjectKey is the deterministic storage key of a media item under prefix
+// (s3.media_prefix: "media/", or "fbs/media/" on the platform's shared
+// bucket; empty means DefaultPrefix).
+func ObjectKey(prefix string, m *fbv1.Media, contentType string) string {
+	if prefix == "" {
+		prefix = DefaultPrefix
+	}
 	ext := ".bin"
 	if exts, _ := mime.ExtensionsByType(contentType); len(exts) > 0 {
 		ext = exts[0]
@@ -69,7 +79,7 @@ func ObjectKey(m *fbv1.Media, contentType string) string {
 	} else if e := path.Ext(strings.SplitN(m.SourceUrl, "?", 2)[0]); len(e) > 1 && len(e) <= 5 {
 		ext = e
 	}
-	return "media/" + m.MediaId[:2] + "/" + m.MediaId + ext
+	return prefix + m.MediaId[:2] + "/" + m.MediaId + ext
 }
 
 var errExpired = errors.New("source url expired")
@@ -287,7 +297,7 @@ func (d *Downloader) download(ctx context.Context, m *fbv1.Media) (*fbv1.S3Objec
 		ct = "application/octet-stream"
 	}
 	ct = strings.TrimSpace(strings.SplitN(ct, ";", 2)[0])
-	key := ObjectKey(m, ct)
+	key := ObjectKey(d.Prefix, m, ct)
 	h := sha256.New()
 	var src io.Reader = resp.Body
 	if d.MaxBytes > 0 {

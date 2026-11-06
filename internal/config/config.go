@@ -43,6 +43,17 @@ type Config struct {
 	// whether those not on the main list are public, and adds the public
 	// ones (docs/runbooks/operations.md, "Mentions").
 	Mentions Mentions `koanf:"mentions"`
+	// Platform: the shared production platform's conventions.
+	Platform Platform `koanf:"platform"`
+}
+
+// Platform holds what the SecureBrand platform provides.
+type Platform struct {
+	// CredentialsDir is where the platform's credentials secret is mounted,
+	// one file per key (POSTGRES_*, KAFKA_*, VALKEY_*, S3_*, *_CA_CERT as
+	// PEM). When set, the connections are built from it (ApplyPlatform)
+	// and win over the config files. Empty: not on the platform.
+	CredentialsDir string `koanf:"credentials_dir"`
 }
 
 // Mentions configures the mentions flow: the persister records the
@@ -180,8 +191,10 @@ type Kafka struct {
 	TopicPrefix   string        `koanf:"topic_prefix"`
 	ProduceLinger time.Duration `koanf:"produce_linger"`
 	Compression   string        `koanf:"compression"`
-	TLS           TLS           `koanf:"tls"`
-	SASL          SASL          `koanf:"sasl"`
+	// AutoCreateTopics lets a produce create a missing topic.
+	AutoCreateTopics bool `koanf:"auto_create_topics"`
+	TLS              TLS  `koanf:"tls"`
+	SASL             SASL `koanf:"sasl"`
 	// SchemaRegistry receives the fb.v1 schemas (`fbctl schemas apply`).
 	SchemaRegistry SchemaRegistry `koanf:"schema_registry"`
 }
@@ -209,6 +222,19 @@ type S3 struct {
 	Region      string `koanf:"region"`
 	MediaBucket string `koanf:"media_bucket"`
 	RawBucket   string `koanf:"raw_bucket"`
+	// MediaPrefix is where media files go in the media bucket ("media/";
+	// "fbs/media/" on the platform's shared bucket). The janitor only ever
+	// lists and deletes under it.
+	MediaPrefix string `koanf:"media_prefix"`
+	// RawPrefix lays out raw responses in the raw bucket. Empty: raw/ and
+	// raw-failures/. "fbs" (the platform): fbs/keep/failures/ (kept for
+	// good) and fbs/30d/all/ (the platform's 30-day rule).
+	RawPrefix string `koanf:"raw_prefix"`
+	// BucketLifecycle lets fbs install lifecycle rules (the media TTL
+	// safety net, raw_payload_days). Off on a bucket shared with other
+	// services: a lifecycle configuration replaces every rule of the
+	// bucket, other services' included.
+	BucketLifecycle bool `koanf:"bucket_lifecycle"`
 }
 
 type FB struct {
@@ -471,6 +497,9 @@ func Load(path string) (*Config, error) {
 	if _, err := pconfig.Load(configs.Default(), path, EnvPrefix, &c); err != nil {
 		return nil, err
 	}
+	if err := c.ApplyPlatform(); err != nil {
+		return nil, err
+	}
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
@@ -511,7 +540,9 @@ func (c *Config) Validate() error {
 	// Facebook id from an author_key. Generate one per deployment (e.g.
 	// openssl rand -hex 32) and never change it: suppression entries are
 	// stored under it.
-	if c.Service.Env == "prod" || (c.Service.Env != "dev" && c.Privacy.PIIMode == "pseudonymized") {
+	// In full mode (the owner's D-003: author ids and names are ordinary
+	// data) the key hides nothing the row doesn't already show.
+	if c.Service.Env != "dev" && c.Privacy.PIIMode == "pseudonymized" {
 		if k := c.Privacy.AuthorHMACKey; k == "" || k == "dev-only-change-me" || len(k) < 32 {
 			errs = append(errs, errors.New("privacy.author_hmac_key must be a secret of at least 32 characters (e.g. openssl rand -hex 32)"))
 		}

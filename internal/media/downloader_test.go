@@ -215,6 +215,35 @@ func TestOrphansKeepStoredMedia(t *testing.T) {
 	}
 }
 
+// On a bucket shared with other services the orphan scan stays inside its
+// prefix: another service's files, with no row of ours, are left alone.
+func TestOrphansStayInsideThePrefix(t *testing.T) {
+	db := testenv.Postgres(t)
+	ctx := context.Background()
+	s3srv := httptest.NewServer(gofakes3.New(s3mem.New()).Server())
+	defer s3srv.Close()
+	u, _ := url.Parse(s3srv.URL)
+	s3, err := s3x.Open(ctx, u.Host, "k", "secretsecret", "us-east-1", false, "media")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const ours, theirs = "fbs/media/00/00000000-0000-0000-0000-0000000000e1.jpg", "igs/media/00/00000000-0000-0000-0000-0000000000e2.jpg"
+	for _, k := range []string{ours, theirs} {
+		if _, err := s3.PutObject(ctx, "media", k, strings.NewReader("x"), 1, minio.PutObjectOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := (&Janitor{DB: db, S3: s3, Bucket: "media", TTL: -2 * time.Hour, Prefix: "fbs/media/"}).Orphans(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s3.StatObject(ctx, "media", ours, minio.StatObjectOptions{}); err == nil {
+		t.Error("our orphan was kept")
+	}
+	if _, err := s3.StatObject(ctx, "media", theirs, minio.StatObjectOptions{}); err != nil {
+		t.Errorf("another service's file was deleted: %v", err)
+	}
+}
+
 // An ack can come before the downloader marks the media ready (its event
 // goes out first): the janitor acts on a stored row as on a ready one.
 func TestJanitorActsOnStoredMedia(t *testing.T) {

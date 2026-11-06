@@ -1,6 +1,9 @@
 // Package rawsink batches raw Facebook responses into zstd-compressed JSONL
 // objects in S3 so payloads can be re-parsed after a parser fix
-// (fbctl replay). Failures go under raw-failures/, everything else under raw/.
+// (fbctl replay). Failures go under raw-failures/, everything else under
+// raw/; with a Prefix (the platform's layout), failures go under
+// <prefix>/keep/failures/ (kept for good) and the rest under
+// <prefix>/30d/all/ (the platform's 30-day rule).
 package rawsink
 
 import (
@@ -26,9 +29,28 @@ type Sink struct {
 	pod     string
 	maxSize int
 
+	// Prefix is s3.raw_prefix: "" for raw/ and raw-failures/, or the
+	// collector's folder on the platform ("fbs").
+	Prefix string
+
 	mu   sync.Mutex
 	bufs map[string]*bytes.Buffer // prefix/query -> JSONL
 	seq  int
+}
+
+// Folder is where a response of class cls goes.
+func (s *Sink) Folder(cls detect.Class) string {
+	failed := cls != detect.OK
+	switch {
+	case s.Prefix == "" && failed:
+		return "raw-failures"
+	case s.Prefix == "":
+		return "raw"
+	case failed:
+		return s.Prefix + "/keep/failures"
+	default:
+		return s.Prefix + "/30d/all"
+	}
 }
 
 func New(s3 *minio.Client, bucket string) *Sink {
@@ -48,10 +70,7 @@ type Line struct {
 
 // Capture buffers one response.
 func (s *Sink) Capture(ctx context.Context, query string, cls detect.Class, body []byte, vars map[string]any) {
-	prefix := "raw"
-	if cls != detect.OK {
-		prefix = "raw-failures"
-	}
+	prefix := s.Folder(cls)
 	l := Line{At: time.Now().UTC(), Query: query, Class: cls.String(), Vars: vars}
 	if json.Valid(body) {
 		l.Body = body
