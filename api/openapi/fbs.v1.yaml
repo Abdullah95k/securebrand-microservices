@@ -401,7 +401,7 @@ paths:
       summary: Check an account again, ahead of the queue
       description: >-
         Requires `pages:write`. Whatever its last check found, the account is checked next (rechecks
-        come before the priority order). It still counts toward `mentions.max_checks_per_day`.
+        come before the priority order). It still counts toward `mentions.max_checks_per_day` (when set) and the page-load share.
         `409` when it is on the main list already; `503` while `mentions.enabled` is false.
       responses:
         "202": {description: Queued, content: {application/json: {schema: {type: object, properties: {account: {$ref: '#/components/schemas/CheckedAccount'}}}}}}

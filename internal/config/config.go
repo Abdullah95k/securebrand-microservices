@@ -79,10 +79,17 @@ type Mentions struct {
 	// IncludeCommentAuthors counts every comment's author as mentioned by
 	// it (a large volume, mostly private people).
 	IncludeCommentAuthors bool `koanf:"include_comment_authors"`
-	// MaxChecksPerDay is the hard cap on checks (each one page load) per
-	// day; MaxNewPerDay the cap on pages added per day. 0 = none.
+	// MaxChecksPerDay caps the checks (each one page load) per day;
+	// MaxNewPerDay the pages added per day. 0 or unset = no limit; a
+	// positive number caps (tests, a canary).
 	MaxChecksPerDay int `koanf:"max_checks_per_day"`
 	MaxNewPerDay    int `koanf:"max_new_per_day"`
+	// PageLoadShare is the most of the page-load capacity of the check
+	// tier's exits (each one page load per fb.proxy.page_loads.interval)
+	// checks may use, fleet-wide, in each ShareWindow: collection always
+	// keeps the rest. 0 = no share limit.
+	PageLoadShare float64       `koanf:"page_load_share"`
+	ShareWindow   time.Duration `koanf:"share_window"`
 	// TimeZone is where a day starts for both caps (IANA name).
 	TimeZone string `koanf:"time_zone"`
 	// RecheckAfter is how long a check that found an account not public
@@ -127,7 +134,8 @@ type Discovery struct {
 	// consecutive searches overlap rather than leave gaps.
 	Window time.Duration `koanf:"window"`
 	// MaxNewPerDay caps the pages and profiles added per UTC day; mentions
-	// past it are recorded without adding their poster.
+	// past it are recorded without adding their poster. 0 or unset = no
+	// limit.
 	MaxNewPerDay int `koanf:"max_new_per_day"`
 	// IncludeProfiles adds people's public profiles as well as pages.
 	IncludeProfiles bool `koanf:"include_profiles"`
@@ -333,6 +341,25 @@ type PageLoads struct {
 	// Shared paces each exit together with every process that shares
 	// Valkey (crawler pods, registry-sync); off, each process paces alone.
 	Shared bool `koanf:"shared"`
+}
+
+// StaticExits is how many static exits the first tier routed for class
+// has (fb.proxy.routing, else its default): the exits whose page loads the
+// gate paces. 0 for a gateway or direct tier.
+func (p Proxy) StaticExits(class string) int {
+	tiers := p.Routing[class]
+	if len(tiers) == 0 {
+		tiers = p.Routing["default"]
+	}
+	if len(tiers) == 0 {
+		return 0
+	}
+	for _, t := range p.Tiers {
+		if t.Name == tiers[0] && t.Kind == "static_list" {
+			return len(t.Endpoints)
+		}
+	}
+	return 0
 }
 
 type ProxyTier struct {
@@ -608,6 +635,9 @@ func (c *Config) Validate() error {
 		}
 		if m.RetentionDays < 0 || m.CandidateWeight < 0 || m.MaxFailures < 0 {
 			errs = append(errs, errors.New("mentions.retention_days, candidate_weight and max_failures must be >= 0"))
+		}
+		if m.PageLoadShare < 0 || m.PageLoadShare > 1 || (m.PageLoadShare > 0 && m.ShareWindow <= 0) {
+			errs = append(errs, errors.New("mentions.page_load_share must be between 0 and 1, with share_window > 0"))
 		}
 	}
 	if d := c.Discovery; d.Enabled {

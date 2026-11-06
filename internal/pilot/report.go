@@ -184,6 +184,10 @@ type Projection struct {
 	// ChecksPerDay are the mention checks a day (mentions.max_checks_per_day
 	// when on): a page load each, whatever the number of pages.
 	ChecksPerDay int
+	// CheckShare is the share of every IP's page loads checks may take
+	// when they have no daily cap (mentions.page_load_share): the IPs
+	// collection needs are that much more.
+	CheckShare float64
 }
 
 // Format renders the report and, with p.Pages, the projection.
@@ -261,9 +265,16 @@ func formatPageLoads(b *strings.Builder, perDay, failed, reqIPs float64, counted
 	// that many more intervals, at least (the backoff doubles).
 	cost := 1 + failed*p.PageLoadBackoff.Seconds()/p.PageLoadInterval.Seconds()
 	ips := math.Ceil(total * cost / each * (1 + p.Headroom))
+	share := p.ChecksPerDay <= 0 && p.CheckShare > 0 && p.CheckShare < 1
+	if share {
+		ips = math.Ceil(total * cost / each / (1 - p.CheckShare) * (1 + p.Headroom))
+	}
 	fmt.Fprintf(b, "page loads: %s a day", count(total))
 	if p.ChecksPerDay > 0 {
 		fmt.Fprintf(b, " (%d of them mention checks)", p.ChecksPerDay)
+	}
+	if share {
+		fmt.Fprintf(b, ", plus mention checks on up to %.0f%% of each IP's page loads", 100*p.CheckShare)
 	}
 	fmt.Fprintf(b, "; at one per %s per IP (%.0f a day each)", short(p.PageLoadInterval), each)
 	if failed > 0 && p.PageLoadBackoff > 0 {

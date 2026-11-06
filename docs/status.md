@@ -11,16 +11,19 @@
   - raw files under `fbs/keep/` and `fbs/30d/`, media under `fbs/`;
   - `values-production.yaml`;
   - `make chart-smoke` runs it against fakefb.
+- **Production pages** (canary pages, the 150-page list, the seed hook) and the shared-server copy runbook: done, [#56](https://github.com/Abdullah95k/securebrand-microservices/pull/56).
+- **REQ-017** (no daily caps; checks held to 20% of page loads): in a PR.
 - **Next:**
   - fix 3: the per-IP cost model;
+  - fixes 5–13;
   - the REQ-001 answers;
-  - fixes 5–13.
+  - REQ-018.
 
 ## Production pin
 
 | Field | Value |
 |---|---|
-| Commit | `91ca7ae9ebb3d9173fc678df800b64c708f6c697` (#55), then the merge of the page-list PR |
+| Commit | `f7ce255cbdcfa99148c8b3224f69ff9e2d2c746f` (#56) |
 | Image | `fbs`: `deploy/docker/Dockerfile`, context `.`, target `""` (the last stage, no browser) |
 | Chart | `deploy/helm/fbs` |
 | Values | `values-production.yaml` |
@@ -34,7 +37,7 @@
 
 - **E:** production uses the pilot's IPs for now; more are added and replaced later. **The pilot stops before production starts**, so the same IPs never carry both.
 - **F:** the same 150-page list; discovery adds more later.
-- **G:** the mention checker runs in production with no cap (REQ-017: 0 means no limit, and checks take at most about 20% of page loads).
+- **G:** the mention checker runs in production with no cap (REQ-017: 0 means no limit, and checks take at most about 20% of page loads). It is turned on after the first 48-hour run, so that run measures collection alone.
 - **H:** fixes 5–13 now, while the cluster isn't ready.
 - **I:** the master orchestrates: fbs stays aligned with it.
 

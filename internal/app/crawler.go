@@ -33,6 +33,7 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/session"
 	"github.com/abdullah95k/securebrand-microservices/internal/gdpr"
 	"github.com/abdullah95k/securebrand-microservices/internal/media"
+	"github.com/abdullah95k/securebrand-microservices/internal/mentions"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/breaker"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/kafka"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/metrics"
@@ -158,7 +159,10 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 			taskv1.Kind_KIND_SEARCH: &stage.SearchStage{D: deps, Source: o.SearchSource,
 				Sink: &discovery.Sink{DB: db, Cfg: cfg.Discovery, Interval: cfg.Scheduler.DefaultInterval, Suppressed: supp.PageSuppressed}},
 		}}
-	worker.Stages[taskv1.Kind_KIND_CHECK] = stage.NewCheckStage(deps, cfg)
+	check := stage.NewCheckStage(deps, cfg)
+	check.Share = mentions.NewShare(rdb, cfg.Kafka.TopicPrefix, cfg.Mentions.PageLoadShare, cfg.FB.Proxy.StaticExits("check"),
+		cfg.FB.Proxy.PageLoads.Interval, cfg.Mentions.ShareWindow)
+	worker.Stages[taskv1.Kind_KIND_CHECK] = check
 	c := &Crawler{Deps: deps, Worker: worker, Registry: reg, Suppression: supp}
 	c.Components = []run.Func{
 		func(ctx context.Context) error { return reg.Run(ctx, cfg.FB.RegistryRefresh) },

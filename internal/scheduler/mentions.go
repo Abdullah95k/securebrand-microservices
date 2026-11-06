@@ -34,7 +34,11 @@ type Mentions struct {
 	// Budget, when set, returns the traffic budget state. While it pauses
 	// backfill, no checks are queued: they are as discretionary.
 	Budget func(context.Context) ratelimit.BudgetState
-	Now    func() time.Time
+	// PerWindow, when positive, is the checks the page-load share lets
+	// start in a window (mentions.page_load_share): no more are kept in
+	// flight, so the crawlers don't turn checks away and back.
+	PerWindow int
+	Now       func() time.Time
 
 	capHit map[string]time.Time // cap -> the day its hit was counted
 }
@@ -42,7 +46,9 @@ type Mentions struct {
 // NewMentions configures the loops from cfg.
 func NewMentions(db *pgxpool.Pool, producer *kafka.Producer, cfg *config.Config) *Mentions {
 	return &Mentions{DB: db, Producer: producer, Cfg: cfg.Mentions, HMACKey: []byte(cfg.Privacy.AuthorHMACKey),
-		Adder: &mentions.Adder{MaxNewPerDay: cfg.Mentions.MaxNewPerDay, Interval: cfg.Scheduler.DefaultInterval, Loc: cfg.Mentions.Location()}}
+		Adder: &mentions.Adder{MaxNewPerDay: cfg.Mentions.MaxNewPerDay, Interval: cfg.Scheduler.DefaultInterval, Loc: cfg.Mentions.Location()},
+		PerWindow: mentions.SharePerWindow(cfg.Mentions.PageLoadShare, cfg.FB.Proxy.StaticExits("check"),
+			cfg.FB.Proxy.PageLoads.Interval, cfg.Mentions.ShareWindow)}
 }
 
 func (m *Mentions) now() time.Time {
@@ -76,7 +82,8 @@ const lostAfter = 6 * time.Hour
 const queueBatch = 50
 
 // Queue frees lost checks, adds the public accounts waiting for the add
-// cap, and queues as many checks as the day's cap allows by now.
+// cap, and queues as many checks as the day's cap allows by now (when
+// there is one) and the page-load share takes in a window.
 func (m *Mentions) Queue(ctx context.Context) error {
 	if _, err := mentions.FreeLost(ctx, m.DB, lostAfter); err != nil {
 		return err
@@ -89,7 +96,7 @@ func (m *Mentions) Queue(ctx context.Context) error {
 	if added, err := mentions.AddedOn(ctx, m.DB, day); err == nil && m.Cfg.MaxNewPerDay > 0 && added >= m.Cfg.MaxNewPerDay {
 		m.hit("adds", day)
 	}
-	if m.Cfg.MaxChecksPerDay <= 0 || (m.Budget != nil && m.Budget(ctx).PauseP2) {
+	if m.Budget != nil && m.Budget(ctx).PauseP2 {
 		return nil
 	}
 	used, err := mentions.ChecksOn(ctx, m.DB, day)
@@ -97,7 +104,8 @@ func (m *Mentions) Queue(ctx context.Context) error {
 		return err
 	}
 	metrics.MentionChecksUsed.Set(float64(used))
-	if used >= m.Cfg.MaxChecksPerDay {
+	capped := m.Cfg.MaxChecksPerDay > 0 // 0: no daily limit
+	if capped && used >= m.Cfg.MaxChecksPerDay {
 		m.hit("checks", day)
 		return nil
 	}
@@ -105,7 +113,13 @@ func (m *Mentions) Queue(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	n := min(allowedBy(now, day, m.Cfg.MaxChecksPerDay)-used-inflight, queueBatch)
+	n := queueBatch - inflight
+	if capped {
+		n = min(allowedBy(now, day, m.Cfg.MaxChecksPerDay)-used-inflight, queueBatch)
+	}
+	if m.PerWindow > 0 {
+		n = min(n, m.PerWindow-inflight)
+	}
 	if n <= 0 {
 		return nil
 	}

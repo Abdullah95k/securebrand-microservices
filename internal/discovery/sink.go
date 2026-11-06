@@ -205,7 +205,7 @@ func (s *Sink) add(ctx context.Context, tx pgx.Tx, q Query, ref string) (string,
 		WHERE source = 'discovery' AND discovered_at >= date_trunc('day', now(), 'UTC')`).Scan(&today); err != nil {
 		return "", err
 	}
-	if today >= s.Cfg.MaxNewPerDay {
+	if s.Cfg.MaxNewPerDay > 0 && today >= s.Cfg.MaxNewPerDay { // 0: no limit
 		return "capped", nil
 	}
 	// Crawled from the next planner run (scheduled, incremental: the

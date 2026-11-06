@@ -53,7 +53,8 @@ Mention checks (docs/runbooks/operations.md, "Mentions") are off unless
 `PILOT_MENTIONS=on` is given: `make pilot-up PILOT_RPS=0.5 PILOT_MENTIONS=on`.
 Every `make pilot-up` writes the setting again, so leaving it out turns
 them off. They use the same ISP exits and page-load gate as the crawl, at
-most `mentions.max_checks_per_day` (300) page loads a day.
+most `mentions.page_load_share` (20%) of their page loads, and at most
+`mentions.max_checks_per_day` (300; 0 = no limit) a day.
 
 The import replaces only the built-in placeholders, so running `make
 pilot-up` again never undoes a rotation registry-sync promoted. To load

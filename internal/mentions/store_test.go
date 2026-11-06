@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -250,8 +251,14 @@ func TestClaimCheck(t *testing.T) {
 	if ok, _ := ClaimCheck(ctx, db, day.AddDate(0, 0, 1), 2); !ok {
 		t.Fatal("the next day starts used up")
 	}
-	if ok, _ := ClaimCheck(ctx, db, day.AddDate(0, 0, 2), 0); ok {
-		t.Fatal("a zero cap allowed a check")
+	// No cap (0): more checks than the old default cap (300) in a day.
+	for i := range 400 {
+		if ok, err := ClaimCheck(ctx, db, day.AddDate(0, 0, 2), 0); err != nil || !ok {
+			t.Fatalf("check %d without a cap: %v %v", i, ok, err)
+		}
+	}
+	if n, _ := ChecksOn(ctx, db, day.AddDate(0, 0, 2)); n != 400 {
+		t.Fatalf("checks counted without a cap: %d", n)
 	}
 	if n, _ := ChecksOn(ctx, db, day); n != 2 {
 		t.Fatalf("used %d", n)
@@ -375,6 +382,32 @@ func TestAdderCap(t *testing.T) {
 	}
 	if a := get(t, db, "v:third.page"); a.Status != StatusListed || *a.PageRef != "id:100064000005003" {
 		t.Fatalf("third: %+v", a)
+	}
+}
+
+// Without a cap (0), more public accounts than the old default cap (50)
+// are added in one day.
+func TestAdderNoLimit(t *testing.T) {
+	db := testenv.Postgres(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	const n = 60
+	evs := make([]Event, 0, n)
+	for i := range n {
+		evs = append(evs, ev(fmt.Sprintf("v:page.%d", i), 1, int64(i+1), 0, ViaTag, now))
+	}
+	copyEvents(t, db, evs...)
+	aggregate(t, db)
+	ad := &Adder{MaxNewPerDay: 0, Interval: 3 * time.Hour, Loc: time.FixedZone("UTC+3", 3*3600)}
+	for i := range n {
+		res, err := ad.Public(ctx, db, fmt.Sprintf("v:page.%d", i), Verdict{Status: StatusPublic, Kind: KindPage, ID: 100064000006000 + int64(i)})
+		if err != nil || res != Added {
+			t.Fatalf("account %d: %v %v", i, res, err)
+		}
+	}
+	var added int
+	if err := db.QueryRow(ctx, `SELECT count(*) FROM page_schedule WHERE source = 'mention'`).Scan(&added); err != nil || added != n {
+		t.Fatalf("added %d (%v), want %d", added, err, n)
 	}
 }
 
