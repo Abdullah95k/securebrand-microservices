@@ -37,6 +37,14 @@ jobs:
           else
             echo "no buf module on the base branch yet"
           fi
+      - name: No secrets in the history (gitleaks)
+        run: |
+          go install github.com/zricethezav/gitleaks/v8@v8.24.3
+          gitleaks git . --redact --no-banner
+      - name: Known vulnerabilities in the code and its dependencies (govulncheck)
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          govulncheck ./...
       - name: Fixtures contain no real signed URLs
         run: |
           if grep -rlE 'oh=00_|_nc_cat=' testdata/; then
@@ -103,6 +111,22 @@ jobs:
           docker build -f deploy/docker/Dockerfile -t fbs:ci .
           docker build -f deploy/docker/Dockerfile --target browser -t fbs:ci-browser .
           docker run --rm --entrypoint chromium fbs:ci-browser --version
+      # The production image (fbs:ci): critical vulnerabilities with a fix
+      # fail the build; high ones are listed. The browser image isn't used in
+      # production: listed only.
+      - name: Image scan (production image)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: fbs:ci
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Image scan report (high, and the browser image)
+        if: always()
+        run: |
+          for img in fbs:ci fbs:ci-browser; do
+            trivy image --severity HIGH,CRITICAL --ignore-unfixed --no-progress "$img" || true
+          done
       - name: Chart smoke run (the chart's workloads in Docker against fakefb)
         run: |
           python3 -c 'import yaml' 2>/dev/null || sudo apt-get install -y python3-yaml

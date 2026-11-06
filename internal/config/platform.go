@@ -151,7 +151,7 @@ func (c *Config) ApplyPlatform() error {
 		c.S3.Endpoint = strings.TrimSuffix(c.S3.Endpoint, "/")
 	}
 	for key, dst := range map[string]*string{"S3_REGION": &c.S3.Region, "S3_ACCESS_KEY": &c.S3.AccessKey,
-		"S3_SECRET_KEY": &c.S3.SecretKey, "S3_BUCKET_RAW": &c.S3.RawBucket, "S3_BUCKET_MEDIA": &c.S3.MediaBucket} {
+		"S3_SECRET_KEY": &c.S3.SecretKey, "S3_BUCKET_RAW": &c.S3.RawBucket, "S3_BUCKET_MEDIA": &c.S3.MediaBucket} { // gitleaks:allow (key names)
 		if s[key] != "" {
 			*dst = s[key]
 		}

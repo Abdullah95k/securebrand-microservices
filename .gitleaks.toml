@@ -1,0 +1,11 @@
+# gitleaks (CI: the test job scans the whole history). The default rules,
+# less what is known to be synthetic. .gitleaksignore lists single findings
+# checked by hand.
+title = "fbs"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "fakefb's fixtures: pagination tokens fakefb makes up, never Facebook's"
+paths = ['''^testdata/fb/[^/]+/fakefb_[^/]+/''']
