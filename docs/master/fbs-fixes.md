@@ -8,7 +8,7 @@
 
 | # | Fix | PR | Status | Evidence |
 |---|---|---|---|---|
-| 1 | Keep the shared server's data (copy to the backups bucket), then stop fbs there | — | blocked: needs the backups bucket's name, endpoint and how the owner signs in to it | Commands in `docs/master/fbs-req001-answers.md` once known |
+| 1 | Keep the shared server's data (copy to the backups bucket), then stop fbs there | the page-list PR (runbook) | proposed: waits for the master's OK, then the owner runs it before production starts | `docs/runbooks/shared-server-copy.md`, rehearsed against local stand-in buckets (checksums and file counts match) |
 | 2 | Keep everything: every retention setting 0, no lifecycle rule on raw files | [#54](https://github.com/Abdullah95k/securebrand-microservices/pull/54) | done | `TestDefaultsKeepEverything` (`internal/config`), `TestDefaultsDeleteNothing` (`internal/scheduler`); both fail if a deleting default returns |
 | 3 | Per-IP cost model in `make pilot-report` | — | not started | |
 | 4 | Production wiring, then the clean 48-hour run on the production cluster | [#55](https://github.com/Abdullah95k/securebrand-microservices/pull/55) (wiring), the page-list PR | wiring done; pages and canaries in the page-list PR; the run waits for the cluster, `PROXIES_FBS` and the pilot to stop | `make chart-smoke`, second run: `values-production.yaml` against fakefb through a stand-in `platform-credentials`, topics made beforehand, no topic created by fbs, every media file under `fbs/`. `TestApplyPlatform*` (`internal/config`), `TestAutoTopicCreation` (`internal/platform/kafka`), `TestOrphansStayInsideThePrefix` (`internal/media`), `TestFolder` (`internal/crawl/rawsink`) |

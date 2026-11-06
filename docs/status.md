@@ -44,7 +44,7 @@
 - **Valkey (the master):** confirm `SELECT 1` on the live instance (database 1 is reserved for fbs).
 - **Kafka permissions (the master):** confirm `fbs-kafka` can list offsets and describe groups `fbs-*` on the live cluster.
 - **Media acknowledgements (the master):** fbs waits for consumer `analysis` on `fb.media.processed.v1`, the name sb-analysis's config uses (`analysis.media.consumer`). The master wrote `sb-analysis`: one of the two must change, or files are deleted at 72 hours instead of after analysis.
-- **The backups copy** (REQ-007 fix 1): the method is proposed; the owner runs it before the pilot stops.
+- **The backups copy** (REQ-007 fix 1): proposed in `docs/runbooks/shared-server-copy.md`; once the master agrees, the owner runs it, and it stops the pilot at the end.
 
 ## Tracking
 
