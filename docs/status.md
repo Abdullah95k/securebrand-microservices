@@ -12,10 +12,10 @@
   - `values-production.yaml`;
   - `make chart-smoke` runs it against fakefb.
 - **Production pages** (canary pages, the 150-page list, the seed hook) and the shared-server copy runbook: done, [#56](https://github.com/Abdullah95k/securebrand-microservices/pull/56).
-- **REQ-017** (no daily caps; checks held to 20% of page loads): in a PR.
+- **REQ-017** (no daily caps; checks held to 20% of page loads): done, [#57](https://github.com/Abdullah95k/securebrand-microservices/pull/57). The checker is turned on in production after the first 48-hour run.
+- **REQ-007 fixes 3, 5 and 6** (per-IP cost in the pilot report; identity-pool and freshness alerts; gitleaks, govulncheck, Trivy and Dependabot in CI): in a PR.
 - **Next:**
-  - fix 3: the per-IP cost model;
-  - fixes 5–13;
+  - fixes 7–13;
   - the REQ-001 answers;
   - REQ-018.
 
