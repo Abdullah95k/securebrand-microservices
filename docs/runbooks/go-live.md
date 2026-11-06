@@ -7,17 +7,20 @@ What has to happen before fbs scrapes real Facebook in production, in order. Ite
 Commenter data is personal data.
 - **Reviews:** a Facebook terms-of-service review, a legitimate-interest assessment and a DPIA.
 - **`privacy.pii_mode`:** `full` keeps author ids and names, readable only with the `pii:read` scope. `pseudonymized` keeps only the HMAC `author_key`.
-- **Retention**, under `privacy.retention` (0 keeps that data for good). The defaults:
+- **Retention**, under `privacy.retention` (0 keeps that data for good). **Every default is 0: fbs keeps everything** (the owner's decision D-004: every processed record and every version of it, kept forever; nothing is deleted from fbs's database until the platform's permanent store holds it):
 
-  | Data | Kept for |
-  |---|---|
-  | comments | 365 days |
-  | comment authors | for good (`authors_inactive_days: 0`); an erasure request still removes the person |
-  | post metrics | 180 days |
-  | raw payloads | 7 days |
-  | media rows | 30 days |
-  | jobs | 90 days |
-  | checked accounts (mentions) | 180 days after the last mention and check (`mentions.retention_days`) |
+  | Data | Kept for | Setting |
+  |---|---|---|
+  | comments | for good | `comments_days: 0` |
+  | comment authors | for good | `authors_inactive_days: 0` |
+  | post metrics | for good | `metrics_days: 0` |
+  | raw payloads | for good; fbs installs no lifecycle rule | `raw_payload_days: 0` |
+  | media rows | for good (the files themselves are deleted once analysed, R5) | `media_rows_days: 0` |
+  | jobs | for good | `jobs_days: 0` |
+  | discovery mentions | for good | `discovery.mentions_days: 0` |
+  | checked accounts (mentions) | for good | `mentions.retention_days: 0` |
+
+  Erasure stays switched off: it runs only on the owner's written order.
 
 - **Erasure:** an owner for erasure requests (`POST /v1/erasure-requests`, scope `admin`). An erased author or page is also suppressed, so later scrapes never bring the data back.
 
@@ -46,7 +49,7 @@ The query ids in `configs/queries.seed.yaml` are placeholders, and the parsers w
 | Kafka | 3 brokers: in-cluster (Strimzi) or managed. TLS and SASL (`PLAIN`, `SCRAM-SHA-256/512`) are supported: `kafka.tls`, `kafka.sasl`. AWS MSK IAM auth is not. A Schema Registry is optional (`kafka.schema_registry.url`, Helm `hooks.schemas`). |
 | Postgres 18 | Managed, with point-in-time backups. At full scale about 100M row writes a day; comments and posts are partitioned by month. An optional read replica takes the API's reads (`postgres.read_dsn`). |
 | Valkey or Redis | Highly available, with persistence. It holds rate limits, job accounting, checkpoints and leases. TLS: `redis.tls`. |
-| S3 | A media bucket: temporary; add a lifecycle rule expiring objects after about 4 days, as a safety net beyond `media.ttl`. A raw bucket: drift captures; a 7-day lifecycle. |
+| S3 | A media bucket: temporary; add a lifecycle rule expiring objects after about 4 days, as a safety net beyond `media.ttl`. A raw bucket: drift captures, kept for good (fbs installs no lifecycle rule; the platform's 30-day rule applies only to `fbs/30d/`). |
 | Egress | Crawler and registry-sync pods to your proxy endpoints; the media downloader to Facebook's CDN directly (no proxy). |
 | Images | Tag a release (`git tag v0.2.0 && git push origin v0.2.0`). The release workflow publishes `ghcr.io/abdullah95k/fbs:<version>` and `<version>-browser`. Make the package public, or give the cluster a pull secret (`imagePullSecrets`). |
 
