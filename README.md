@@ -154,8 +154,12 @@ Settings that matter most:
 | `crawler.slots`, `crawler.lanes`, `crawler.lane_min` | 240 / p2 ≤ 96 / 12 | In-flight tasks per pod and stage, shared by the lanes in priority order (on-demand > scheduled > backfill); backfill capped at 40%, each lane keeps a minimum |
 | `media.ttl`, `media.required_consumers` | 72h / `[analysis]` | Temporary media lifecycle |
 | `privacy.pii_mode` | `full` | `pseudonymized` drops author identity and keeps `author_key` |
-| `privacy.author_hmac_key` | dev key | Must be set in prod (validated) |
+| `privacy.author_hmac_key` | dev key | Must be set in prod in `pseudonymized` mode (validated); `full` mode needs none |
+| `platform.credentials_dir` | empty (off) | The SecureBrand platform's `platform-credentials` Secret, mounted one file per key: the Postgres, Kafka, Valkey and S3 connections come from it and win over the config; a missing connection key stops the service. Helm: `platformCredentials`. |
 | `kafka.topic_prefix` | empty | Namespaces topics **and** consumer groups |
+| `kafka.auto_create_topics` | on | A produce to a missing topic creates it. Off where a platform creates every topic. |
+| `s3.media_prefix`, `s3.raw_prefix` | `media/`, empty | Where media and raw responses go in their buckets. With `raw_prefix: fbs`, failures go to `fbs/keep/failures/` and the rest to `fbs/30d/all/`. The media orphan scan stays inside `media_prefix`. |
+| `s3.bucket_lifecycle` | on | fbs installs the media bucket's TTL rule (and the raw rule when `raw_payload_days` > 0). Off on shared buckets, where a lifecycle configuration would replace every other service's rules. |
 | `kafka.schema_registry.url` | empty | Registry for the fb.v1 schemas (`fbctl schemas apply`, Helm `hooks.schemas`); see the [record schemas contract](docs/contracts/kafka-schemas.md) |
 | `kafka.tls`, `kafka.sasl`, `redis.tls` | off | TLS (CA, client certificate, server name) to the brokers and Valkey; SASL `plain`, `scram-sha-256` or `scram-sha-512`. Put the password in `FBS_KAFKA__SASL__PASSWORD`. |
 

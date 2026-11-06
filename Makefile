@@ -84,20 +84,29 @@ KUBECONFORM ?= kubeconform
 KUBECONFORM_ARGS = -strict -summary -kubernetes-version 1.30.0 -schema-location default \
 	-schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
 
+PROD_VALUES = -f deploy/helm/fbs/values-production.yaml
 ## Lint the Helm chart and validate its renders (defaults, every optional
-## object, the staging example) against the Kubernetes and CRD schemas.
+## object, the staging example, the production values) against the
+## Kubernetes and CRD schemas.
 chart-check:
 	$(HELM) lint deploy/helm/fbs
 	$(HELM) lint deploy/helm/fbs -f deploy/helm/fbs/examples/fakefb.yaml
+	$(HELM) lint deploy/helm/fbs $(PROD_VALUES)
+	set -o pipefail; $(HELM) template fbs deploy/helm/fbs -n fbs $(PROD_VALUES) --set image.tag=0000000000000000000000000000000000000000 \
+	  | $(KUBECONFORM) $(KUBECONFORM_ARGS)
 	set -o pipefail; $(HELM) template fbs deploy/helm/fbs | $(KUBECONFORM) $(KUBECONFORM_ARGS)
 	set -o pipefail; $(HELM) template fbs deploy/helm/fbs --set keda.authSecret=fbs-keda-kafka,tlsFiles.existingSecret=fbs-tls,alerts.enabled=true,dashboards.enabled=true,serviceMonitor.enabled=true,api.ingress.enabled=true,networkPolicy.enabled=true,hooks.schemas=true \
 	  | $(KUBECONFORM) $(KUBECONFORM_ARGS)
 	set -o pipefail; $(HELM) template fbs deploy/helm/fbs -f deploy/helm/fbs/examples/fakefb.yaml | $(KUBECONFORM) $(KUBECONFORM_ARGS)
 
 ## Run the chart's hooks and Deployments in Docker exactly as rendered, then
-## real backfills against fakefb (make infra-up and make docker first).
+## real backfills against fakefb (make infra-up and make docker first): with
+## the staging example, then with the production values, the script standing
+## in for the platform's Secrets and topics.
 chart-smoke:
 	python3 scripts/chart-smoke.py --image $(IMAGE) --helm $(HELM)
+	python3 scripts/chart-smoke.py --image $(IMAGE) --helm $(HELM) --values deploy/helm/fbs/values-production.yaml \
+	  --values deploy/helm/fbs/examples/production-smoke.yaml
 
 compose-up:
 	$(NOT_PILOT)

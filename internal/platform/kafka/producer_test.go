@@ -31,12 +31,14 @@ func TestAutoTopicCreation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer on.Close()
-	adm := kadm.NewClient(on.Client())
-	t.Cleanup(func() {
+	// On the client without auto-creation: asking for a missing topic's
+	// metadata with it on would create the topic.
+	adm := kadm.NewClient(off.Client())
+	defer func() { // before the clients close
 		cctx, ccancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer ccancel()
-		_, _ = adm.DeleteTopics(cctx, prefix+"created")
-	})
+		_, _ = adm.DeleteTopics(cctx, prefix+"created", prefix+"missing")
+	}()
 
 	exists := func(name string) bool {
 		td, err := adm.ListTopics(ctx, name)

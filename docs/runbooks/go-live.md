@@ -41,6 +41,23 @@ The query ids in `configs/queries.seed.yaml` are placeholders, and the parsers w
    - the parsers are fixed against the real responses;
    - the pacing, proxy routing and daily budget defaults are set from the measurements.
 
+## On the SecureBrand platform
+
+Sections 3 and 4 describe an install of your own. On the platform's production cluster (namespace `fbs`), the platform provides the infrastructure, and the chart's `values-production.yaml` follows its conventions (`infra/README.md` of the platform repository):
+
+| What | How fbs gets it |
+|---|---|
+| Postgres 18, Kafka, Valkey, S3 | The Secret `platform-credentials`, mounted as files at `/etc/platform-credentials` (`platformCredentials`). No `fbs-env` Secret. |
+| Kafka topics | The platform creates all 26 (`infra/production/kafka.tf`). fbs runs no topics hook and creates none (`kafka.auto_create_topics: false`): a missing topic is an error. |
+| Valkey | Shared by every service: fbs uses its own logical database (`redis.db: 1`, agreed with the platform). |
+| Raw responses | `fbs/keep/failures/` (kept), `fbs/30d/all/` (the platform's 30-day rule). fbs adds no bucket rules. |
+| Media | Under `fbs/` in the shared media bucket. fbs deletes its files after the analysis acknowledgement or at `media.ttl`. The orphan scan never leaves `fbs/`. |
+| Proxies | The Secret `proxies`, key `proxies.yaml`: the owner's GitHub secret `PROXIES_FBS` as pasted. It's a config file layered over `config.yaml`, in the format of `phase0/proxies.example.yaml`, with the ISP tier named `isp` (production routes everything through `isp`). |
+| Canary pages | At least three public pages that post daily and get reply threads, as `registry_sync.canary_pages`. They go in `values-production.yaml`, or inside `PROXIES_FBS` to keep them private. **Without them a new database keeps its placeholder query ids, and nothing is collected.** |
+| Images | The platform builds `registry.digitalocean.com/securebrand/fbs:<commit>` from `deploy/docker/Dockerfile` (the last stage, no browser) and sets `image.repository` and `image.tag` (`gitops/services/fbs.yaml`). |
+
+`make chart-smoke` runs these values against fakefb, with the script standing in for the platform's Secrets and topics.
+
 ## 3. Infrastructure
 
 | What | Notes |
@@ -64,7 +81,7 @@ The query ids in `configs/queries.seed.yaml` are placeholders, and the parsers w
 | `FBS_REDIS__PASSWORD` | |
 | `FBS_KAFKA__SASL__USERNAME`, `FBS_KAFKA__SASL__PASSWORD` | When `kafka.sasl.mechanism` is set |
 | `FBS_S3__ACCESS_KEY`, `FBS_S3__SECRET_KEY` | |
-| `FBS_PRIVACY__AUTHOR_HMAC_KEY` | 32 or more random bytes, for example `openssl rand -hex 32`. Changing it later changes every author's pseudonymous key. |
+| `FBS_PRIVACY__AUTHOR_HMAC_KEY` | Only in `pseudonymized` mode: 32 or more random bytes, for example `openssl rand -hex 32`. Changing it later changes every author's pseudonymous key. |
 
 `secretFiles.existingSecret` (`fbs-proxies`) holds the key `proxies.yaml`: the `fb.proxy` tiers from your Phase 0 file.
 
