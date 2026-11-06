@@ -120,7 +120,7 @@ func TestMentionsConfig(t *testing.T) {
 	m := c.Mentions
 	if m.Enabled || !m.IncludeCommentAuthors || m.MaxChecksPerDay != 300 || m.MaxNewPerDay != 50 || m.TimeZone != "Asia/Baghdad" ||
 		m.RecheckAfter != 4380*time.Hour || m.RetryBackoff != time.Hour || m.RetryMaxBackoff != 168*time.Hour || m.Concurrency != 2 ||
-		m.CandidateWeight != 2 || m.RetentionDays != 180 || m.MaxFailures != 10 {
+		m.CandidateWeight != 2 || m.RetentionDays != 0 || m.MaxFailures != 10 {
 		t.Fatalf("defaults: %+v", m)
 	}
 	at := time.Date(2026, 11, 2, 22, 30, 0, 0, time.UTC) // 01:30 the next day in Iraq
@@ -148,6 +148,25 @@ func TestMentionsConfig(t *testing.T) {
 		mutate(&c.Mentions)
 		if c.Validate() == nil {
 			t.Errorf("%s accepted", name)
+		}
+	}
+}
+
+// Every retention default is 0, which keeps that data for good (D-004).
+func TestDefaultsKeepEverything(t *testing.T) {
+	c, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := c.Privacy.Retention
+	for name, days := range map[string]int{
+		"privacy.retention.comments_days": r.CommentsDays, "privacy.retention.authors_inactive_days": r.AuthorsInactiveDays,
+		"privacy.retention.metrics_days": r.MetricsDays, "privacy.retention.raw_payload_days": r.RawPayloadDays,
+		"privacy.retention.media_rows_days": r.MediaRowsDays, "privacy.retention.jobs_days": r.JobsDays,
+		"discovery.mentions_days": c.Discovery.MentionsDays, "mentions.retention_days": c.Mentions.RetentionDays,
+	} {
+		if days != 0 {
+			t.Errorf("%s defaults to %d; it must be 0 (keep for good)", name, days)
 		}
 	}
 }

@@ -190,8 +190,10 @@ before publishing, so re-scrapes never reintroduce the data; the persister
 also checks the suppression table on every write, so data crawled before the
 crawlers' last refresh and still in flight is dropped (a suppressed page) or
 stored redacted (a suppressed author). Kafka topics age out by retention (7
-days); raw payloads by a bucket lifecycle rule the crawler sets on the raw
-bucket (`privacy.retention.raw_payload_days`, 7).
+days). Raw payloads are never deleted by fbs: a positive
+`privacy.retention.raw_payload_days` would install a lifecycle rule on the
+raw bucket, and the default is 0 (the platform adds its own 30-day rule on
+`fbs/30d/` only).
 
 An author erasure also deletes the author's media whose comment isn't
 stored yet (comment media carry the author key), and clears the author's

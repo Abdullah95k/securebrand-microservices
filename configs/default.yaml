@@ -316,15 +316,18 @@ privacy:
   pii_mode: full        # full | pseudonymized
   author_hmac_key: "dev-only-change-me"
   download_author_avatars: false
-  # Days each kind of data is kept; 0 keeps it for good. Erasure requests
-  # remove a person's or a page's data whatever these say.
+  # Days each kind of data is kept; 0 keeps it for good. The owner keeps
+  # every processed record and every version of it (decision D-004): all 0.
+  # Nothing is deleted from fbs's database until the platform's permanent
+  # store holds it. Erasure (dormant: only on the owner's written order)
+  # removes a person's or a page's data whatever these say.
   retention:
-    comments_days: 365
-    authors_inactive_days: 0   # comment authors are never deleted for inactivity
-    metrics_days: 180
-    raw_payload_days: 7
-    media_rows_days: 30
-    jobs_days: 90
+    comments_days: 0
+    authors_inactive_days: 0
+    metrics_days: 0
+    raw_payload_days: 0    # >0 would install a lifecycle rule on the raw bucket; raw files are never deleted by fbs
+    media_rows_days: 0
+    jobs_days: 0
 
 # fbs-registry-sync: every interval it loads the canary pages, scans them and
 # their JS bundles for Relay doc_ids, records new ones as candidates, checks
@@ -347,7 +350,7 @@ discovery:
   max_new_per_day: 200   # pages and profiles added per UTC day; 0 adds none
   include_profiles: true # people's public profiles as well as pages
   concurrency: 2         # searches a crawler runs at once
-  mentions_days: 30      # mentions kept; 0 = for good
+  mentions_days: 0       # mentions kept; 0 = for good (D-004)
 
 # Mentions (docs/runbooks/operations.md, "Mentions"). The persister records
 # every account a new post or comment mentions: pages and people tagged in
@@ -378,7 +381,7 @@ mentions:
   max_failures: 10           # failed checks in a row park an account (unchecked) until mentioned after recheck_after
   concurrency: 2             # checks a crawler runs at once
   candidate_weight: 2        # starting priority of a candidate from another tool
-  retention_days: 180        # rows nobody mentioned or checked for this long are deleted; 0 = kept
+  retention_days: 0          # rows nobody mentioned or checked for this long are deleted; 0 = kept for good (D-004)
 
 registry_sync:
   interval: 30m

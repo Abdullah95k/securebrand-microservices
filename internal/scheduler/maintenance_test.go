@@ -432,3 +432,61 @@ func TestAuthorsAreKeptByDefault(t *testing.T) {
 		t.Fatalf("with authors_inactive_days 365, %d author(s) left", n)
 	}
 }
+
+// The defaults keep everything (the owner's decision D-004): years-old jobs,
+// media rows (and what ties a deleted file's row to its content), discovery
+// mentions, checked accounts and registry-sync runs all survive a tick.
+func TestDefaultsDeleteNothing(t *testing.T) {
+	db := testenv.Postgres(t)
+	ctx := context.Background()
+	cfg, err := config.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`INSERT INTO jobs (job_id, kind, lane, mode, page_ref, params, status, finished_at)
+			VALUES (gen_random_uuid(), 'on_demand', 1, 'full', 'v:a', '{}', 'completed', now() - interval '1000 days')`,
+		`INSERT INTO media (media_id, fb_media_id, variant, kind, owner_type, status, discovered_at)
+			VALUES ('00000000-0000-0000-0000-000000000001', 'a', 'hd', 'video', 'post', 'failed', now() - interval '1000 days')`,
+		`INSERT INTO media (media_id, fb_media_id, variant, kind, owner_type, comment_id, source_url, alt_text, s3_key, status, discovered_at)
+			VALUES ('00000000-0000-0000-0000-000000000002', 'b', 'orig', 'photo', 'comment', 7, 'https://cdn.example/b.jpg', 'alt',
+			'fbs/media/b.jpg', 'deleted', now() - interval '1000 days')`,
+		`INSERT INTO comment_authors (author_key, author_id, name, first_seen_at, last_seen_at)
+			VALUES ('\x01', '100001', 'Author', now() - interval '1000 days', now() - interval '1000 days')`,
+		`INSERT INTO discovery_keywords (id, term, normalized, language) VALUES (1, 'Baghdad', 'baghdad', 'en')`,
+		`INSERT INTO discovery_mentions (keyword_id, post_fb_id, owner_ref, owner_kind, found_at, matched_existing)
+			VALUES (1, '100000000000777', 'v:fake.page', 'page', now() - interval '1000 days', false)`,
+		`INSERT INTO checked_accounts (account_ref, source, first_seen_at, last_seen_at)
+			VALUES ('v:fake.other', 'mention', now() - interval '1000 days', now() - interval '1000 days')`,
+		`INSERT INTO registry_sync_runs (started_at, finished_at, status, report)
+			VALUES (now() - interval '1000 days', now() - interval '1000 days', 'ok', '{}')`,
+	} {
+		if _, err := db.Exec(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	count := func(q string) int {
+		t.Helper()
+		var n int
+		if err := db.QueryRow(ctx, q).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	tables := []string{"jobs", "media", "comment_authors", "discovery_mentions", "checked_accounts", "registry_sync_runs"}
+	if err := (&Maintenance{DB: db, Cfg: cfg}).Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range tables {
+		if n := count(`SELECT count(*) FROM ` + table); n == 0 {
+			t.Errorf("the defaults deleted every row of %s", table)
+		}
+	}
+	if n := count(`SELECT count(*) FROM media`); n != 2 {
+		t.Errorf("the defaults deleted media rows: %d of 2 left", n)
+	}
+	if n := count(`SELECT count(*) FROM media WHERE media_id = '00000000-0000-0000-0000-000000000002'
+		AND fb_media_id <> '' AND source_url IS NOT NULL AND alt_text IS NOT NULL AND comment_id IS NOT NULL AND s3_key IS NOT NULL`); n != 1 {
+		t.Error("the defaults scrubbed a deleted file's media row")
+	}
+}
