@@ -7,9 +7,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/registry"
 )
 
 func TestPagesImport(t *testing.T) {
@@ -58,5 +61,31 @@ func TestPagesImport(t *testing.T) {
 	}
 	if created, err := im.register(context.Background(), map[string]any{"page": "new"}); err != nil || !created {
 		t.Fatalf("new page: created=%v err=%v", created, err)
+	}
+}
+
+// Against real Facebook the seed waits for fbs-registry-sync to replace the
+// seed's placeholder doc_ids, and gives up naming the queries still missing.
+func TestWaitRegistryReady(t *testing.T) {
+	placeholder := []registry.Query{{Name: "timeline", DocID: "9000000000000001", Status: "active"},
+		{Name: "replies", DocID: "9000000000000003", Status: "active"}}
+	real := []registry.Query{{Name: "timeline", DocID: "9000000000000001", Status: "fallback"},
+		{Name: "timeline", DocID: "24785123456789012", Status: "active"},
+		{Name: "replies", DocID: "31415926535897932", Status: "active"}}
+	calls := 0
+	list := func(context.Context) ([]registry.Query, error) {
+		calls++
+		if calls < 3 {
+			return placeholder, nil
+		}
+		return real, nil
+	}
+	if err := waitRegistryReady(context.Background(), list, time.Millisecond, time.Minute); err != nil || calls != 3 {
+		t.Fatalf("err %v after %d polls, want ready on the third", err, calls)
+	}
+	err := waitRegistryReady(context.Background(), func(context.Context) ([]registry.Query, error) { return placeholder, nil },
+		time.Millisecond, 10*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "[replies timeline]") {
+		t.Fatalf("gave up with %v, want the missing queries named", err)
 	}
 }

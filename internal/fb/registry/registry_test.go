@@ -92,3 +92,20 @@ func TestSeedRoundTripAndPlaceholders(t *testing.T) {
 		t.Fatal("client params changed")
 	}
 }
+
+// A query is ready for real Facebook once its active entry has a real
+// doc_id; a placeholder, or no active entry at all, isn't.
+func TestNotReady(t *testing.T) {
+	qs := []Query{
+		{Name: "timeline", DocID: "9000000000000001", Status: "fallback"},
+		{Name: "timeline", DocID: "24785123456789012", Status: "active"},
+		{Name: "comments", DocID: "9000000000000002", Status: "active"},
+		{Name: "replies", DocID: "31415926535897932", Status: "fallback"},
+	}
+	if got := NotReady(qs); len(got) != 2 || got[0] != "comments" || got[1] != "replies" {
+		t.Fatalf("not ready: %v, want [comments replies]", got)
+	}
+	if got := NotReady(qs[:2]); len(got) != 0 {
+		t.Fatalf("not ready: %v, want none", got)
+	}
+}
