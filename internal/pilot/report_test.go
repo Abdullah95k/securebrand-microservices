@@ -138,3 +138,37 @@ func TestSteadyStateCoversWholeCycles(t *testing.T) {
 		t.Fatalf("%d page loads, want 6", n)
 	}
 }
+
+// On dedicated IPs (priced per IP, unlimited traffic) the cost follows the
+// IPs the plan needs, for the projected pages, 1,000 and 10,000; with the
+// IPs the jobs ran on, what each one did an hour is measured.
+func TestFormatCostPerIP(t *testing.T) {
+	since := time.Date(2026, 11, 4, 0, 0, 0, 0, time.UTC)
+	r := Report{Since: since, Until: since.Add(24 * time.Hour), Rows: []Row{
+		// 300 pages, 4 page loads and 450 requests each a day.
+		{Tier: "T1", Kind: "scheduled", Pages: 300, Jobs: 2400, Requests: 135000, PageLoads: 1200, WireBytes: 8_000_000_000},
+	}}
+	p := Projection{Pages: 150, IdentityRPS: 0.5, Headroom: 0.5, PageLoadInterval: 2 * time.Minute, CostPerIP: 3.33, Exits: 10}
+	out := Format(r, p)
+	t.Log("\n" + out)
+	// Measured: 1,200 page loads and 135,000 requests over 24 hours on 10 IPs.
+	// Requests set the plan: 450 x n / 86400 / 0.5 x 1.5 -> 150: 2.3 -> 3;
+	// 1,000: 15.6 -> 16; 10,000: 156.25 -> 157. Page loads need fewer: 4 x
+	// 10,000 / 720 x 1.5 = 83.3.
+	for _, want := range []string{
+		"measured: 5.0 page loads and 562 requests per IP per hour on 10 IPs (page-load capacity 30 an hour each: 17% used)",
+		"estimated cost on dedicated IPs at $3.33 per IP a month",
+		"     150      3       9.99          0.067",
+		"    1000     16      53.28          0.053",
+		"   10000    157     522.81          0.052",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+	// Without a price, no table; without the IPs, no measurement.
+	p.CostPerIP, p.Exits = 0, 0
+	if out := Format(r, p); strings.Contains(out, "estimated cost on dedicated IPs") || strings.Contains(out, "measured:") {
+		t.Fatalf("a table or measurement without a price or IPs:\n%s", out)
+	}
+}
