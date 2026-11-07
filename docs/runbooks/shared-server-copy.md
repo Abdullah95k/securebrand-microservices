@@ -1,6 +1,8 @@
 # Copying the pilot's data off the shared server (REQ-007 fix 1)
 
-**Status:** agreed by the master on 7 November: the method, a temporary key limited to the backups bucket, and the bucket `securebrand-prod-backups` at `https://fra1.digitaloceanspaces.com`.
+**Status:** done on 7 November. Done 7 November: `s3://securebrand-prod-backups/fbs/shared-server/2026-11-07/`, 2,044 objects, 1.4 GiB. `fbs.dump` 1,396,880,351 bytes, SHA-256 checked by reading it back; `counts.txt` at 17:22:12Z (400 pages, 35,242 posts, 2,567,285 comments, 13,055 jobs); `raw/` 2,040 files (2,040 on the server); `phase0-out.tar.gz` 73.9 MiB. The pilot was stopped with `make pilot-down`; its volumes are kept and nothing was deleted. The temporary key was deleted.
+
+Agreed by the master on 7 November: the method, a temporary key limited to the backups bucket, and the bucket `securebrand-prod-backups` at `https://fra1.digitaloceanspaces.com`.
 
 **Who runs it:** the owner, on the shared server (201.79.36.209), in the fbs folder (where `make pilot-up` runs).
 

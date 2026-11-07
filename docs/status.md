@@ -54,14 +54,14 @@
 
 - **The start order** (agreed with the master, 7 November):
   1. The master deploys fbs at its pin and confirms the cluster is up. fbs runs without `PROXIES_FBS`: only the crawlers and registry-sync wait for it.
-  2. The owner runs the copy (`docs/runbooks/shared-server-copy.md`). Its last step stops the pilot.
+  2. The owner runs the copy (`docs/runbooks/shared-server-copy.md`). Its last step stops the pilot. **Done 7 November.**
   3. The owner adds `PROXIES_FBS`, and the master re-runs the setup that turns it into the Secret `proxies`. The crawlers and registry-sync then start.
   4. The page seed: the post-sync hook registers the 150 pages once registry-sync has found the real query ids (it waits up to 25 minutes). If the first sync's hook didn't succeed (it timed out, or the sync ended while the crawlers waited), one more sync of fbs runs it.
   5. The 48-hour run: the master sends `fbctl report load --since 48h` at 24 and 48 hours.
 - **`PROXIES_FBS` (the owner):** added to the platform repository's GitHub secrets only after the pilot has stopped. YAML in fbs's format (`phase0/proxies.example.yaml`): `fb.proxy.tiers` with one tier `isp`, `kind: static_list`, the pilot's country and its endpoints in the same order (exits are named `isp#1`, `isp#2`… by position).
 - **Valkey (the master):** confirm `SELECT 1` on the live instance (database 1 is reserved for fbs).
 - **Kafka permissions (the master):** confirm `fbs-kafka` can list offsets and describe groups `fbs-*` on the live cluster.
-- **The backups copy** (REQ-007 fix 1): agreed by the master (method, temporary key, bucket `securebrand-prod-backups` in fra1). The owner runs it at step 2 of the start order.
+- **The backups copy** (REQ-007 fix 1): **done.** Done 7 November: `s3://securebrand-prod-backups/fbs/shared-server/2026-11-07/`, 2,044 objects, 1.4 GiB. `fbs.dump` 1,396,880,351 bytes, SHA-256 checked by reading it back; `counts.txt` at 17:22:12Z (400 pages, 35,242 posts, 2,567,285 comments, 13,055 jobs); `raw/` 2,040 files (2,040 on the server); `phase0-out.tar.gz` 73.9 MiB. The pilot was stopped with `make pilot-down`; its volumes are kept and nothing was deleted. The temporary key was deleted.
 
 ## Tracking
 
