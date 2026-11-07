@@ -274,6 +274,10 @@ type FB struct {
 	GlobalRPS              int           `koanf:"global_rps"`
 	BootstrapAttempts      int           `koanf:"bootstrap_attempts"`
 	CaptureRaw             string        `koanf:"capture_raw"`
+	// ExitRPS caps the requests each static exit (one IP) sends a second,
+	// fleet-wide, whatever the number of identities on it; 0 = identity_rps,
+	// so an IP sends no more than one identity would.
+	ExitRPS float64 `koanf:"exit_rps"`
 	// RawSample is the share of good responses kept besides the failures
 	// (with capture_raw: failures), with their parser versions.
 	RawSample float64 `koanf:"raw_sample"`
@@ -571,6 +575,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Limits.MaxAgeDays > c.Limits.MaxAgeCapDays {
 		errs = append(errs, errors.New("limits.max_age_days exceeds limits.max_age_cap_days"))
+	}
+	if c.FB.ExitRPS < 0 {
+		errs = append(errs, errors.New("fb.exit_rps must be >= 0 (0 = identity_rps)"))
 	}
 	if c.FB.RawSample < 0 || c.FB.RawSample > 1 {
 		errs = append(errs, errors.New("fb.raw_sample must be between 0 and 1"))

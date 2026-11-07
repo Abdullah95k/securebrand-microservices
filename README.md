@@ -155,6 +155,7 @@ Settings that matter most:
 | `media.ttl`, `media.required_consumers` | 72h / `[analysis]` | Temporary media lifecycle |
 | `privacy.pii_mode` | `full` | `pseudonymized` drops author identity and keeps `author_key` |
 | `privacy.author_hmac_key` | dev key | Must be set in prod in `pseudonymized` mode (validated); `full` mode needs none |
+| `fb.exit_rps` | 0 (= `identity_rps`) | Requests a second each static exit (one IP) sends, fleet-wide through Valkey, however many identities and pods share it: an IP sends no more than one identity would. Page loads have their own gate (`fb.proxy.page_loads`). |
 | `pages.seed`, `pages.seed_backfill` | none / on | Pages registered from configuration by `fbctl pages seed` (Helm `hooks.seedPages`, after each install and upgrade). A page already scheduled is left as it is; each new one is backfilled, as an API registration is. |
 | `platform.credentials_dir` | empty (off) | The SecureBrand platform's `platform-credentials` Secret, mounted one file per key: the Postgres, Kafka, Valkey and S3 connections come from it and win over the config; a missing connection key stops the service. Helm: `platformCredentials`. |
 | `kafka.topic_prefix` | empty | Namespaces topics **and** consumer groups |
