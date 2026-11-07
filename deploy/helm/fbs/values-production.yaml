@@ -6,7 +6,9 @@
 #     mounted as files (platformCredentials below);
 #   - proxies: the Secret proxies, key proxies.yaml, holding the owner's
 #     PROXIES_FBS as pasted: fb.proxy.tiers in fbs's format, layered over
-#     config.yaml like any config file;
+#     config.yaml in the crawlers and registry-sync (secretFiles.components).
+#     The owner adds it only after the pilot has stopped, so the rest of fbs
+#     starts without it, and those pods start once it exists;
 #   - the platform creates every Kafka topic (infra/production/kafka.tf);
 #   - raw responses under fbs/keep/ (kept) and fbs/30d/ in S3_BUCKET_RAW;
 #   - media under fbs/ in S3_BUCKET_MEDIA.

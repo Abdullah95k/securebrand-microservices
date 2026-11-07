@@ -29,9 +29,10 @@ spec:
           image: "{{ $root.Values.image.repository }}:{{ $root.Values.image.tag | default $root.Chart.AppVersion }}"
           command: ["/usr/local/bin/fbctl"]
           args: {{- toYaml .args | nindent 12 }}
-          env: {{- include "fbs.env" $root | nindent 12 }}
+          {{- $pod := dict "root" $root "name" .name }}
+          env: {{- include "fbs.env" $pod | nindent 12 }}
           {{- include "fbs.envFrom" $root | nindent 10 }}
           securityContext: {{- toYaml $root.Values.securityContext | nindent 12 }}
-          volumeMounts: {{- include "fbs.volumeMounts" $root | nindent 12 }}
-      volumes: {{- include "fbs.hookVolumes" $root | nindent 8 }}
+          volumeMounts: {{- include "fbs.volumeMounts" $pod | nindent 12 }}
+      volumes: {{- include "fbs.hookVolumes" $pod | nindent 8 }}
 {{- end }}

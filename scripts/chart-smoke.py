@@ -244,6 +244,19 @@ def main():
             secret_dirs[name] = write_secret(work, name, {"proxies.yaml": PROXIES_YAML})
         else:
             raise SystemExit(f"the values use Secret {name}, which this script can't stand in for")
+    # The platform adds the Secret proxies (the owner's PROXIES_FBS) only once
+    # the pilot has stopped, and that waits for the master to see fbs up: so
+    # the hooks and every pod outside secretFiles.components must start
+    # without it. It is added once they are ready; the pods that mount it
+    # start then.
+    def mounts(spec, secret):
+        return any((v.get("secret") or {}).get("secretName") == secret for v in spec.get("volumes") or [])
+    proxies_dir = secret_dirs.pop("proxies", None)
+    for job in hooks:
+        if proxies_dir and mounts(job["spec"]["template"]["spec"], "proxies"):
+            raise SystemExit(f"hook {job['metadata']['name']} mounts the Secret proxies: it would wait for PROXIES_FBS")
+    later = [d for d in deployments if proxies_dir and mounts(d["spec"]["template"]["spec"], "proxies")]
+    first = [d for d in deployments if d not in later]
     # The Services the values expect besides the infrastructure.
     sh("docker", "run", "-d", "--name", PREFIX + "s3", "--network", args.network, "--network-alias", "s3",
        "--entrypoint", "/usr/local/bin/devs3", args.image, "--addr", ":9000")
@@ -268,21 +281,29 @@ def main():
         for job in sorted(pre_hooks, key=lambda j: j["metadata"]["name"].endswith("-topics")):
             run_hook(job)
 
-        for d in deployments:
-            name = d["metadata"]["name"]
-            pod = d["spec"]["template"]["spec"]
-            sh(*docker_args(name, name, pod, pod["containers"][0], configmaps, secret_dirs, secret_env, args.network))
-        # Readiness, as the readinessProbe would check it.
-        deadline = time.time() + 120
-        pending = {d["metadata"]["name"] for d in deployments}
-        while pending and time.time() < deadline:
-            for name in sorted(pending):
-                status, _ = http(f"http://127.0.0.1:{host_port(name, 9090)}/readyz")
-                if status == 200:
-                    pending.discard(name)
-            time.sleep(1)
-        if pending:
-            raise SystemExit(f"not ready after 120s: {sorted(pending)}")
+        def start(wave):
+            for d in wave:
+                name = d["metadata"]["name"]
+                pod = d["spec"]["template"]["spec"]
+                sh(*docker_args(name, name, pod, pod["containers"][0], configmaps, secret_dirs, secret_env, args.network))
+            # Readiness, as the readinessProbe would check it.
+            deadline = time.time() + 120
+            pending = {d["metadata"]["name"] for d in wave}
+            while pending and time.time() < deadline:
+                for name in sorted(pending):
+                    status, _ = http(f"http://127.0.0.1:{host_port(name, 9090)}/readyz")
+                    if status == 200:
+                        pending.discard(name)
+                time.sleep(1)
+            if pending:
+                raise SystemExit(f"not ready after 120s: {sorted(pending)}")
+
+        start(first)
+        if later:
+            print(f"{len(first)} deployments ready without the Secret proxies")
+            secret_dirs["proxies"] = proxies_dir
+            start(later)
+            print(f"then {len(later)} with it: {sorted(d['metadata']['name'] for d in later)}")
         print(f"all {len(deployments)} deployments ready")
         # Post-install hooks, once the release is up (the page seed).
         for job in post_hooks:

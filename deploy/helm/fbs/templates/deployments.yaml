@@ -40,7 +40,8 @@ spec:
           image: "{{ $root.Values.image.repository }}:{{ $tag }}"
           imagePullPolicy: {{ $root.Values.image.pullPolicy }}
           command: {{- toYaml $c.command | nindent 12 }}
-          env: {{- include "fbs.env" $root | nindent 12 }}
+          {{- $pod := dict "root" $root "name" $name }}
+          env: {{- include "fbs.env" $pod | nindent 12 }}
           {{- include "fbs.envFrom" $root | nindent 10 }}
           ports:
             - {name: metrics, containerPort: 9090}
@@ -57,8 +58,8 @@ spec:
             failureThreshold: 3
           resources: {{- toYaml $c.resources | nindent 12 }}
           securityContext: {{- toYaml $root.Values.securityContext | nindent 12 }}
-          volumeMounts: {{- include "fbs.volumeMounts" $root | nindent 12 }}
-      volumes: {{- include "fbs.volumes" $root | nindent 8 }}
+          volumeMounts: {{- include "fbs.volumeMounts" $pod | nindent 12 }}
+      volumes: {{- include "fbs.volumes" $pod | nindent 8 }}
 {{- if $c.pdb }}
 ---
 apiVersion: policy/v1

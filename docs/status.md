@@ -15,7 +15,11 @@
 - **REQ-017** (no daily caps; checks held to 20% of page loads): done, [#57](https://github.com/Abdullah95k/securebrand-microservices/pull/57). The checker is turned on in production after the first 48-hour run.
 - **REQ-007 fixes 3, 5 and 6** (per-IP cost in the pilot report; identity-pool and freshness alerts; gitleaks, govulncheck, Trivy and Dependabot in CI): done, [#58](https://github.com/Abdullah95k/securebrand-microservices/pull/58). govulncheck's first run found two vulnerabilities, fixed there (brotli 1.2.7, Go 1.27.3).
 - **REQ-007 fixes 7, 8 and 9** (every website and social link; raw failures plus a 1% sample with parser versions; exits named `<tier>#<n>`): done, [#61](https://github.com/Abdullah95k/securebrand-microservices/pull/61).
-- **REQ-007 fixes 10 and 13** (NetworkPolicy egress, on in production; a per-IP request cap in Valkey): in a PR. With them every REQ-007 code fix is in; fix 1 (the copy) and the 48-hour run wait for the cluster and the owner.
+- **REQ-007 fixes 10 and 13** (NetworkPolicy egress, on in production; a per-IP request cap in Valkey): done, [#68](https://github.com/Abdullah95k/securebrand-microservices/pull/68). Every REQ-007 code fix is merged; fix 1 (the copy) and the 48-hour run wait for the cluster and the owner.
+- **fbs starts without `PROXIES_FBS`** (the master's start order, 7 November): [#69](https://github.com/Abdullah95k/securebrand-microservices/pull/69).
+  - Only the crawlers and registry-sync mount the Secret `proxies`. The other pods and the hooks start without it, so the master can see fbs up before the pilot stops.
+  - The crawlers and registry-sync wait for the Secret, and start on their own once it exists.
+  - `make chart-smoke` replays that order.
 - **Next:**
   - the REQ-001 answers;
   - REQ-018.
@@ -24,7 +28,7 @@
 
 | Field | Value |
 |---|---|
-| Commit | `f7ce255cbdcfa99148c8b3224f69ff9e2d2c746f` (#56) |
+| Commit | the merge commit of [#69](https://github.com/Abdullah95k/securebrand-microservices/pull/69), sent to the master when it merges (it replaces `2c9a53d`, #68) |
 | Image | `fbs`: `deploy/docker/Dockerfile`, context `.`, target `""` (the last stage, no browser) |
 | Chart | `deploy/helm/fbs` |
 | Values | `values-production.yaml` |
@@ -44,11 +48,16 @@
 
 ## Waiting on
 
-- **`PROXIES_FBS` (the owner):** the pilot's `phase0/proxies.yaml`, as it is, in the platform repository's GitHub secrets.
+- **The start order** (agreed with the master, 7 November):
+  1. The master deploys fbs at its pin and confirms the cluster is up. fbs runs without `PROXIES_FBS`: only the crawlers and registry-sync wait for it.
+  2. The owner runs the copy (`docs/runbooks/shared-server-copy.md`). Its last step stops the pilot.
+  3. The owner adds `PROXIES_FBS`, and the master re-runs the setup that turns it into the Secret `proxies`. The crawlers and registry-sync then start.
+  4. The page seed: the post-sync hook registers the 150 pages once registry-sync has found the real query ids (it waits up to 25 minutes). If the first sync's hook didn't succeed (it timed out, or the sync ended while the crawlers waited), one more sync of fbs runs it.
+  5. The 48-hour run: the master sends `fbctl report load --since 48h` at 24 and 48 hours.
+- **`PROXIES_FBS` (the owner):** added to the platform repository's GitHub secrets only after the pilot has stopped. YAML in fbs's format (`phase0/proxies.example.yaml`): `fb.proxy.tiers` with one tier `isp`, `kind: static_list`, the pilot's country and its endpoints in the same order (exits are named `isp#1`, `isp#2`… by position).
 - **Valkey (the master):** confirm `SELECT 1` on the live instance (database 1 is reserved for fbs).
 - **Kafka permissions (the master):** confirm `fbs-kafka` can list offsets and describe groups `fbs-*` on the live cluster.
-- **Media acknowledgements (the master):** fbs waits for consumer `analysis` on `fb.media.processed.v1`, the name sb-analysis's config uses (`analysis.media.consumer`). The master wrote `sb-analysis`: one of the two must change, or files are deleted at 72 hours instead of after analysis.
-- **The backups copy** (REQ-007 fix 1): proposed in `docs/runbooks/shared-server-copy.md`; once the master agrees, the owner runs it, and it stops the pilot at the end.
+- **The backups copy** (REQ-007 fix 1): agreed by the master (method, temporary key, bucket `securebrand-prod-backups` in fra1). The owner runs it at step 2 of the start order.
 
 ## Tracking
 

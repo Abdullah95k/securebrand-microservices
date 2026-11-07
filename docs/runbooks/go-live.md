@@ -85,7 +85,7 @@ Sections 3 and 4 describe an install of your own. On the platform's production c
 | `FBS_S3__ACCESS_KEY`, `FBS_S3__SECRET_KEY` | |
 | `FBS_PRIVACY__AUTHOR_HMAC_KEY` | Only in `pseudonymized` mode: 32 or more random bytes, for example `openssl rand -hex 32`. Changing it later changes every author's pseudonymous key. |
 
-`secretFiles.existingSecret` (`fbs-proxies`) holds the key `proxies.yaml`: the `fb.proxy` tiers from your Phase 0 file.
+`secretFiles.existingSecret` (`fbs-proxies`) holds the key `proxies.yaml`: the `fb.proxy` tiers from your Phase 0 file. Only the crawlers and registry-sync mount it (`secretFiles.components`). Until it exists they wait to start, and start on their own once it's created; the other pods and the hooks don't need it.
 
 **Values** (`helm install … -f prod.yaml`):
 
