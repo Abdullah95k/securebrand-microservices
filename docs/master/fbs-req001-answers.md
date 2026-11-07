@@ -15,7 +15,7 @@ Everything fbs needs is in `deploy/helm/fbs/values-production.yaml` at the pin `
 - **Platform conventions:** topics made by the platform (`kafka.auto_create_topics: false`); Valkey database 1; raw files under `fbs/keep/` and `fbs/30d/`; media under `fbs/`; no bucket lifecycle rules from fbs.
 - **The pages:** the 150 pages and the 3 canary pages, which the post-sync hook `fbs-seed-pages` registers.
 - **Network:** NetworkPolicies on: ingress to the API and metrics only, and egress as agreed on 7 November.
-- **Limits:** no daily caps; the mention checker is off for this run.
+- **Limits:** no daily caps. The mention checker runs from the start (the owner, 7 November), held to 20% of the exits' page loads.
 
 ### What's left before it starts
 
@@ -118,7 +118,7 @@ The media downloader stores each picture and video under `fbs/` in the media buc
 
 **`media.ttl` must be above 0** (`internal/config/config.go:602`), so media files can't be kept for good today.
 - **The contract:** media are a handover to analysis, and `fb.media.deleted.v1` says when each file goes.
-- **If the owner wants them kept** ("keep all data"), that needs a change, and I propose it rather than build it: a keep mode in which the janitor moves a handed-over file to `fbs/keep/media/` instead of deleting it. It costs storage; how much, the 48-hour run will measure (media is off on the pilot).
+- **The owner's decision (7 November):** keep deleting media files after analysis acknowledges them or after 72 hours, as now. Nothing changes.
 
 ### 2.4 Erasure: only on request
 

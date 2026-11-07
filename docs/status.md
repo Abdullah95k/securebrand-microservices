@@ -12,7 +12,7 @@
   - `values-production.yaml`;
   - `make chart-smoke` runs it against fakefb.
 - **Production pages** (canary pages, the 150-page list, the seed hook) and the shared-server copy runbook: done, [#56](https://github.com/Abdullah95k/securebrand-microservices/pull/56).
-- **REQ-017** (no daily caps; checks held to 20% of page loads): done, [#57](https://github.com/Abdullah95k/securebrand-microservices/pull/57). The checker is turned on in production after the first 48-hour run.
+- **REQ-017** (no daily caps; checks held to 20% of page loads): done, [#57](https://github.com/Abdullah95k/securebrand-microservices/pull/57). The checker runs in production from the start (the owner, 7 November).
 - **REQ-007 fixes 3, 5 and 6** (per-IP cost in the pilot report; identity-pool and freshness alerts; gitleaks, govulncheck, Trivy and Dependabot in CI): done, [#58](https://github.com/Abdullah95k/securebrand-microservices/pull/58). govulncheck's first run found two vulnerabilities, fixed there (brotli 1.2.7, Go 1.27.3).
 - **REQ-007 fixes 7, 8 and 9** (every website and social link; raw failures plus a 1% sample with parser versions; exits named `<tier>#<n>`): done, [#61](https://github.com/Abdullah95k/securebrand-microservices/pull/61).
 - **REQ-007 fixes 10 and 13** (NetworkPolicy egress, on in production; a per-IP request cap in Valkey): done, [#68](https://github.com/Abdullah95k/securebrand-microservices/pull/68). Every REQ-007 code fix is merged; fix 1 (the copy) and the 48-hour run wait for the cluster and the owner.
@@ -21,14 +21,14 @@
   - The crawlers and registry-sync wait for the Secret, and start on their own once it exists.
   - `make chart-smoke` replays that order.
 - **REQ-001** (the 48-hour run, every deletion, who uses the API, the shared server): answered in [`docs/master/fbs-req001-answers.md`](master/fbs-req001-answers.md). The pilot report follows the 48-hour run.
-  - **One point for the owner:** media files are always deleted after analysis acknowledges them or after 72 hours. Keeping them needs a change (section 2.3), proposed there and not built.
+  - **Media files:** deleted after analysis acknowledges them or after 72 hours, as now (the owner, 7 November).
 - **Next:** REQ-018 (contract v1.0.0).
 
 ## Production pin
 
 | Field | Value |
 |---|---|
-| Commit | `9d13af065ed7fbd49f95cef41d6f0aa71fdb5188` ([#69](https://github.com/Abdullah95k/securebrand-microservices/pull/69)) |
+| Commit | the merge commit of the mention-checker PR (7 November), sent to the master when it merges; it replaces `9d13af0` ([#69](https://github.com/Abdullah95k/securebrand-microservices/pull/69)) |
 | Image | `fbs`: `deploy/docker/Dockerfile`, context `.`, target `""` (the last stage, no browser) |
 | Chart | `deploy/helm/fbs` |
 | Values | `values-production.yaml` |
@@ -42,7 +42,7 @@
 
 - **E:** production uses the pilot's IPs for now; more are added and replaced later. **The pilot stops before production starts**, so the same IPs never carry both.
 - **F:** the same 150-page list; discovery adds more later.
-- **G:** the mention checker runs in production with no cap (REQ-017: 0 means no limit, and checks take at most about 20% of page loads). It is turned on after the first 48-hour run, so that run measures collection alone.
+- **G:** the mention checker runs in production with no cap (REQ-017: 0 means no limit, and checks take at most about 20% of page loads). It runs from the start (the owner, 7 November), so the 48-hour run measures collection and checks together; checks take at most 20% of the exits' page loads.
 - **H:** fixes 5–13 now, while the cluster isn't ready.
 - **I:** the master orchestrates: fbs stays aligned with it.
 
