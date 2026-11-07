@@ -410,7 +410,7 @@ func (p *Pool) rebuild(s Saved) *Identity {
 	if s.Profile != fp.Profile || !s.Tokens.Valid() {
 		return nil
 	}
-	ep, ok := p.proxies.Resume(s.Tier, s.Exit)
+	ep, ok := p.proxies.Resume(s.Tier, s.Exit, s.ExitTag)
 	if !ok {
 		return nil
 	}

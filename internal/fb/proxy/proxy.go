@@ -5,6 +5,7 @@ package proxy
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -29,12 +30,21 @@ type Endpoint struct {
 	SessionID string
 	Country   string
 	ExpiresAt time.Time // zero = no sticky expiry
-	// Bucket groups exits that Facebook likely treats alike: the /24 of a
-	// static endpoint, or a gateway and country. Breakers work per bucket.
+	// Bucket groups exits that Facebook likely treats alike: the /24 of
+	// static IP endpoints (<tier>/net#<k>, the k-th such range in the list),
+	// one endpoint named by host and port (its exit), or a gateway and
+	// country (<tier>@<country>). Breakers work per bucket.
 	Bucket string
-	// Exit names one static exit (tier|host:port) for its page-load gate;
-	// empty for gateways and direct egress, which are not gated.
+	// Exit names one static exit, <tier>#<n> (its place in the tier's
+	// list), for its page-load gate; empty for gateways and direct egress,
+	// which are not gated. Names, buckets and tags never carry the
+	// endpoint's address or credentials: they go to logs, metric labels and
+	// Valkey keys.
 	Exit string
+	// Tag is a one-way digest of the endpoint (its URL with credentials):
+	// a session saved on an exit resumes only on the same endpoint, even
+	// after the list was reordered.
+	Tag string
 }
 
 // Redacted returns the URL without credentials, for logs.
@@ -86,15 +96,24 @@ func New(cfg config.Proxy) (*Pool, error) {
 				return nil, fmt.Errorf("proxy: tier %s has no endpoints", t.Name)
 			}
 			sl := &staticList{name: t.Name, endpoints: t.Endpoints, country: t.Country}
+			nets := map[string]string{} // a /24 -> its bucket name
 			for i, e := range t.Endpoints {
 				// Never echo the value: it holds the proxy's credentials.
 				u, err := url.Parse(e)
 				if err != nil || u.Scheme == "" || u.Hostname() == "" {
 					return nil, fmt.Errorf("proxy: tier %s endpoint %d is not a URL like http://user:pass@host:port", t.Name, i+1)
 				}
-				exit := t.Name + "|" + net.JoinHostPort(u.Hostname(), u.Port())
-				sl.buckets = append(sl.buckets, staticBucket(t.Name, e))
+				exit := t.Name + "#" + strconv.Itoa(i+1)
+				bucket := exit
+				if r := staticNet(e); r != "" {
+					if nets[r] == "" {
+						nets[r] = t.Name + "/net#" + strconv.Itoa(len(nets)+1)
+					}
+					bucket = nets[r]
+				}
+				sl.buckets = append(sl.buckets, bucket)
 				sl.exits = append(sl.exits, exit)
+				sl.tags = append(sl.tags, EndpointTag(e))
 				p.pages.gate(exit)
 			}
 			p.tiers[t.Name] = sl
@@ -268,13 +287,15 @@ func (p *Pool) ObservePageLoad(ep Endpoint, c detect.Class) {
 // saved before a restart (session.Pool.Resume). It is false when tier no
 // longer has that exit, or its bucket is cooling down. Only static exits and
 // direct egress resume: a gateway's sticky sessions expire.
-func (p *Pool) Resume(tier, exit string) (Endpoint, bool) {
+func (p *Pool) Resume(tier, exit, tag string) (Endpoint, bool) {
 	switch t := p.tiers[tier].(type) {
 	case *staticList:
 		for i, e := range t.exits {
 			if e == exit {
 				ep := t.endpoint(i)
-				return ep, !p.IsOpen(ep)
+				// The same place in the list, but another endpoint (the list
+				// was reordered or changed): its session belongs elsewhere.
+				return ep, ep.Tag == tag && !p.IsOpen(ep)
 			}
 		}
 	case direct:
@@ -283,39 +304,34 @@ func (p *Pool) Resume(tier, exit string) (Endpoint, bool) {
 	return Endpoint{}, false
 }
 
-// staticBucket is the /24 of an IPv4 endpoint (/48 for IPv6). An endpoint
-// named by hostname is its host and port: providers that sell static IPs
-// behind one hostname give each IP its own port, so one breaker per host
-// would stop every IP when one of them is blocked.
-// The name never carries credentials: it is logged and used as a metric
-// label, so an endpoint that is not a URL (host:port:user:pass) is read as
-// host and port, after any user:pass@.
-func staticBucket(tier, raw string) string {
-	var host, port string
-	if u, err := url.Parse(raw); err == nil && u.Hostname() != "" {
-		host, port = u.Hostname(), u.Port()
-	} else {
-		rest := raw
-		if i := strings.LastIndex(rest, "@"); i >= 0 {
-			rest = rest[i+1:]
-		}
-		host, rest, _ = strings.Cut(rest, ":")
-		if p, _, _ := strings.Cut(rest, ":"); p != "" && strings.Trim(p, "0123456789") == "" {
-			port = p
-		}
+// EndpointTag is a one-way digest of a static endpoint (its URL, with its
+// credentials): it tells whether a saved session's exit is still the same
+// endpoint, without naming the address.
+func EndpointTag(raw string) string {
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:6])
+}
+
+// staticNet is the /24 of an endpoint given by IPv4 address (/48 for
+// IPv6): exits Facebook likely treats alike share a breaker. "" for an
+// endpoint named by hostname: providers that sell static IPs behind one
+// hostname give each IP its own port, so each such endpoint is its own
+// bucket. The range stays in memory: buckets are named <tier>/net#<k>.
+func staticNet(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
 	}
-	ip := net.ParseIP(host)
-	if ip == nil && port != "" {
-		return tier + "|" + net.JoinHostPort(host, port)
+	ip := net.ParseIP(u.Hostname())
+	switch {
+	case ip == nil:
+		return ""
+	case ip.To4() != nil:
+		v4 := ip.To4()
+		return fmt.Sprintf("%d.%d.%d.0/24", v4[0], v4[1], v4[2])
+	default:
+		return (&net.IPNet{IP: ip.Mask(net.CIDRMask(48, 128)), Mask: net.CIDRMask(48, 128)}).String()
 	}
-	if ip != nil {
-		if v4 := ip.To4(); v4 != nil {
-			host = fmt.Sprintf("%d.%d.%d.0/24", v4[0], v4[1], v4[2])
-		} else {
-			host = (&net.IPNet{IP: ip.Mask(net.CIDRMask(48, 128)), Mask: net.CIDRMask(48, 128)}).String()
-		}
-	}
-	return tier + "|" + host
 }
 
 // direct is the machine's own egress, under the tier's configured name.
@@ -329,7 +345,8 @@ type staticList struct {
 	name      string
 	endpoints []string
 	buckets   []string // parallel to endpoints
-	exits     []string // parallel to endpoints: tier|host:port
+	exits     []string // parallel to endpoints: <tier>#<n>
+	tags      []string // parallel to endpoints
 	country   string
 	next      atomic.Uint64
 }
@@ -352,7 +369,7 @@ func (s *staticList) Next(allow func(Endpoint) bool) (Endpoint, error) {
 }
 
 func (s *staticList) endpoint(i int) Endpoint {
-	return Endpoint{Tier: s.name, URL: s.endpoints[i], Country: s.country, Bucket: s.buckets[i], Exit: s.exits[i]}
+	return Endpoint{Tier: s.name, URL: s.endpoints[i], Country: s.country, Bucket: s.buckets[i], Exit: s.exits[i], Tag: s.tags[i]}
 }
 
 // gateway is a rotating residential gateway: the exit IP is chosen by the
@@ -364,11 +381,11 @@ type gateway struct {
 func (g *gateway) Name() string { return g.cfg.Name }
 
 func (g *gateway) bucket() string {
-	host := g.cfg.Gateway
-	if u, err := url.Parse(g.cfg.Gateway); err == nil && u.Host != "" {
-		host = u.Host
+	country := g.cfg.Country
+	if country == "" {
+		country = "any"
 	}
-	return g.cfg.Name + "|" + host + "|" + g.cfg.Country
+	return g.cfg.Name + "@" + country
 }
 
 func (g *gateway) Buckets() []string { return []string{g.bucket()} }

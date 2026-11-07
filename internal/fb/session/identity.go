@@ -254,7 +254,7 @@ func (id *Identity) saved() (Saved, bool) {
 		return Saved{}, false
 	}
 	return Saved{
-		ID: id.ID, Tier: id.Endpoint.Tier, Exit: id.Endpoint.Exit, Profile: id.FP.Profile,
+		ID: id.ID, Tier: id.Endpoint.Tier, Exit: id.Endpoint.Exit, ExitTag: id.Endpoint.Tag, Profile: id.FP.Profile,
 		SessionID: id.sessionID, Req: id.req.Load(), Requests: id.requests, MaxRequests: id.maxRequests,
 		Tokens: id.tokens, Bootstrapped: id.bootstrapped, Cookies: id.Doer.Cookies(id.Base), SavedAt: time.Now(),
 	}, true

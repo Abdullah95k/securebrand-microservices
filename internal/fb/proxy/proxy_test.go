@@ -35,40 +35,55 @@ func block(p *Pool, ep Endpoint, n int) {
 	}
 }
 
+// Exits are named by their place in the list, buckets by the k-th /24 the
+// list names (or the exit, for an endpoint named by hostname), gateways by
+// country: no name, bucket or tag carries an address or a credential.
 func TestBuckets(t *testing.T) {
-	for raw, want := range map[string]string{
-		"http://u:p@203.0.113.10:8000":       "isp|203.0.113.0/24",
-		"http://u:p@203.0.113.11:8001":       "isp|203.0.113.0/24",
-		"http://proxy.example:8000":          "isp|proxy.example:8000",
-		"http://u:p@isp.proxy.example:10002": "isp|isp.proxy.example:10002",
-		"http://proxy.example":               "isp|proxy.example",
-		"socks5://[2001:db8::1]:1080":        "isp|2001:db8::/48",
-		// Not URLs: the provider's host:port:user:pass, and user:pass@host:port.
-		"isp.proxy.example:10003:user1:secret1": "isp|isp.proxy.example:10003",
-		"user1:secret1@isp.proxy.example:10004": "isp|isp.proxy.example:10004",
-		"203.0.113.12:8000:user1:secret1":       "isp|203.0.113.0/24",
-	} {
-		if got := staticBucket("isp", raw); got != want {
-			t.Errorf("staticBucket(%q) = %q, want %q", raw, got, want)
+	p, err := New(config.Proxy{
+		Tiers: []config.ProxyTier{
+			{Name: "isp", Kind: "static_list", Endpoints: []string{
+				"http://user1:secret1@203.0.113.10:8000", "http://user1:secret1@203.0.113.11:8001",
+				"http://user1:secret1@198.51.100.7:8000", "http://user1:secret1@isp.proxy.example:10002",
+				"socks5://[2001:db8::1]:1080"}},
+			{Name: "res", Kind: "gateway", Gateway: "http://gw.example:7777", Username: "u", Password: "p", Country: "us"},
+		},
+		Routing: map[string][]string{"default": {"isp"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := p.tiers["isp"].(*staticList)
+	want := []struct{ exit, bucket string }{
+		{"isp#1", "isp/net#1"}, {"isp#2", "isp/net#1"}, {"isp#3", "isp/net#2"}, {"isp#4", "isp#4"}, {"isp#5", "isp/net#3"},
+	}
+	tags := map[string]bool{}
+	for i, w := range want {
+		ep := st.endpoint(i)
+		if ep.Exit != w.exit || ep.Bucket != w.bucket || len(ep.Tag) != 12 {
+			t.Errorf("endpoint %d: %s %s %s, want %s %s", i+1, ep.Exit, ep.Bucket, ep.Tag, w.exit, w.bucket)
 		}
-		if got := staticBucket("isp", raw); strings.Contains(got, "secret1") || strings.Contains(got, "user1") {
-			t.Errorf("credentials in bucket %q", got)
+		tags[ep.Tag] = true
+		for _, s := range []string{ep.Exit, ep.Bucket, ep.Tag} {
+			for _, leak := range []string{"203.0.113", "198.51", "2001:db8", "proxy.example", "user1", "secret1", ":80"} {
+				if strings.Contains(s, leak) {
+					t.Errorf("%q names %q", s, leak)
+				}
+			}
 		}
 	}
-	p := testPool(t)
+	if len(tags) != len(want) {
+		t.Error("two endpoints share a tag")
+	}
 	ep, err := p.Next("res")
-	if err != nil || ep.Bucket != "res|gw.example:7777|us" {
+	if err != nil || ep.Bucket != "res@us" {
 		t.Fatalf("%+v %v", ep, err)
-	}
-	if strings.Contains(ep.Bucket, "u:p") {
-		t.Fatal("buckets must not carry credentials")
 	}
 }
 
 func TestStaticListSkipsOpenBuckets(t *testing.T) {
 	p := testPool(t)
 	ep, _ := p.Next("isp")
-	if ep.Bucket != "isp|203.0.113.0/24" {
+	if ep.Bucket != "isp/net#1" {
 		t.Fatalf("first endpoint: %+v", ep)
 	}
 	block(p, ep, 4)
@@ -77,7 +92,7 @@ func TestStaticListSkipsOpenBuckets(t *testing.T) {
 	}
 	for i := 0; i < 5; i++ {
 		next, err := p.Next("isp")
-		if err != nil || next.Bucket != "isp|198.51.100.0/24" {
+		if err != nil || next.Bucket != "isp/net#2" {
 			t.Fatalf("Next must skip the open /24: %+v %v", next, err)
 		}
 	}

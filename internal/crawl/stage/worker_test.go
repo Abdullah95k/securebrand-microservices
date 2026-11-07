@@ -230,7 +230,7 @@ func TestTierForEscalatesByStalls(t *testing.T) {
 	if got := d.tierFor("comments", 9); got != "res" {
 		t.Fatalf("past the last tier: %s", got)
 	}
-	ep := proxy.Endpoint{Tier: "isp", Bucket: "isp|isp.proxy.example:10001"}
+	ep := proxy.Endpoint{Tier: "isp", Bucket: "isp#1"} // the only endpoint, named by hostname: its own bucket
 	pool.Observe(ep, detect.RateLimited)
 	pool.Observe(ep, detect.RateLimited)
 	if got := d.tierFor("comments", 0); got != "res" {

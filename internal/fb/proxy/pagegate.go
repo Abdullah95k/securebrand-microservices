@@ -24,7 +24,7 @@ type pageGate struct {
 	now func() time.Time
 
 	mu    sync.Mutex
-	exits map[string]*gateExit // gated exits only (tier|host:port of static endpoints)
+	exits map[string]*gateExit // gated exits only (<tier>#<n>: static endpoints)
 	// shared, when set (SharePageGate), paces the exits together with every
 	// other process sharing it; exits then fall back to this process's own
 	// pacing (exits) only while it can't be reached.
@@ -191,7 +191,7 @@ type ExitState struct {
 }
 
 // PageGateState returns the pacing of every exit that is waiting or backing
-// off, by exit (tier|host:port).
+// off, by exit (<tier>#<n>).
 func (p *Pool) PageGateState() map[string]ExitState {
 	g := p.pages
 	g.mu.Lock()

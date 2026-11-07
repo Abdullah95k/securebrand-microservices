@@ -46,7 +46,8 @@ type Snapshot struct {
 type Saved struct {
 	ID           string            `json:"id"`
 	Tier         string            `json:"tier"`
-	Exit         string            `json:"exit"` // tier|host:port; empty for direct egress
+	Exit         string            `json:"exit"`     // <tier>#<n>; empty for direct egress
+	ExitTag      string            `json:"exit_tag"` // the endpoint's one-way digest (proxy.Endpoint.Tag)
 	Profile      string            `json:"profile"`
 	SessionID    string            `json:"session_id"`
 	Req          uint64            `json:"req"`

@@ -42,7 +42,7 @@ func TestBreakerRetiresIdleIdentitiesAndFeedsOutcomes(t *testing.T) {
 	}
 	ctx := context.Background()
 	a, err := pool.Acquire(ctx, "isp")
-	if err != nil || a.Endpoint.Bucket != "isp|203.0.113.0/24" {
+	if err != nil || a.Endpoint.Bucket != "isp/net#1" {
 		t.Fatalf("%+v %v", a.Endpoint, err)
 	}
 	pool.Release(a)
@@ -60,7 +60,7 @@ func TestBreakerRetiresIdleIdentitiesAndFeedsOutcomes(t *testing.T) {
 	pool.Release(b)
 
 	c, err := pool.Acquire(ctx, "isp")
-	if err != nil || c == a || c.Endpoint.Bucket != "isp|198.51.100.0/24" {
+	if err != nil || c == a || c.Endpoint.Bucket != "isp/net#2" {
 		t.Fatalf("want a fresh identity on the other /24: %+v %v", c.Endpoint, err)
 	}
 	if pool.live["isp"] != 1 || len(pool.all) != 1 {
@@ -255,14 +255,14 @@ func TestLoaderPageGate(t *testing.T) {
 	refuse := func(why string) *Loader {
 		return &Loader{Gate: gateFunc(func(proxy.Endpoint) (bool, string) { return false, why })}
 	}
-	id := newIdentity("a", proxy.Endpoint{Tier: "isp", Exit: "isp|h:1"}, Fingerprint{}, nil, nil, 1, 1, 100)
+	id := newIdentity("a", proxy.Endpoint{Tier: "isp", Exit: "isp#1"}, Fingerprint{}, nil, nil, 1, 1, 100)
 	if _, err := refuse("paced").Load(context.Background(), id, "https://www.facebook.com/x"); !errors.Is(err, ErrPaced) || errors.Is(err, ErrExitPaused) {
 		t.Fatalf("paced: %v", err)
 	}
 	if id.RetireReason() != "paced" {
 		t.Fatalf("an identity without tokens is retired: %q", id.RetireReason())
 	}
-	ok := newIdentity("b", proxy.Endpoint{Tier: "isp", Exit: "isp|h:1"}, Fingerprint{}, nil, nil, 1, 1, 100)
+	ok := newIdentity("b", proxy.Endpoint{Tier: "isp", Exit: "isp#1"}, Fingerprint{}, nil, nil, 1, 1, 100)
 	ok.SetTokens(htmlx.Tokens{LSD: "x"})
 	if _, err := refuse("backoff").Load(context.Background(), ok, "https://www.facebook.com/x"); !errors.Is(err, ErrExitPaused) || !errors.Is(err, ErrPaced) {
 		t.Fatalf("backoff: %v", err)
