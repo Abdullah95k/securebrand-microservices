@@ -28,7 +28,7 @@
 
 | Field | Value |
 |---|---|
-| Commit | the merge commit of [#69](https://github.com/Abdullah95k/securebrand-microservices/pull/69), sent to the master when it merges (it replaces `2c9a53d`, #68) |
+| Commit | `9d13af065ed7fbd49f95cef41d6f0aa71fdb5188` ([#69](https://github.com/Abdullah95k/securebrand-microservices/pull/69)) |
 | Image | `fbs`: `deploy/docker/Dockerfile`, context `.`, target `""` (the last stage, no browser) |
 | Chart | `deploy/helm/fbs` |
 | Values | `values-production.yaml` |
