@@ -27,8 +27,13 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/topics"
 )
 
+// hookSlotWait is how long the deploy hooks (migrate, pages seed) wait for a
+// free connection slot when production's PostgreSQL is full, logging each
+// wait, before they fail. Any other error fails them at once.
+const hookSlotWait = 45 * time.Minute
+
 func migrate(ctx context.Context, cfg *config.Config, sub string) error {
-	db, err := pg.Open(ctx, cfg.Postgres.DSN, 4)
+	db, err := pg.OpenWaiting(ctx, cfg.Postgres.DSN, 2, hookSlotWait)
 	if err != nil {
 		return err
 	}

@@ -3,6 +3,32 @@
 Every binary exposes `/metrics`, `/healthz` and `/readyz` on `:9090`.
 All metric names start with `fbs_`.
 
+- **`/healthz` (liveness)** checks nothing outside the process.
+- **`/readyz` (readiness)** checks the stores (PostgreSQL, Valkey, Kafka) at most once a minute, each check with its own 3-second timeout, and answers from the last result in between, a failure included. A pod that has just recovered can stay unready for up to a minute.
+
+## PostgreSQL through PgBouncer
+
+Production reaches PostgreSQL only through PgBouncer in transaction mode, and the server has few connection slots for every service (the platform's `docs/platform/postgres.md`). fbs fits it:
+
+- **No server-side prepared statements:** every pool runs in pgx's `cache_describe` mode (`internal/platform/pg`).
+- **Pools:** 4 connections per process by default (`postgres.max_conns`). Every transaction is short and makes no network call to anything else.
+- **No session state.** Temporary tables live inside one transaction (`ON COMMIT DROP`), and locks are transaction-scoped (`pg_advisory_xact_lock`).
+- **Leases, not session locks.** The scheduler's leader and registry-sync's runs hold a row in `leases` (`internal/platform/leader`):
+  - the holder renews it every 5 s, and its work stops at once if a renewal fails or finds it taken;
+  - a standby tries every 15 s;
+  - a holder that stops hands the lease back. One that dies leaves it to expire after 15 s.
+
+  Two schedulers can run.
+- **Little traffic while idle:**
+  - idle loops back off: erasure from 2 s and mention aggregation from 5 s, each up to 30 s;
+  - crawlers reread the query registry every 60 s;
+  - a connection is pinged only after a minute idle.
+- **A full database at start-up is waited out.** That means `53300`, `57P03`, `53000`, and PgBouncer's `query_wait_timeout`, "server login has been failing" and "no more connections allowed".
+  - **Services:** wait up to 10 minutes.
+  - **Deploy hooks** (`fbctl migrate up`, `fbctl pages seed`): wait up to 45 minutes, backing off up to 15 s and logging each wait.
+  - **A wrong password, or any other error,** fails at once.
+- **Tested:** CI runs the integration tests through PgBouncer in transaction mode with `max_prepared_statements = 0` (`test/pgbouncer/pgbouncer.ini`); `make test-pgbouncer` runs them the same way.
+
 ## Key signals
 
 | Signal | Metric | Healthy |

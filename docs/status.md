@@ -22,6 +22,10 @@
   - `make chart-smoke` replays that order.
 - **REQ-001** (the 48-hour run, every deletion, who uses the API, the shared server): answered in [`docs/master/fbs-req001-answers.md`](master/fbs-req001-answers.md). The pilot report follows the 48-hour run.
   - **Media files:** deleted after analysis acknowledges them or after 72 hours, as now (the owner, 7 November).
+- **REQ-023 and REQ-024** (production's PostgreSQL: PgBouncer in transaction mode, 50 connections): in a PR.
+  - **Transaction pooling:** leases instead of session advisory locks (two schedulers can run again); pgx `cache_describe` on every pool; 4 connections per process; a full database waited out at start-up (deploy hooks up to 45 minutes).
+  - **Fewer idle queries:** readiness checked at most once a minute, idle loops back off, crawlers reread the registry every 60 s.
+  - **Tested:** CI runs the integration tests through PgBouncer in transaction mode with `max_prepared_statements = 0`.
 - **Next:** REQ-018 (contract v1.0.0).
 
 ## Production pin

@@ -65,7 +65,9 @@ func main() {
 		fail(err)
 	}
 	plog.Setup("fbctl", cfg.Log.Level, "text")
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	// Long enough for a deploy hook that waits up to hookSlotWait for a free
+	// database connection slot, then does its work.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
 	defer cancel()
 	cmd, rest := args[0], args[1:]
 	sub := ""

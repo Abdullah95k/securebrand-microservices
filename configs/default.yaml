@@ -18,7 +18,7 @@ http:
 postgres:
   dsn: "postgres://fbs:fbs@localhost:5432/fbs?sslmode=disable"
   read_dsn: ""             # optional read replica for API reads
-  max_conns: 20
+  max_conns: 4             # per process: production shares about 27 server connections across every service
 
 redis:
   addr: "localhost:6379"
@@ -87,7 +87,7 @@ fb:
   base_url: "https://www.facebook.com"
   # Logical query registry; seeded into Postgres by `fbctl migrate`.
   registry_seed: "queries.seed.yaml"
-  registry_refresh: 30s
+  registry_refresh: 60s   # each crawler rereads the registry this often: an idle pod touches PostgreSQL rarely
   fingerprint_profile: chrome_146
   locale: en_US
   accept_language: "en-US,en;q=0.9"

@@ -64,25 +64,36 @@ func retryAfter(n int) time.Duration {
 // erasure is idempotent, so a request that fails part-way is retried from
 // the start.
 func (e *Eraser) Tick(ctx context.Context) error {
+	_, err := e.Work(ctx)
+	return err
+}
+
+// Work is Tick, reporting whether it found requests to process.
+func (e *Eraser) Work(ctx context.Context) (bool, error) {
+	n, err := e.tick(ctx)
+	return n > 0, err
+}
+
+func (e *Eraser) tick(ctx context.Context) (int, error) {
 	rows, err := e.DB.Query(ctx, `SELECT id, subject_type, author_key, page_id, created_at, attempts, coalesce(input->>'author_id', ''),
 			coalesce(input->>'account_ref', '')
 		FROM erasure_requests
 		WHERE status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= now()) ORDER BY created_at LIMIT 10`)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	reqs, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (request, error) {
 		var q request
 		return q, r.Scan(&q.id, &q.subject, &q.authorKey, &q.pageID, &q.created, &q.attempts, &q.authorID, &q.accountRef)
 	})
 	if err != nil {
-		return err
+		return 0, err
 	}
 	for _, r := range reqs {
 		stats, err := e.process(ctx, r)
 		if err != nil {
 			if ctx.Err() != nil {
-				return ctx.Err()
+				return len(reqs), ctx.Err()
 			}
 			n := r.attempts + 1
 			if errors.Is(err, errInvalid) || n >= MaxErasureAttempts {
@@ -99,11 +110,11 @@ func (e *Eraser) Tick(ctx context.Context) error {
 		// Done: the request keeps no trace of who was erased.
 		if _, err := e.DB.Exec(ctx, `UPDATE erasure_requests SET status = 'done', stats = $2, completed_at = now(),
 			input = input - 'author_id' - 'profile_url' - 'account_ref' WHERE id = $1`, r.id, sb); err != nil {
-			return err
+			return len(reqs), err
 		}
 		slog.Info("erasure done", "request", r.id, "subject", r.subject, "stats", stats)
 	}
-	return nil
+	return len(reqs), nil
 }
 
 func (e *Eraser) process(ctx context.Context, r request) (map[string]int64, error) {
