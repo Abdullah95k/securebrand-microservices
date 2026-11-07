@@ -39,4 +39,19 @@ message Page {
   // profile when it says the profile has no Page object, unknown
   // otherwise.
   string kind = 17;
+  // Every website the page lists, in its order (contact["website"] is the
+  // first), Facebook's link shims unwrapped.
+  repeated string websites = 18;
+  // The page's accounts on other networks it links to.
+  repeated SocialLink social_links = 19;
+}
+
+// SocialLink is a link from a page to its account on another network.
+message SocialLink {
+  // instagram, x, tiktok, youtube, telegram, whatsapp, linkedin, snapchat,
+  // threads, pinterest, ...: from the link's host.
+  string network = 1;
+  string url = 2;
+  // The account's name on that network when the link names one.
+  string handle = 3;
 }

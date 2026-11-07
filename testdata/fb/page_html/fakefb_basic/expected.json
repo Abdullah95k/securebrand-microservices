@@ -17,7 +17,25 @@
     "cover_photo": {
       "url": "https://www.facebook.com/media/cover_100064000000000.jpg"
     },
+    "contact": {
+      "website": "https://brand0.example.org/"
+    },
     "status": "PAGE_STATUS_ACTIVE",
-    "kind": "page"
+    "kind": "page",
+    "websites": [
+      "https://brand0.example.org/"
+    ],
+    "social_links": [
+      {
+        "network": "instagram",
+        "url": "https://www.instagram.com/brand0/",
+        "handle": "brand0"
+      },
+      {
+        "network": "telegram",
+        "url": "https://t.me/brand0",
+        "handle": "brand0"
+      }
+    ]
   }
 }

@@ -733,6 +733,19 @@ components:
         profile_pic_url: {type: string}
         cover_url: {type: string}
         contact: {type: object}
+        websites:
+          type: array
+          items: {type: string}
+          description: Every website the page lists, in its order (Facebook's link shims unwrapped).
+        social_links:
+          type: array
+          description: The page's accounts on other networks it links to.
+          items:
+            type: object
+            properties:
+              network: {type: string, description: "instagram, x, tiktok, youtube, telegram, whatsapp, linkedin, snapchat, threads, pinterest, vk"}
+              url: {type: string}
+              handle: {type: string, description: The account's name on that network, when the link names one.}
         status: {type: string, enum: [active, unavailable, restricted, suppressed]}
         first_seen_at: {type: string, format: date-time}
         last_scraped_at: {type: string, format: date-time}

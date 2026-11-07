@@ -186,3 +186,25 @@ func int32OrNil(v int32) *int32 {
 	}
 	return &v
 }
+
+// nilIfNone stores no list as NULL, not as an empty array.
+func nilIfNone(s []string) []string {
+	if len(s) == 0 {
+		return nil
+	}
+	return s
+}
+
+// socialLinksJSON is a page's social links as [{network, url, handle}].
+func socialLinksJSON(links []*fbv1.SocialLink) []byte {
+	type link struct {
+		Network string `json:"network"`
+		URL     string `json:"url"`
+		Handle  string `json:"handle,omitempty"`
+	}
+	out := make([]link, 0, len(links))
+	for _, l := range links {
+		out = append(out, link{Network: l.Network, URL: l.Url, Handle: l.Handle})
+	}
+	return jsonOf(out)
+}
