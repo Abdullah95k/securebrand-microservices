@@ -20,9 +20,9 @@
   - Only the crawlers and registry-sync mount the Secret `proxies`. The other pods and the hooks start without it, so the master can see fbs up before the pilot stops.
   - The crawlers and registry-sync wait for the Secret, and start on their own once it exists.
   - `make chart-smoke` replays that order.
-- **Next:**
-  - the REQ-001 answers;
-  - REQ-018.
+- **REQ-001** (the 48-hour run, every deletion, who uses the API, the shared server): answered in [`docs/master/fbs-req001-answers.md`](master/fbs-req001-answers.md). The pilot report follows the 48-hour run.
+  - **One point for the owner:** media files are always deleted after analysis acknowledges them or after 72 hours. Keeping them needs a change (section 2.3), proposed there and not built.
+- **Next:** REQ-018 (contract v1.0.0).
 
 ## Production pin
 
