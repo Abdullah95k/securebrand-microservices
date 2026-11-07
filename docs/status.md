@@ -15,7 +15,7 @@
 - **REQ-017** (no daily caps; checks held to 20% of page loads): done, [#57](https://github.com/Abdullah95k/securebrand-microservices/pull/57). The checker is turned on in production after the first 48-hour run.
 - **REQ-007 fixes 3, 5 and 6** (per-IP cost in the pilot report; identity-pool and freshness alerts; gitleaks, govulncheck, Trivy and Dependabot in CI): done, [#58](https://github.com/Abdullah95k/securebrand-microservices/pull/58). govulncheck's first run found two vulnerabilities, fixed there (brotli 1.2.7, Go 1.27.3).
 - **REQ-007 fixes 7, 8 and 9** (every website and social link; raw failures plus a 1% sample with parser versions; exits named `<tier>#<n>`): done, [#61](https://github.com/Abdullah95k/securebrand-microservices/pull/61).
-- **REQ-007 fixes 10 and 13** (NetworkPolicy egress, on in production; a per-IP request cap in Valkey): in a PR. With them every REQ-007 code fix is in; fix 1 (the copy) and the 48-hour run wait for the cluster and the owner.
+- **REQ-007 fixes 10 and 13** (NetworkPolicy egress, on in production; a per-IP request cap in Valkey): done, [#68](https://github.com/Abdullah95k/securebrand-microservices/pull/68). Every REQ-007 code fix is merged; fix 1 (the copy) and the 48-hour run wait for the cluster and the owner.
 - **Next:**
   - the REQ-001 answers;
   - REQ-018.
@@ -24,7 +24,7 @@
 
 | Field | Value |
 |---|---|
-| Commit | `f7ce255cbdcfa99148c8b3224f69ff9e2d2c746f` (#56) |
+| Commit | `2c9a53deedb13ac36871d99b52710a9ca7bfeda4` (#68) |
 | Image | `fbs`: `deploy/docker/Dockerfile`, context `.`, target `""` (the last stage, no browser) |
 | Chart | `deploy/helm/fbs` |
 | Values | `values-production.yaml` |
@@ -44,7 +44,7 @@
 
 ## Waiting on
 
-- **`PROXIES_FBS` (the owner):** the pilot's `phase0/proxies.yaml`, as it is, in the platform repository's GitHub secrets.
+- **`PROXIES_FBS` (the owner):** added to the platform repository's GitHub secrets only after the pilot has stopped. YAML in fbs's format (`phase0/proxies.example.yaml`): `fb.proxy.tiers` with one tier `isp`, `kind: static_list`, the pilot's country and its endpoints in the same order (exits are named `isp#1`, `isp#2`… by position).
 - **Valkey (the master):** confirm `SELECT 1` on the live instance (database 1 is reserved for fbs).
 - **Kafka permissions (the master):** confirm `fbs-kafka` can list offsets and describe groups `fbs-*` on the live cluster.
 - **Media acknowledgements (the master):** fbs waits for consumer `analysis` on `fb.media.processed.v1`, the name sb-analysis's config uses (`analysis.media.consumer`). The master wrote `sb-analysis`: one of the two must change, or files are deleted at 72 hours instead of after analysis.
