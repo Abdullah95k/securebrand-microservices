@@ -184,13 +184,14 @@ func (t *tail) String() string {
 
 // launchAttempt bounds one start of Chromium, up to its DevTools port. A
 // start takes about a second; on a loaded CI runner some hang outright (no
-// port and no exit, 45s on), and a fresh one then works. The caller's
+// port and no exit, 45s on), and a fresh one then works; two in a row have
+// hung there too (7 November). The caller's
 // context (the bootstrapper's fb.browser.timeout) still bounds the whole
 // render, launch included.
 var launchAttempt = 20 * time.Second
 
 // launchAttempts is how many times launch starts Chromium when starts hang.
-const launchAttempts = 2
+const launchAttempts = 3
 
 // errHung reports a start that neither opened its DevTools port nor exited
 // within launchAttempt.

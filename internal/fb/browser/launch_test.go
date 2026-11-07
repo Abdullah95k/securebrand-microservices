@@ -3,6 +3,7 @@ package browser
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -101,10 +102,10 @@ func TestLaunchStartsAgainWhenAStartHangs(t *testing.T) {
 	}
 	start := time.Now()
 	_, err = launch(context.Background(), hang, true, nil)
-	if !errors.Is(err, errHung) || !strings.Contains(err.Error(), "2 starts") || !strings.Contains(err.Error(), "stuck") {
+	if !errors.Is(err, errHung) || !strings.Contains(err.Error(), fmt.Sprintf("%d starts", launchAttempts)) || !strings.Contains(err.Error(), "stuck") {
 		t.Fatalf("every start hung: %v", err)
 	}
-	if d := time.Since(start); d < 2*launchAttempt || d > 10*time.Second {
-		t.Fatalf("took %s for two hung starts of %s", d, launchAttempt)
+	if d := time.Since(start); d < launchAttempts*launchAttempt || d > 10*time.Second {
+		t.Fatalf("took %s for %d hung starts of %s", d, launchAttempts, launchAttempt)
 	}
 }
