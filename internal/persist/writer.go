@@ -642,8 +642,10 @@ func (w *Writer) Pages(ctx context.Context, ps []*fbv1.Page) error {
 			var changed bool
 			err := tx.QueryRow(ctx, `
 				INSERT INTO pages AS t (page_id, vanity, url, name, categories, intro, followers_count, likes_count, verified,
-					profile_pic_url, cover_url, contact, extra, status, content_hash, first_seen_at, last_scraped_at, kind)
-				VALUES ($1, NULLIF($2,''), NULLIF($3,''), NULLIF($4,''), $5, NULLIF($6,''), $7, $8, $9, $10, $11, $12, $13, 'active', $14, $15, $15, $16)
+					profile_pic_url, cover_url, contact, extra, status, content_hash, first_seen_at, last_scraped_at, kind,
+					websites, social_links)
+				VALUES ($1, NULLIF($2,''), NULLIF($3,''), NULLIF($4,''), $5, NULLIF($6,''), $7, $8, $9, $10, $11, $12, $13, 'active', $14, $15, $15, $16,
+					$17, $18)
 				ON CONFLICT (page_id) DO UPDATE SET
 					vanity = COALESCE(EXCLUDED.vanity, t.vanity), url = COALESCE(EXCLUDED.url, t.url),
 					name = COALESCE(EXCLUDED.name, t.name), categories = EXCLUDED.categories, intro = EXCLUDED.intro,
@@ -652,12 +654,14 @@ func (w *Writer) Pages(ctx context.Context, ps []*fbv1.Page) error {
 					followers_count = EXCLUDED.followers_count, likes_count = EXCLUDED.likes_count,
 					verified = EXCLUDED.verified, profile_pic_url = EXCLUDED.profile_pic_url, cover_url = EXCLUDED.cover_url,
 					contact = EXCLUDED.contact, extra = EXCLUDED.extra, status = 'active',
+					websites = EXCLUDED.websites, social_links = EXCLUDED.social_links,
 					content_hash = EXCLUDED.content_hash, last_scraped_at = EXCLUDED.last_scraped_at
 				WHERE t.status <> 'suppressed'
 				RETURNING old.page_id IS NULL OR old.followers_count IS DISTINCT FROM new.followers_count
 					OR old.likes_count IS DISTINCT FROM new.likes_count OR old.name IS DISTINCT FROM new.name`,
 				p.PageId, vanity, p.Url, p.Name, p.Categories, p.Intro, p.FollowersCount, p.LikesCount, p.Verified,
-				pic, cover, jsonOf(p.Contact), extraJSON(p.ExtraJson), hash, seen, pageKind(p.Kind)).Scan(&changed)
+				pic, cover, jsonOf(p.Contact), extraJSON(p.ExtraJson), hash, seen, pageKind(p.Kind),
+				nilIfNone(p.Websites), socialLinksJSON(p.SocialLinks)).Scan(&changed)
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil // an erased page stays erased
 			}

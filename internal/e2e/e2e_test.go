@@ -144,6 +144,25 @@ func TestEndToEnd(t *testing.T) {
 	if n := count(t, s, `SELECT count(*) FROM pages WHERE page_id = $1 AND name = $2 AND followers_count > 0 AND kind = 'page'`, page.ID, page.Name); n != 1 {
 		t.Fatal("page profile (a page) not stored")
 	}
+	// Its website and its accounts elsewhere (fakefb lists one of each, the
+	// Instagram one behind Facebook's link shim), stored and served.
+	if n := count(t, s, `SELECT count(*) FROM pages WHERE page_id = $1 AND websites = ARRAY[$2]
+		AND social_links @> jsonb_build_array(jsonb_build_object('network', 'instagram', 'handle', $3::text))
+		AND social_links @> jsonb_build_array(jsonb_build_object('network', 'telegram', 'url', 'https://t.me/' || $3::text))`,
+		page.ID, "https://"+page.Vanity+".example.org/", page.Vanity); n != 1 {
+		t.Fatal("page links not stored")
+	}
+	pv := decodeBody[struct {
+		Page struct {
+			Websites    []string `json:"websites"`
+			SocialLinks []struct {
+				Network, Handle string
+			} `json:"social_links"`
+		} `json:"page"`
+	}](t, s.Do(t, key, "GET", "/v1/pages/"+page.Vanity, nil), http.StatusOK)
+	if len(pv.Page.Websites) != 1 || len(pv.Page.SocialLinks) != 2 || pv.Page.SocialLinks[0].Network != "instagram" {
+		t.Fatalf("page links served: %+v", pv.Page)
+	}
 	// A job belongs to the client that made it (and admins): others get 404.
 	other := s.Key(t, api.ScopeJobsWrite, api.ScopeDataRead)
 	for _, c := range []struct{ key, method, path string }{

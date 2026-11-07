@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -357,6 +358,16 @@ func (r *renderer) pageHTML(p *Page, lsd, datr string, consent bool) []byte {
 			obj{"text": obj{"text": humanCount(p.Followers) + " followers"}},
 		}},
 		"profile_intro_card": obj{"bio": obj{"text": p.Intro}},
+	}
+	if !p.Profile && p.Vanity != "" {
+		// A page's links: its website, and its accounts elsewhere in the
+		// intro card, the Instagram one behind Facebook's link shim.
+		user["websites"] = []any{"https://" + p.Vanity + ".example.org/"}
+		user["profile_intro_card"] = obj{"bio": obj{"text": p.Intro}, "context_items": []any{
+			obj{"url": "https://l.facebook.com/l.php?u=" + url.QueryEscape("https://www.instagram.com/"+p.Vanity+"/") + "&h=AT0",
+				"text": "instagram.com/" + p.Vanity},
+			obj{"url": "https://t.me/" + p.Vanity},
+		}}
 	}
 	switch {
 	case p.Profile:

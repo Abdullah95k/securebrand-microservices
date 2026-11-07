@@ -36,17 +36,22 @@ type Page struct {
 	ProfilePicURL  *string         `json:"profile_pic_url,omitempty"`
 	CoverURL       *string         `json:"cover_url,omitempty"`
 	Contact        json.RawMessage `json:"contact,omitempty"`
-	Status         string          `json:"status"`
-	FirstSeenAt    time.Time       `json:"first_seen_at"`
-	LastScrapedAt  *time.Time      `json:"last_scraped_at,omitempty"`
+	// Websites and SocialLinks are every website the page lists, and its
+	// accounts on other networks ([{network, url, handle}]).
+	Websites      []string        `json:"websites,omitempty"`
+	SocialLinks   json.RawMessage `json:"social_links,omitempty"`
+	Status        string          `json:"status"`
+	FirstSeenAt   time.Time       `json:"first_seen_at"`
+	LastScrapedAt *time.Time      `json:"last_scraped_at,omitempty"`
 }
 
 func (s *Server) pageByID(ctx context.Context, id int64) (*Page, error) {
 	var p Page
 	err := s.ReadDB.QueryRow(ctx, `SELECT page_id, vanity, url, name, categories, kind, intro, followers_count, likes_count,
-		verified, profile_pic_url, cover_url, contact, status, first_seen_at, last_scraped_at FROM pages WHERE page_id = $1`, id).
+		verified, profile_pic_url, cover_url, contact, websites, social_links, status, first_seen_at, last_scraped_at
+		FROM pages WHERE page_id = $1`, id).
 		Scan(&p.PageID, &p.Vanity, &p.URL, &p.Name, &p.Categories, &p.Kind, &p.Intro, &p.FollowersCount, &p.LikesCount,
-			&p.Verified, &p.ProfilePicURL, &p.CoverURL, &p.Contact, &p.Status, &p.FirstSeenAt, &p.LastScrapedAt)
+			&p.Verified, &p.ProfilePicURL, &p.CoverURL, &p.Contact, &p.Websites, &p.SocialLinks, &p.Status, &p.FirstSeenAt, &p.LastScrapedAt)
 	if err != nil {
 		return nil, err
 	}

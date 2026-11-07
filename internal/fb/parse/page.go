@@ -151,6 +151,10 @@ func Page(html []byte, pageID, requested int64) (*fbv1.Page, Report) {
 				p.Contact[key] = v
 			}
 		}
+		pageLinks(m, p)
+	}
+	if _, ok := p.Contact["website"]; !ok && len(p.Websites) > 0 {
+		p.Contact["website"] = p.Websites[0]
 	}
 	if p.Name == "" {
 		if m := ogTitleRe.FindSubmatch(html); m != nil {
@@ -169,6 +173,11 @@ func Page(html []byte, pageID, requested int64) (*fbv1.Page, Report) {
 	}
 	if p.FollowersCount == nil {
 		rep.optional("page.followers")
+	}
+	// Many pages list no link; counted all the same, so a parser that
+	// stops finding them shows (parse_missing_field_total).
+	if len(p.Websites) == 0 && len(p.SocialLinks) == 0 {
+		rep.optional("page.links")
 	}
 	p.Kind, rep.KindSignal = pageKind(html, mine, idStr, p)
 	return p, rep

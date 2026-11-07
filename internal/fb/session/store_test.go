@@ -213,9 +213,9 @@ func TestResumeKeepsToTheCapAndTheProfile(t *testing.T) {
 	store := &RedisStore{R: redis.NewClient(&redis.Options{Addr: mr.Addr()})}
 	ctx := context.Background()
 	var saved []Saved
-	for i, exit := range []string{"isp|203.0.113.10:8000", "isp|198.51.100.10:8000", "isp|192.0.2.10:8000"} {
-		saved = append(saved, Saved{ID: fmt.Sprint("id-", i), Tier: "isp", Exit: exit, Profile: "chrome_146",
-			Tokens: htmlx.Tokens{LSD: "x"}, SavedAt: time.Now()})
+	for i := range storeExits {
+		saved = append(saved, Saved{ID: fmt.Sprint("id-", i), Tier: "isp", Exit: fmt.Sprint("isp#", i+1), ExitTag: proxy.EndpointTag(storeExits[i]),
+			Profile: "chrome_146", Tokens: htmlx.Tokens{LSD: "x"}, SavedAt: time.Now()})
 	}
 	saved[0].Profile = "firefox"
 	leave(t, store, "old", Snapshot{SavedAt: time.Now(), Sessions: saved})
@@ -232,7 +232,7 @@ func TestSavedSessionsThatCannotResume(t *testing.T) {
 	mr := miniredis.RunT(t)
 	store := &RedisStore{R: redis.NewClient(&redis.Options{Addr: mr.Addr()})}
 	ctx := context.Background()
-	s := Saved{ID: "id-1", Tier: "isp", Exit: "isp|203.0.113.10:8000", Profile: "chrome_146", Tokens: htmlx.Tokens{LSD: "x"}}
+	s := Saved{ID: "id-1", Tier: "isp", Exit: "isp#1", ExitTag: proxy.EndpointTag(storeExits[0]), Profile: "chrome_146", Tokens: htmlx.Tokens{LSD: "x"}}
 	leave(t, store, "old", Snapshot{SavedAt: time.Now().Add(-SavedSessionTTL - time.Minute), Sessions: []Saved{s},
 		Exits: map[string]proxy.ExitState{s.Exit: {PausedUntil: time.Now().Add(time.Hour)}}})
 	got, err := store.TakeOrphans(ctx, "me")
@@ -273,7 +273,8 @@ func TestSessionsSavedLaterResume(t *testing.T) {
 		t.Fatalf("%d %v", n, err)
 	}
 	go func() { _ = pool.RunResume(ctx, 10*time.Millisecond) }()
-	s := Saved{ID: "id-1", Tier: "isp", Exit: "isp|203.0.113.10:8000", Profile: "chrome_146", Tokens: htmlx.Tokens{LSD: "x"}, SavedAt: time.Now()}
+	s := Saved{ID: "id-1", Tier: "isp", Exit: "isp#1", ExitTag: proxy.EndpointTag(storeExits[0]), Profile: "chrome_146", Tokens: htmlx.Tokens{LSD: "x"},
+		SavedAt: time.Now()}
 	if err := store.Checkpoint(ctx, "old", Snapshot{Owner: "old", SavedAt: time.Now(), Sessions: []Saved{s},
 		Exits: map[string]proxy.ExitState{s.Exit: {PausedUntil: time.Now().Add(48 * time.Hour)}}}, time.Minute); err != nil {
 		t.Fatal(err)

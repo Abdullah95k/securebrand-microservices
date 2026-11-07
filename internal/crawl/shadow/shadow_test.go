@@ -6,7 +6,7 @@ import (
 
 	"github.com/tidwall/gjson"
 
-	"github.com/abdullah95k/securebrand-microservices/internal/fb/detect"
+	"github.com/abdullah95k/securebrand-microservices/internal/crawl/rawsink"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/fbtest"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/graphql"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/parse"
@@ -14,8 +14,8 @@ import (
 
 type sink struct{ vars []map[string]any }
 
-func (s *sink) Capture(_ context.Context, _ string, _ detect.Class, _ []byte, vars map[string]any) {
-	s.vars = append(s.vars, vars)
+func (s *sink) Capture(_ context.Context, r rawsink.Response) {
+	s.vars = append(s.vars, r.Vars)
 }
 
 func timeline(t *testing.T) (*graphql.Response, parse.TimelineResult, int64) {

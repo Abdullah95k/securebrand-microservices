@@ -252,7 +252,7 @@ func TestPageGateStateCarriesOverARestart(t *testing.T) {
 	// sooner than the wait running leaves it be.
 	shorter, c3 := gatedPool(t, pilotGate)
 	long := map[string]ExitState{walled.Exit: {PausedUntil: c3.t.Add(10 * time.Hour), Backoff: 10 * time.Hour},
-		paced.Exit: {Next: c3.t.Add(10 * time.Hour)}, "isp|gone:1": {PausedUntil: c3.t.Add(time.Hour)}}
+		paced.Exit: {Next: c3.t.Add(10 * time.Hour)}, "isp#9": {PausedUntil: c3.t.Add(time.Hour)}}
 	shorter.RestorePageGate(long)
 	c3.add(pilotGate.Interval + time.Second)
 	if ok, _ := shorter.PageLoad(paced); !ok {
@@ -270,28 +270,32 @@ func TestPageGateStateCarriesOverARestart(t *testing.T) {
 	}
 }
 
-// A saved session's exit is found again by name, unless it is cooling down
-// or gone; a gateway's sessions do not resume, direct egress's do.
+// A saved session's exit is found again by name and tag, unless it is
+// cooling down or gone, or the list was reordered (another endpoint in its
+// place); a gateway's sessions do not resume, direct egress's do.
 func TestResumeFindsASavedSessionsExit(t *testing.T) {
 	p, _ := gatedPool(t, pilotGate)
 	ep, _ := p.Next("isp")
-	got, ok := p.Resume("isp", ep.Exit)
+	got, ok := p.Resume("isp", ep.Exit, ep.Tag)
 	if !ok || got != ep {
 		t.Fatalf("%+v %v, want %+v", got, ok, ep)
 	}
-	if _, ok := p.Resume("isp", "isp|isp.proxy.example:10009"); ok {
+	if _, ok := p.Resume("isp", "isp#9", ep.Tag); ok {
 		t.Fatal("an exit no longer configured resumes")
 	}
-	if _, ok := p.Resume("res", ""); ok {
+	if _, ok := p.Resume("isp", ep.Exit, "0123456789ab"); ok {
+		t.Fatal("a session resumes on another endpoint at its exit's place")
+	}
+	if _, ok := p.Resume("res", "", ""); ok {
 		t.Fatal("a gateway session resumes")
 	}
-	if got, ok := p.Resume("direct", ""); !ok || got.Tier != "direct" {
+	if got, ok := p.Resume("direct", "", ""); !ok || got.Tier != "direct" {
 		t.Fatal("a direct session does not resume")
 	}
 	for range 4 {
 		p.Observe(ep, detect.LoginWall)
 	}
-	if _, ok := p.Resume("isp", ep.Exit); ok {
+	if _, ok := p.Resume("isp", ep.Exit, ep.Tag); ok {
 		t.Fatal("a session resumes on an exit cooling down")
 	}
 }

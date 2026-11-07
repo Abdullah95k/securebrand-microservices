@@ -192,7 +192,7 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 		}
 		sink := rawsink.New(o.RawS3, cfg.S3.RawBucket)
 		sink.Prefix = cfg.S3.RawPrefix
-		gql.Raw, gql.CaptureAll = sink, cfg.FB.CaptureRaw == "all"
+		gql.Raw, gql.CaptureAll, gql.RawSample = sink, cfg.FB.CaptureRaw == "all", cfg.FB.RawSample
 		c.Components = append(c.Components, func(ctx context.Context) error { return sink.Run(ctx, time.Minute) })
 	}
 	deps.Shadow = shadow.Configured(cfg.FB.ShadowRate, gql.Raw)

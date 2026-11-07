@@ -16,8 +16,8 @@ import (
 )
 
 const (
-	exit1 = "isp|isp.proxy.example:10001"
-	exit2 = "isp|isp.proxy.example:10002"
+	exit1 = "isp#1"
+	exit2 = "isp#2"
 )
 
 // valkey is a Valkey stand-in and the one clock it and the gates read.

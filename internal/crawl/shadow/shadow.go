@@ -11,6 +11,7 @@ package shadow
 import (
 	"context"
 	"fmt"
+	"github.com/abdullah95k/securebrand-microservices/internal/crawl/rawsink"
 	"math/rand/v2"
 	"sort"
 
@@ -114,7 +115,8 @@ func (s *Set) record(query string, resp *graphql.Response, outcome, why string) 
 		if why != "" {
 			vars["shadow_missing"] = why
 		}
-		s.Raw.Capture(context.Background(), "shadow-"+query, detect.SchemaDrift, resp.Body, vars)
+		s.Raw.Capture(context.Background(), rawsink.Response{Query: "shadow-" + query, DocID: resp.Query.DocID,
+			Parser: resp.Query.Parser, ParserVersion: resp.Query.ParserVersion, Class: detect.SchemaDrift, Body: resp.Body, Vars: vars})
 	}
 	return outcome
 }
