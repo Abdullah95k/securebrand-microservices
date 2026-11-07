@@ -1,10 +1,16 @@
 # Copying the pilot's data off the shared server (REQ-007 fix 1)
 
-**Status:** proposed to the master on 7 November; run it only once the master has agreed.
+**Status:** agreed by the master on 7 November: the method, a temporary key limited to the backups bucket, and the bucket `securebrand-prod-backups` at `https://fra1.digitaloceanspaces.com`.
 
 **Who runs it:** the owner, on the shared server (201.79.36.209), in the fbs folder (where `make pilot-up` runs).
 
-**When:** before production starts. Production uses the pilot's proxy IPs, so the pilot must be stopped first, and stopping it loses what only lives in memory: the raw responses in its in-memory S3.
+**When:** only after the master confirms that the production cluster is up and fbs is deployed at its pin, so the pilot stops only when production can take over. Then, in this order:
+
+1. The owner runs this copy. Its last step stops the pilot.
+2. The owner adds `PROXIES_FBS`.
+3. The master re-runs the setup that turns it into the Secret `proxies`. fbs's crawlers and registry-sync, waiting for that Secret, then start on their own.
+
+Production uses the pilot's proxy IPs, so the pilot must stop before production collects. Stopping it loses what only lives in memory: the raw responses in its in-memory S3. This copy keeps them.
 
 **What it copies**, to the production backups bucket under `fbs/shared-server/<date>/`:
 
@@ -52,7 +58,7 @@ Fail on any error in a pipe:
 set -o pipefail
 ```
 
-The bucket and the day's folder. The master gives the bucket's name: it is `S3_BUCKET_BACKUPS`.
+The bucket and the day's folder. The bucket is the platform's backups bucket (`S3_BUCKET_BACKUPS`), confirmed by the master: `securebrand-prod-backups` at `https://fra1.digitaloceanspaces.com`.
 
 ```bash
 export BUCKET=securebrand-prod-backups ENDPOINT=https://fra1.digitaloceanspaces.com DAY=$(TZ=Asia/Baghdad date +%F)

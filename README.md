@@ -203,7 +203,7 @@ The Helm chart is at `deploy/helm/fbs`.
 
 **Secrets:**
 - environment variables come from `secretEnv.existingSecret` (DSNs, S3 keys, HMAC key);
-- proxy tiers come from `secretFiles.existingSecret`, a `proxies.yaml` layered over the ConfigMap.
+- proxy tiers come from `secretFiles.existingSecret`, a `proxies.yaml` layered over the ConfigMap. Only the pods that reach Facebook through the proxies mount it (`secretFiles.components`: the crawlers and registry-sync), so the others and the hooks start without it.
 
 **Images and releases:** pushing a tag `vX.Y.Z` publishes `ghcr.io/abdullah95k/fbs:X.Y.Z`, `X.Y.Z-browser` and the chart (`oci://ghcr.io/abdullah95k/charts/fbs`); the chart's image tag defaults to its app version.
 

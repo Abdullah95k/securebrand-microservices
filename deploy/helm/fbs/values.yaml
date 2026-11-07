@@ -53,10 +53,16 @@ config:
 secretEnv:
   existingSecret: fbs-env
 # Existing Secret with a "proxies.yaml" key holding fb.proxy.tiers (proxy
-# endpoints and credentials). Mounted and layered over config.yaml.
+# endpoints and credentials). Mounted and layered over config.yaml in the
+# pods that reach Facebook through the proxies: every fbs-crawler (each
+# builds the proxy pool at start) and registry-sync. The other pods and the
+# hooks never see the proxy credentials, and start without the Secret; the
+# listed ones wait for it and start on their own once it exists. An empty
+# list mounts it in every pod and hook.
 secretFiles:
   existingSecret: fbs-proxies
   key: proxies.yaml
+  components: [crawler-page, crawler-post, crawler-thread, crawler-retry, crawler-search, crawler-check, registry-sync]
 # Existing Secret with certificate files (CA, client certificate and key)
 # for config.kafka.tls / config.redis.tls, mounted at mountPath: point
 # ca_file, cert_file and key_file at e.g. /etc/fbs-tls/ca.pem.
