@@ -274,7 +274,10 @@ type FB struct {
 	GlobalRPS              int           `koanf:"global_rps"`
 	BootstrapAttempts      int           `koanf:"bootstrap_attempts"`
 	CaptureRaw             string        `koanf:"capture_raw"`
-	Proxy                  Proxy         `koanf:"proxy"`
+	// RawSample is the share of good responses kept besides the failures
+	// (with capture_raw: failures), with their parser versions.
+	RawSample float64 `koanf:"raw_sample"`
+	Proxy     Proxy   `koanf:"proxy"`
 	// QueryBreaker stops sending a (query, doc_id) whose responses keep
 	// being rejected or failing to parse.
 	QueryBreaker breaker.Config `koanf:"query_breaker"`
@@ -568,6 +571,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Limits.MaxAgeDays > c.Limits.MaxAgeCapDays {
 		errs = append(errs, errors.New("limits.max_age_days exceeds limits.max_age_cap_days"))
+	}
+	if c.FB.RawSample < 0 || c.FB.RawSample > 1 {
+		errs = append(errs, errors.New("fb.raw_sample must be between 0 and 1"))
 	}
 	switch c.Privacy.PIIMode {
 	case "full", "pseudonymized":

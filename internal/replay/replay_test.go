@@ -66,10 +66,10 @@ func TestReplay(t *testing.T) {
 	post := healthy.World.Pages()[0].Posts[0]
 	vars := map[string]any{"feedback_id": parse.FeedbackID(post.ID)}
 	cm := response(t, healthy, "comments", vars)
-	sink.Capture(ctx, "comments", detect.SchemaDrift, cm.Body, vars) // say it drifted then, but parses now
-	sink.Capture(ctx, "comments", detect.RateLimited, []byte(`{"error":1675004}`), vars)
+	sink.Capture(ctx, rawsink.Response{Query: "comments", Class: detect.SchemaDrift, Body: cm.Body, Vars: vars}) // say it drifted then, but parses now
+	sink.Capture(ctx, rawsink.Response{Query: "comments", Class: detect.RateLimited, Body: []byte(`{"error":1675004}`), Vars: vars})
 	// Two queries sharing the timeline parser drift alike.
-	sink.Capture(ctx, "timeline_alt", detect.SchemaDrift, tl.Body, tl.Vars)
+	sink.Capture(ctx, rawsink.Response{Query: "timeline_alt", Class: detect.SchemaDrift, Body: tl.Body, Vars: tl.Vars})
 	sink.FlushAll(ctx)
 
 	dir := t.TempDir()

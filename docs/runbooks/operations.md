@@ -159,6 +159,8 @@ Symptom: `fbs_parse_total{outcome="drift"}` (alert `FbsSchemaDrift`), or a field
 3. Fix the candidate paths in `internal/fb/parse`, `make golden`, and check the fix against the production responses before shipping: `fbctl replay --query timeline --since 24h`. It exits 3 while some still drift.
 4. Ship, then replay the DLQ: `fbctl dlq replay --reason max_attempts`.
 
+**Raw responses kept.** Every failure (`fb.capture_raw: failures`) and a sample of the good responses (`fb.raw_sample`, 1%), each line with its query, doc_id, parser and parser version: under `raw-failures/` and `raw-sample/`, or on the platform `fbs/keep/failures/` and `fbs/keep/sample/` (kept for good); `capture_raw: all` puts the rest under `raw/` (`fbs/30d/all/`, the platform's 30-day rule). `fbctl replay --prefix fbs/keep/sample --query <q>` runs today's parsers over the sample: a field the sample has and the parser misses shows there first.
+
 **Optional fields** (text, reactions, media and the like) never fail a parse, so their loss is silent. `fbs:parse_missing_per_response:rate1h` is how often each field is missing per response. `FbsOptionalFieldDrift` fires when that is more than twice last week's rate plus 5 points, or above 25% with no history. The "Optional fields missing per response" panel shows both curves. To look at the responses, set `fb.capture_raw: all` for a while and run `fbctl replay --prefix raw --query <q>`.
 
 **Proving a new parser version on live traffic:** register it as a candidate in `internal/crawl/shadow` (`shadow.Candidates.Timeline` or `.Comments`, from its file's `init`). A share of responses (`fb.shadow_rate`, 5%) is then parsed by both versions; only the active result is emitted.

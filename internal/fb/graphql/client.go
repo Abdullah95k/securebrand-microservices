@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"net/url"
 	"strconv"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/tidwall/gjson"
 
+	"github.com/abdullah95k/securebrand-microservices/internal/crawl/rawsink"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/detect"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/ratelimit"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/registry"
@@ -24,7 +26,20 @@ import (
 // request's template values (page_id, feedback_id, ...) so they can be
 // parsed again with their context.
 type RawSink interface {
-	Capture(ctx context.Context, query string, cls detect.Class, body []byte, vars map[string]any)
+	Capture(ctx context.Context, r rawsink.Response)
+}
+
+// rawResponse is what the sink keeps of one response to q.
+func rawResponse(q registry.Query, cls detect.Class, body []byte, vars map[string]any, sample bool) rawsink.Response {
+	return rawsink.Response{Query: q.Name, DocID: q.DocID, Parser: q.Parser, ParserVersion: q.ParserVersion,
+		Class: cls, Sample: sample, Body: body, Vars: vars}
+}
+
+func (c *Client) rand() float64 {
+	if c.Rand != nil {
+		return c.Rand()
+	}
+	return rand.Float64()
 }
 
 // Request is one logical GraphQL call.
@@ -68,6 +83,10 @@ type Client struct {
 	Locale         string
 	Raw            RawSink
 	CaptureAll     bool
+	// RawSample is the share of good responses kept as a sample
+	// (fb.raw_sample), besides the failures; Rand draws for it.
+	RawSample float64
+	Rand      func() float64
 	// Ceiling, when set, replaces GlobalRPS with the fleet ceiling AIMD
 	// publishes; Outcomes receives every response (class, lane, wire
 	// bytes) for AIMD and the traffic budget.
@@ -97,7 +116,7 @@ func (c *Client) Parsed(resp *Response, ok bool) {
 	// Also with CaptureAll: that copy is under raw/ as OK, and the drifted
 	// ones belong under raw-failures/ where replay looks first.
 	if !ok && c.Raw != nil && resp.Class == detect.OK {
-		c.Raw.Capture(context.Background(), resp.Query.Name, detect.SchemaDrift, resp.Body, resp.Vars)
+		c.Raw.Capture(context.Background(), rawResponse(resp.Query, detect.SchemaDrift, resp.Body, resp.Vars, false))
 	}
 }
 
@@ -203,8 +222,11 @@ func (c *Client) do(ctx context.Context, id *session.Identity, q registry.Query,
 		c.Outcomes.Observe(cls, req.Lane, tr.BytesIn+tr.BytesOut)
 	}
 	metrics.FBRequests.WithLabelValues(q.Name, cls.String(), tier).Inc()
-	if c.Raw != nil && (c.CaptureAll || cls != detect.OK) {
-		c.Raw.Capture(ctx, q.Name, cls, tr.Body, req.Vars)
+	if c.Raw != nil {
+		sample := cls == detect.OK && !c.CaptureAll && c.RawSample > 0 && c.rand() < c.RawSample
+		if c.CaptureAll || cls != detect.OK || sample {
+			c.Raw.Capture(ctx, rawResponse(q, cls, tr.Body, req.Vars, sample))
+		}
 	}
 	return &Response{Query: q, Parts: parts, Body: tr.Body, Status: tr.Status, ContentType: ct, Class: cls,
 		Reason: reason, Errors: errs, Elapsed: elapsed, Vars: req.Vars, BytesIn: tr.BytesIn, BytesOut: tr.BytesOut}, nil

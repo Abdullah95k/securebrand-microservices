@@ -1,9 +1,12 @@
 // Package rawsink batches raw Facebook responses into zstd-compressed JSONL
 // objects in S3 so payloads can be re-parsed after a parser fix
-// (fbctl replay). Failures go under raw-failures/, everything else under
-// raw/; with a Prefix (the platform's layout), failures go under
-// <prefix>/keep/failures/ (kept for good) and the rest under
-// <prefix>/30d/all/ (the platform's 30-day rule).
+// (fbctl replay). Failures go under raw-failures/, the sample of good
+// responses (fb.raw_sample) under raw-sample/, everything else
+// (fb.capture_raw: all) under raw/; with a Prefix (the platform's layout),
+// failures go under <prefix>/keep/failures/ and the sample under
+// <prefix>/keep/sample/ (both kept for good), the rest under
+// <prefix>/30d/all/ (the platform's 30-day rule). Each line names the
+// parser and parser version that read it.
 package rawsink
 
 import (
@@ -38,19 +41,38 @@ type Sink struct {
 	seq  int
 }
 
-// Folder is where a response of class cls goes.
-func (s *Sink) Folder(cls detect.Class) string {
+// Folder is where a response of class cls goes; sample marks a good one
+// kept as part of the sample.
+func (s *Sink) Folder(cls detect.Class, sample bool) string {
 	failed := cls != detect.OK
 	switch {
 	case s.Prefix == "" && failed:
 		return "raw-failures"
+	case s.Prefix == "" && sample:
+		return "raw-sample"
 	case s.Prefix == "":
 		return "raw"
 	case failed:
 		return s.Prefix + "/keep/failures"
+	case sample:
+		return s.Prefix + "/keep/sample"
 	default:
 		return s.Prefix + "/30d/all"
 	}
+}
+
+// Response is one response to keep, with what asked for it and what reads
+// it.
+type Response struct {
+	Query         string
+	DocID         string
+	Parser        string
+	ParserVersion int
+	Class         detect.Class
+	// Sample marks a good response kept as part of the sample.
+	Sample bool
+	Body   []byte
+	Vars   map[string]any
 }
 
 func New(s3 *minio.Client, bucket string) *Sink {
@@ -60,25 +82,30 @@ func New(s3 *minio.Client, bucket string) *Sink {
 
 // Line is one captured response (one JSONL line of a raw object).
 type Line struct {
-	At    time.Time       `json:"at"`
-	Query string          `json:"query"`
-	Class string          `json:"class"`
-	Vars  map[string]any  `json:"vars,omitempty"`
-	Body  json.RawMessage `json:"body,omitempty"`
-	Text  string          `json:"text,omitempty"`
+	At            time.Time       `json:"at"`
+	Query         string          `json:"query"`
+	DocID         string          `json:"doc_id,omitempty"`
+	Parser        string          `json:"parser,omitempty"`
+	ParserVersion int             `json:"parser_version,omitempty"`
+	Class         string          `json:"class"`
+	Sample        bool            `json:"sample,omitempty"`
+	Vars          map[string]any  `json:"vars,omitempty"`
+	Body          json.RawMessage `json:"body,omitempty"`
+	Text          string          `json:"text,omitempty"`
 }
 
 // Capture buffers one response.
-func (s *Sink) Capture(ctx context.Context, query string, cls detect.Class, body []byte, vars map[string]any) {
-	prefix := s.Folder(cls)
-	l := Line{At: time.Now().UTC(), Query: query, Class: cls.String(), Vars: vars}
-	if json.Valid(body) {
-		l.Body = body
+func (s *Sink) Capture(ctx context.Context, r Response) {
+	prefix := s.Folder(r.Class, r.Sample)
+	l := Line{At: time.Now().UTC(), Query: r.Query, DocID: r.DocID, Parser: r.Parser, ParserVersion: r.ParserVersion,
+		Class: r.Class.String(), Sample: r.Sample, Vars: r.Vars}
+	if json.Valid(r.Body) {
+		l.Body = r.Body
 	} else {
-		l.Text = string(body)
+		l.Text = string(r.Body)
 	}
 	b, _ := json.Marshal(l)
-	key := prefix + "/" + query
+	key := prefix + "/" + r.Query
 	s.mu.Lock()
 	buf := s.bufs[key]
 	if buf == nil {

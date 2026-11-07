@@ -32,6 +32,7 @@ Multiply the GB per tier by its price for the daily bill. The overview dashboard
 | `scheduler.budget` | unlimited | A hard daily cap in requests and/or bytes: pauses backfill, then stretches T4/T3/T2 past 3h. On-demand work is never held. With `stretch_tiers: []` every page stays at 3h and the budget pauses backfill only. | Backfills wait; slow tiers go stale. |
 | `fb.browser.max_share` | 2% | Browser bootstraps load a whole page, scripts included (media is refused). Keep the share low. | Pages that need JavaScript fail more often. |
 | `fb.capture_raw` | `failures` | `all` writes every response to S3 (storage, not proxy). Use it briefly. | — |
+| `fb.raw_sample` | 0.01 | With `capture_raw: failures`, the share of good responses kept too (`raw-sample/`, on the platform `fbs/keep/sample/`, kept for good), each with its parser and parser version: what a parser change is checked against. Storage only. | — |
 | `limits.video_policy` | `sd` (`thumbnail` for backfills) | Media egress and storage (direct, not proxy). | Lower-quality media for the analysis service. |
 
 ## A tuning loop
