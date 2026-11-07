@@ -266,8 +266,18 @@ components:
     resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {memory: 1Gi}}
 
 networkPolicy:
-  # Restricts ingress to the API port and the metrics port. Egress rules are
-  # environment specific (proxy endpoints for crawlers, CDN for the
-  # downloader) and are left to the cluster operator.
+  # Restricts ingress to the API port and the metrics port, and egress to
+  # what each pod needs (egress.enabled).
   enabled: false
   metricsFromNamespace: monitoring
+  egress:
+    enabled: true
+    dnsNamespace: kube-system
+    # The managed services (Postgres, Kafka, Valkey): CIDRs, with ports
+    # ({port, endPort}) or none for every port.
+    services: []
+    # HTTPS: object storage, and Facebook's CDN for the media downloader.
+    https: ["0.0.0.0/0"]
+    # The proxy exits (CIDRs and ports), for the components that use them.
+    proxies: []
+    proxyComponents: [crawler-page, crawler-post, crawler-thread, crawler-search, crawler-check, registry-sync]
