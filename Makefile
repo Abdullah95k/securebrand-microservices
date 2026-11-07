@@ -5,7 +5,7 @@ PG_DSN ?= postgres://fbs:fbs@localhost:5432/fbs?sslmode=disable
 TEST_ENV = FBS_TEST_PG_DSN="$(PG_DSN)" FBS_TEST_REDIS_ADDR=localhost:6379 FBS_TEST_KAFKA_BROKERS=localhost:19092 FBS_TEST_SCHEMA_REGISTRY=http://localhost:18081
 COMPOSE = docker compose -f deploy/compose/docker-compose.yml
 
-.PHONY: all build test lint vet generate golden fixtures infra-up infra-down test-integration e2e loadtest soak docker docker-prebuilt compose-up compose-down spike-report phase0 phase0-dryrun phase0-trim phase0-rate pilot-up pilot-register pilot-registry pilot-report pilot-down pilot-clean spike-bin chart-check chart-smoke clean
+.PHONY: all build test lint vet generate golden fixtures infra-up infra-down test-integration test-pgbouncer e2e loadtest soak docker docker-prebuilt compose-up compose-down spike-report phase0 phase0-dryrun phase0-trim phase0-rate pilot-up pilot-register pilot-registry pilot-report pilot-down pilot-clean spike-bin chart-check chart-smoke clean
 
 all: generate build test
 
@@ -55,6 +55,15 @@ infra-down:
 ## Integration tests against real Postgres/Redpanda/Valkey (make infra-up first).
 test-integration:
 	$(TEST_ENV) $(GO) test -count=1 -timeout 25m ./...
+
+## The integration tests through PgBouncer in transaction mode with no
+## prepared statements kept, as production reaches PostgreSQL (CI runs them
+## so). Needs pgbouncer on the PATH and make infra-up.
+test-pgbouncer:
+	@command -v pgbouncer >/dev/null || { echo "pgbouncer is not installed (apt-get install pgbouncer)"; exit 2; }
+	pgbouncer test/pgbouncer/pgbouncer.ini > /tmp/fbs-pgbouncer.log 2>&1 & pid=$$!; \
+	trap "kill $$pid" EXIT; sleep 1; \
+	$(TEST_ENV) FBS_TEST_PG_DSN="postgres://fbs:fbs@127.0.0.1:6432/fbs?sslmode=disable" $(GO) test -count=1 -timeout 25m ./...
 
 ## Load tests against fakefb (opt-in; prints a report). Size with
 ## FBS_LOADTEST_PAGES, _POSTS, _COMMENTS, _ROWS, _LATENCY; FBS_LOADTEST_OUT=file.

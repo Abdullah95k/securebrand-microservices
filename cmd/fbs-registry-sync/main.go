@@ -2,7 +2,7 @@
 // registry_sync.interval it scans the canary pages' JS bundles for new
 // doc_ids, checks them and the active ones with real requests on the
 // canary pages, and promotes a working replacement (internal/registrysync).
-// Run a single replica; runs are serialised by a Postgres advisory lock.
+// Run a single replica; runs are serialised by a lease in Postgres.
 //
 //	fbs-registry-sync [--config file]          run every interval
 //	fbs-registry-sync [--config file] --once   one run; exit 1 on error, 3 when degraded

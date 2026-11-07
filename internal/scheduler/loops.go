@@ -46,6 +46,34 @@ func Every(ctx context.Context, name string, interval time.Duration, fn func(con
 	}
 }
 
+// EveryIdle runs fn in a loop that slows down while there is nothing to
+// do: after a run that found work (fn reports it) it runs again after
+// minWait, and every run that found none doubles the wait, up to maxWait.
+// An idle loop touches the database a few times a minute, not every few
+// seconds (production's PostgreSQL has few connection slots, and a
+// connection used every few seconds is never given back).
+func EveryIdle(ctx context.Context, name string, minWait, maxWait time.Duration, fn func(context.Context) (bool, error)) error {
+	wait := minWait
+	for {
+		worked, err := fn(ctx)
+		if err != nil && ctx.Err() == nil {
+			slog.Warn("scheduler: loop failed", "loop", name, "err", err)
+		}
+		if worked {
+			wait = minWait
+		} else {
+			wait = min(2*wait, maxWait)
+		}
+		t := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return nil
+		case <-t.C:
+		}
+	}
+}
+
 // Planner enqueues scheduled re-scrapes of registered pages, with the
 // page's due post comment refreshes riding on the same job.
 type Planner struct {

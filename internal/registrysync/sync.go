@@ -34,6 +34,7 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/registry"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/session"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/transport"
+	"github.com/abdullah95k/securebrand-microservices/internal/platform/leader"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/metrics"
 )
 
@@ -179,8 +180,9 @@ func (s *Sync) InitMetrics(ctx context.Context) error {
 	return nil
 }
 
-// lockKey serialises runs across replicas and rollouts.
-const lockKey = "fbs:registry-sync"
+// LeaseName serialises runs across replicas and rollouts: a run holds this
+// lease (internal/platform/leader) and stops if it loses it.
+const LeaseName = "registry-sync"
 
 // Run performs one sync. The report is returned (and stored in
 // registry_sync_runs) even when the run fails.
@@ -189,26 +191,13 @@ func (s *Sync) Run(ctx context.Context) (rep Report, err error) {
 		s.now = time.Now
 	}
 	rep.StartedAt = s.now().UTC()
-	conn, err := s.DB.Acquire(ctx)
-	if err != nil {
-		return s.finish(ctx, rep, err)
-	}
-	defer conn.Release()
-	var locked bool
-	if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock(hashtextextended($1, 0))`, lockKey).Scan(&locked); err != nil {
-		return s.finish(ctx, rep, err)
-	}
-	if !locked {
+	lease := &leader.Lease{DB: s.DB, Name: LeaseName}
+	held, err := lease.Do(ctx, func(ctx context.Context) error { return s.run(ctx, &rep) })
+	if err == nil && !held {
 		rep.Status = StatusSkipped
 		rep.FinishedAt = s.now().UTC()
 		return rep, nil
 	}
-	defer func() {
-		// The lock is per connection; release it before the connection
-		// goes back to the pool, even when ctx is done.
-		_, _ = conn.Exec(context.WithoutCancel(ctx), `SELECT pg_advisory_unlock(hashtextextended($1, 0))`, lockKey)
-	}()
-	err = s.run(ctx, &rep)
 	return s.finish(ctx, rep, err)
 }
 

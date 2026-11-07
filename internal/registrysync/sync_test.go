@@ -346,12 +346,8 @@ func TestSyncAllBlockedIsNotASuccess(t *testing.T) {
 func TestSyncSkipsWhileAnotherRunHoldsTheLock(t *testing.T) {
 	f := start(t, fakefb.Faults{}, nil)
 	ctx := context.Background()
-	conn, err := f.s.DB.Acquire(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Release()
-	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock(hashtextextended('fbs:registry-sync', 0))`); err != nil {
+	if _, err := f.s.DB.Exec(ctx, `INSERT INTO leases (name, holder, until) VALUES ($1, 'another-pod', now() + interval '1 minute')`,
+		registrysync.LeaseName); err != nil {
 		t.Fatal(err)
 	}
 	if rep, err := f.s.Run(ctx); err != nil || rep.Status != registrysync.StatusSkipped {

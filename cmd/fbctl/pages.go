@@ -169,7 +169,7 @@ func pagesSeed(ctx context.Context, cfg *config.Config, args []string) error {
 		printJSON(dispatch.SeedResult{})
 		return nil
 	}
-	db, err := pg.Open(ctx, cfg.Postgres.DSN, 4)
+	db, err := pg.OpenWaiting(ctx, cfg.Postgres.DSN, 2, hookSlotWait)
 	if err != nil {
 		return err
 	}

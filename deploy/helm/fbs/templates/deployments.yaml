@@ -48,9 +48,12 @@ spec:
             {{- if $c.port }}
             - {name: http, containerPort: {{ $c.port }}}
             {{- end }}
+          # /readyz checks the stores at most once a minute (each check has
+          # its own 3s timeout) and answers from the last result in between.
           readinessProbe:
             httpGet: {path: /readyz, port: metrics}
             periodSeconds: 10
+            timeoutSeconds: 5
             failureThreshold: 3
           livenessProbe:
             httpGet: {path: /healthz, port: metrics}

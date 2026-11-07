@@ -64,13 +64,21 @@ const aggregateBatch = 5000
 // Aggregate drains the mention events into the list, a batch at a time,
 // for at most ten batches a tick.
 func (m *Mentions) Aggregate(ctx context.Context) error {
+	_, err := m.AggregateWork(ctx)
+	return err
+}
+
+// AggregateWork is Aggregate, reporting whether it drained any events.
+func (m *Mentions) AggregateWork(ctx context.Context) (bool, error) {
+	worked := false
 	for range 10 {
 		n, err := mentions.Aggregate(ctx, m.DB, aggregateBatch)
+		worked = worked || n > 0
 		if err != nil || n < aggregateBatch {
-			return err
+			return worked, err
 		}
 	}
-	return nil
+	return worked, nil
 }
 
 // lostAfter is how long a check task may stay unfinished before it is

@@ -27,7 +27,8 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/scheduler"
 )
 
-const leaderKey = 4_200_100
+// leaderLease names the scheduler's leader lease (internal/platform/leader).
+const leaderLease = "scheduler"
 
 func main() {
 	fs := flag.NewFlagSet("fbs-scheduler", flag.ExitOnError)
@@ -106,7 +107,7 @@ func runScheduler(ctx context.Context, cfg *config.Config) error {
 		ment.Budget = planner.Budget
 		leaderLoops = append(leaderLoops,
 			func(ctx context.Context) error {
-				return scheduler.Every(ctx, "mentions-aggregate", 10*time.Second, ment.Aggregate)
+				return scheduler.EveryIdle(ctx, "mentions-aggregate", 5*time.Second, 30*time.Second, ment.AggregateWork)
 			},
 			func(ctx context.Context) error {
 				return scheduler.Every(ctx, "mentions-queue", time.Minute, ment.Queue)
@@ -129,7 +130,7 @@ func runScheduler(ctx context.Context, cfg *config.Config) error {
 		})
 	}
 	return run.Group(ctx, ops.Run, func(ctx context.Context) error {
-		return leader.Run(ctx, db, leaderKey, func(ctx context.Context) error {
+		return leader.Run(ctx, db, leaderLease, func(ctx context.Context) error {
 			// Leader-only gauges are read joined on fbs_scheduler_leader, so a
 			// former leader's last values do not linger in dashboards.
 			metrics.SchedulerLeader.Set(1)
@@ -146,7 +147,9 @@ func runScheduler(ctx context.Context, cfg *config.Config) error {
 					return scheduler.Every(ctx, "finalizer", cfg.Scheduler.FinalizerInterval, fin.Tick)
 				},
 				func(ctx context.Context) error { return scheduler.Every(ctx, "reaper", time.Minute, reaper.Tick) },
-				func(ctx context.Context) error { return scheduler.Every(ctx, "erasure", 10*time.Second, eraser.Tick) },
+				func(ctx context.Context) error {
+					return scheduler.EveryIdle(ctx, "erasure", 2*time.Second, 30*time.Second, eraser.Work)
+				},
 			)...)
 		})
 	})

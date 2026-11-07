@@ -42,7 +42,7 @@ fbs-crawler --stages page ─PostTask─▶ post ─ThreadTask─▶ thread     
 | Binary | Role |
 |---|---|
 | `fbs-api` | REST API (`/v1`, [OpenAPI](api/openapi/fbs.v1.yaml)), API keys with scopes, job dispatch |
-| `fbs-scheduler` | Leader-elected. Runs the planner, the job finaliser (completeness, `fb.job.v1`), the reaper, partitions, retention and erasure. |
+| `fbs-scheduler` | Leader-elected (a lease row in PostgreSQL, renewed every 5 s). Runs the planner, the job finaliser (completeness, `fb.job.v1`), the reaper, partitions, retention and erasure. |
 | `fbs-crawler --stages page,post,thread,retry,search,check` | Fetch, parse and emit; `search` runs discovery's keyword searches, `check` the mention checks. Run one Deployment per stage. |
 | `fbs-persister` | Writes `fb.*` topics into partitioned Postgres (COPY + no-op upserts) |
 | `fbs-media-downloader` / `fbs-media-janitor` | Temporary media lifecycle ([contract](docs/contracts/media-handoff.md)) |
