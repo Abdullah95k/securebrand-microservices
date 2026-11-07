@@ -35,6 +35,18 @@ func rawResponse(q registry.Query, cls detect.Class, body []byte, vars map[strin
 		Class: cls, Sample: sample, Body: body, Vars: vars}
 }
 
+// paceExit holds the exit (one static IP) to ExitRPS across every identity
+// and pod on it. Gateways and direct egress name no exit: not capped here.
+func (c *Client) paceExit(ctx context.Context, exit string) error {
+	rl, ok := c.Limiter.(interface {
+		WaitRate(ctx context.Context, key string, perSecond float64) error
+	})
+	if c.ExitRPS <= 0 || exit == "" || !ok {
+		return nil
+	}
+	return rl.WaitRate(ctx, "exit:"+exit, c.ExitRPS)
+}
+
 func (c *Client) rand() float64 {
 	if c.Rand != nil {
 		return c.Rand()
@@ -83,6 +95,10 @@ type Client struct {
 	Locale         string
 	Raw            RawSink
 	CaptureAll     bool
+	// ExitRPS caps the requests each static exit (IP) sends a second,
+	// fleet-wide, whatever the number of identities on it (fb.exit_rps);
+	// with the Limiter's WaitRate. 0 = no per-exit cap.
+	ExitRPS float64
 	// RawSample is the share of good responses kept as a sample
 	// (fb.raw_sample), besides the failures; Rand draws for it.
 	RawSample float64
@@ -232,13 +248,17 @@ func (c *Client) do(ctx context.Context, id *session.Identity, q registry.Query,
 		Reason: reason, Errors: errs, Elapsed: elapsed, Vars: req.Vars, BytesIn: tr.BytesIn, BytesOut: tr.BytesOut}, nil
 }
 
-// pace applies identity pacing, then the per-page and global fleet limits.
+// pace applies identity pacing, then the per-exit, per-page and global
+// fleet limits.
 func (c *Client) pace(ctx context.Context, id *session.Identity, req Request) error {
 	if err := id.Wait(ctx); err != nil {
 		return err
 	}
 	if c.Limiter == nil {
 		return nil
+	}
+	if err := c.paceExit(ctx, id.Endpoint.Exit); err != nil {
+		return err
 	}
 	if req.PageID != 0 {
 		rps := c.PageRPS

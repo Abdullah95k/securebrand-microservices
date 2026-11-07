@@ -247,6 +247,26 @@ hooks:
 keda:
   enabled: false
 
+# What fbs's pods may reach. Prometheus scrapes from monitoring; DNS is
+# kube-system's.
+networkPolicy:
+  enabled: true
+  metricsFromNamespace: monitoring
+  egress:
+    enabled: true
+    services:
+      # The cluster's private network (10.30.0.0/16): the managed Postgres,
+      # Kafka and Valkey, every port.
+      - cidr: 10.30.0.0/16
+      # The managed services' public endpoints, DigitalOcean's ports.
+      - cidr: 0.0.0.0/0
+        ports: [{port: 25060, endPort: 25080}]
+    https: ["0.0.0.0/0"]
+    # Decodo's dedicated ISP exits: one port per IP from 10001.
+    proxies:
+      - cidr: 0.0.0.0/0
+        ports: [{port: 10000, endPort: 10999}]
+
 serviceMonitor:
   enabled: true
 alerts:

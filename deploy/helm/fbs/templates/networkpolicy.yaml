@@ -21,3 +21,80 @@ spec:
         - podSelector: {}
         - namespaceSelector: {}
 {{- end }}
+{{- if and .Values.networkPolicy.enabled .Values.networkPolicy.egress.enabled }}
+{{- $eg := .Values.networkPolicy.egress }}
+---
+# Egress of every fbs pod: DNS, the release's own pods, the managed
+# services (Postgres, Kafka, Valkey) and HTTPS (object storage; Facebook's
+# media CDN for the media downloader). Anything else is refused.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "fbs.fullname" . }}-egress
+  labels: {{- include "fbs.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: fbs
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $eg.dnsNamespace }}
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: fbs
+              app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- range $eg.services }}
+    - to:
+        - ipBlock: {cidr: {{ .cidr | quote }}}
+      {{- with .ports }}
+      ports:
+        {{- range . }}
+        - {protocol: TCP, port: {{ .port }}{{ with .endPort }}, endPort: {{ . }}{{ end }}}
+        {{- end }}
+      {{- end }}
+    {{- end }}
+    {{- with $eg.https }}
+    - to:
+        {{- range . }}
+        - ipBlock: {cidr: {{ . | quote }}}
+        {{- end }}
+      ports:
+        - {protocol: TCP, port: 443}
+    {{- end }}
+{{- with $eg.proxies }}
+---
+# The proxy exits, for the components that reach Facebook through them.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "fbs.fullname" $ }}-egress-proxies
+  labels: {{- include "fbs.labels" $ | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: fbs
+      app.kubernetes.io/instance: {{ $.Release.Name }}
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: {{- toYaml $eg.proxyComponents | nindent 10 }}
+  policyTypes: [Egress]
+  egress:
+    {{- range . }}
+    - to:
+        - ipBlock: {cidr: {{ .cidr | quote }}}
+      ports:
+        {{- range .ports }}
+        - {protocol: TCP, port: {{ .port }}{{ with .endPort }}, endPort: {{ . }}{{ end }}}
+        {{- end }}
+    {{- end }}
+{{- end }}
+{{- end }}

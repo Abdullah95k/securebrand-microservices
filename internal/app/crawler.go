@@ -129,6 +129,10 @@ func NewCrawler(ctx context.Context, cfg *config.Config, db *pgxpool.Pool, rdb *
 		PageRPS: cfg.FB.PageRPS, PageRPSFast: cfg.FB.PageRPSP0, GlobalRPS: cfg.FB.GlobalRPS,
 		AcceptLanguage: cfg.FB.AcceptLanguage, Locale: cfg.FB.Locale,
 		Breakers: breaker.New(cfg.FB.QueryBreaker),
+		ExitRPS:  cfg.FB.ExitRPS,
+	}
+	if gql.ExitRPS == 0 {
+		gql.ExitRPS = cfg.FB.IdentityRPS // an IP sends no more than one identity would
 	}
 	gql.Breakers.OnChange = func(key string, from, to breaker.State) {
 		metrics.BreakerState.WithLabelValues("query:" + key).Set(float64(to))

@@ -94,6 +94,10 @@ fb:
   request_timeout: 30s
   # Cap applied to every identity (requests per second) and burst.
   identity_rps: 0.33
+  # Requests a second each static exit (one IP) sends, fleet-wide, however
+  # many identities share it (Valkey); 0 = identity_rps, so an IP sends no
+  # more than one identity would. Page loads have their own gate.
+  exit_rps: 0
   identity_burst: 2
   # Requests an identity serves before it is replaced. Each replacement
   # starts with a page load, the request Facebook walls. The first pilot

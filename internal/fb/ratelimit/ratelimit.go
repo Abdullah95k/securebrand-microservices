@@ -29,8 +29,22 @@ func (r *Redis) Wait(ctx context.Context, key string, perSecond int) error {
 	if perSecond <= 0 {
 		return nil
 	}
+	return r.wait(ctx, key, redis_rate.PerSecond(perSecond))
+}
+
+// WaitRate blocks until a request under key is allowed at perSecond, which
+// may be below one: requests are spaced 1/perSecond apart, without burst,
+// whichever pod sends them.
+func (r *Redis) WaitRate(ctx context.Context, key string, perSecond float64) error {
+	if perSecond <= 0 {
+		return nil
+	}
+	return r.wait(ctx, key, redis_rate.Limit{Rate: 1, Burst: 1, Period: time.Duration(float64(time.Second) / perSecond)})
+}
+
+func (r *Redis) wait(ctx context.Context, key string, limit redis_rate.Limit) error {
 	for {
-		res, err := r.l.Allow(ctx, "rl:"+key, redis_rate.PerSecond(perSecond))
+		res, err := r.l.Allow(ctx, "rl:"+key, limit)
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
