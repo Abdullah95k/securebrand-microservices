@@ -28,7 +28,7 @@
 
 | Field | Value |
 |---|---|
-| Commit | the merge commit of the mention-checker PR (7 November), sent to the master when it merges; it replaces `9d13af0` ([#69](https://github.com/Abdullah95k/securebrand-microservices/pull/69)) |
+| Commit | `de9c1d4140d226d874d713c4a8945304c3b16d0a` ([#73](https://github.com/Abdullah95k/securebrand-microservices/pull/73): the mention checker on) |
 | Image | `fbs`: `deploy/docker/Dockerfile`, context `.`, target `""` (the last stage, no browser) |
 | Chart | `deploy/helm/fbs` |
 | Values | `values-production.yaml` |

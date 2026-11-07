@@ -7,6 +7,12 @@ updates:
     directory: /
     schedule: {interval: weekly, day: sunday}
     open-pull-requests-limit: 5
+    # The TLS and HTTP/2 client fbs reaches Facebook with: an update can
+    # change what Facebook sees, and how fbs reaches Facebook doesn't change
+    # without the owner (7 November). Updated by hand, after a check against
+    # real Facebook; govulncheck in CI still reports their vulnerabilities.
+    ignore:
+      - dependency-name: "github.com/bogdanfinn/*"
     groups:
       go-minor:
         update-types: [minor, patch]

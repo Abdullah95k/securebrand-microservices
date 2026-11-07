@@ -9,7 +9,7 @@ require (
 	github.com/go-chi/chi/v5 v5.5.0
 	github.com/go-redis/redis_rate/v10 v10.0.1
 	github.com/google/uuid v1.6.0
-	github.com/jackc/pgx/v5 v5.11.0
+	github.com/jackc/pgx/v5 v5.12.0
 	github.com/johannesboyne/gofakes3 v1.2.0
 	github.com/klauspost/compress v1.20.3
 	github.com/knadh/koanf/parsers/yaml v1.1.1
