@@ -143,8 +143,8 @@ keeping up with retirements: see "Block storm" in `operations.md`, step 5.
 After a day:
 
 ```bash
-make pilot-report                                # the last 24 hours, projected to 5,000 pages at $4/GB
-make pilot-report PILOT_SINCE=48h PILOT_PROJECT=10000 PILOT_COST_PER_GB=4
+make pilot-report                                # the last 24 hours, projected to 5,000 pages
+make pilot-report PILOT_SINCE=48h PILOT_PROJECT=10000 PILOT_COST_PER_IP=3.33
 ```
 
 It prints one row per job kind and page tier (backfills apart from the
@@ -152,11 +152,12 @@ scheduled crawls), then:
 - **steady state**: requests, page loads and bytes per page per day over the scheduled jobs, and the block rate;
 - **comment completeness**: over the posts first seen in the window, and over those seen a day or more ago (whose refreshes have run);
 - **projection**: requests and GB per day for `PILOT_PROJECT` pages, the IPs needed at the pilot's requests/s per IP with 50% headroom, and what that traffic would cost on a per-GB tier at `PILOT_COST_PER_GB`;
-- **page loads**: the page loads a day for `PILOT_PROJECT` pages, plus the mention checks' daily cap when they are on (a page load each), and the IPs they need: an IP loads at most one page per `fb.proxy.page_loads.interval` (2m: 720 a day), with 50% headroom. A page load that fails (walled, blocked or unanswered: `page_loads_failed` in job counters) pauses its IP for `backoff` (15m) or more, so the share that failed is charged at 15m each: a lower bound, since the pause doubles while walls repeat. "plan on at least" is the larger of the two IP counts. Jobs run by a crawler older than the page-load count show "not counted": measure only the time since the upgrade (`PILOT_SINCE`).
+- **page loads**: the page loads a day for `PILOT_PROJECT` pages, plus the mention checks' daily cap when they are on (a page load each; with no cap, their share of every IP's page loads), and the IPs they need: an IP loads at most one page per `fb.proxy.page_loads.interval` (2m: 720 a day), with 50% headroom. A page load that fails (walled, blocked or unanswered: `page_loads_failed` in job counters) pauses its IP for `backoff` (15m) or more, so the share that failed is charged at 15m each: a lower bound, since the pause doubles while walls repeat. "plan on at least" is the larger of the two IP counts. Jobs run by a crawler older than the page-load count show "not counted": measure only the time since the upgrade (`PILOT_SINCE`).
 
-Use the projection to size the proxy purchase: ISP IPs for the "plan on at
-least" count, and the per-GB figure for how much residential fallback could
-cost at worst.
+- **measured**: page loads and requests per IP per hour on the run's IPs (the static exits of the default tier), and how much of each IP's page-load capacity (one per interval) that used;
+- **estimated cost on dedicated IPs**: for `PILOT_PROJECT`, 1,000 and 10,000 pages, the IPs the plan needs (the larger of the two counts above), their price a month at `PILOT_COST_PER_IP` (Decodo's dedicated ISP IPs: $2.50–3.33, unlimited traffic, so bytes cost nothing extra) and the price per page a month.
+
+Everything up to "measured" is measured on the run; the projection and the cost table are estimated from it. Use them to size the proxy purchase: dedicated ISP IPs for the "plan on at least" count, and the per-GB figure only for how much a residential fallback could cost at worst.
 
 ## 6. Stop
 

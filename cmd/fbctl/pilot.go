@@ -64,6 +64,7 @@ func reportLoad(ctx context.Context, cfg *config.Config, args []string) error {
 	since := fs.Duration("since", 24*time.Hour, "measure jobs created this long ago and after; start after the backfills")
 	pages := fs.Int("pages", 0, "project the steady state to this many pages")
 	cost := fs.Float64("cost-per-gb", 0, "project the cost on a per-GB proxy tier at this price")
+	perIP := fs.Float64("cost-per-ip", 0, "price a dedicated IP a month (unlimited traffic): the cost for --pages, 1,000 and 10,000 pages")
 	headroom := fs.Float64("headroom", 0.5, "IPs beyond the average need, for peaks")
 	asJSON := fs.Bool("json", false, "print JSON")
 	_ = fs.Parse(args)
@@ -81,7 +82,8 @@ func reportLoad(ctx context.Context, cfg *config.Config, args []string) error {
 		return nil
 	}
 	proj := pilot.Projection{Pages: *pages, IdentityRPS: cfg.FB.IdentityRPS, CostPerGB: *cost, Headroom: *headroom,
-		PageLoadInterval: cfg.FB.Proxy.PageLoads.Interval, PageLoadBackoff: cfg.FB.Proxy.PageLoads.Backoff}
+		PageLoadInterval: cfg.FB.Proxy.PageLoads.Interval, PageLoadBackoff: cfg.FB.Proxy.PageLoads.Backoff,
+		CostPerIP: *perIP, Exits: cfg.FB.Proxy.StaticExits("default")}
 	if cfg.Mentions.Enabled {
 		proj.ChecksPerDay = cfg.Mentions.MaxChecksPerDay // 0: no cap, then the share sets them
 		proj.CheckShare = cfg.Mentions.PageLoadShare

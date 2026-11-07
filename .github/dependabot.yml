@@ -1,0 +1,18 @@
+# Dependabot: weekly pull requests for Go modules, the GitHub Actions the
+# workflows use, and the Docker base images. Each goes through CI like any
+# change; security updates come as soon as an advisory is published.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule: {interval: weekly, day: sunday}
+    open-pull-requests-limit: 5
+    groups:
+      go-minor:
+        update-types: [minor, patch]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: {interval: weekly, day: sunday}
+  - package-ecosystem: docker
+    directory: /deploy/docker
+    schedule: {interval: weekly, day: sunday}

@@ -1,6 +1,6 @@
 # Cost tuning
 
-Almost all of fbs's running cost is proxy bandwidth: every Facebook request and page load goes through a paid exit, billed per GB on the wire. Media downloads use direct egress (`media.NewHTTPClient` never uses a proxy), and Postgres, Kafka and compute are comparatively flat. This page shows how to measure what you spend, and which settings move it.
+Almost all of fbs's running cost is its proxies: every Facebook request and page load goes through a paid exit. Dedicated ISP IPs (fbs's production tier, Decodo) are priced per IP with unlimited traffic, so the cost is the number of IPs, set by page loads and requests per IP (`make pilot-report` gives the IPs and their cost for 1,000 and 10,000 pages); a residential tier is billed per GB on the wire. Media downloads use direct egress (`media.NewHTTPClient` never uses a proxy), and Postgres, Kafka and compute are comparatively flat. This page shows how to measure what you spend, and which settings move it.
 
 ## Measure first
 

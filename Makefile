@@ -85,13 +85,17 @@ KUBECONFORM_ARGS = -strict -summary -kubernetes-version 1.30.0 -schema-location 
 	-schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
 
 PROD_VALUES = -f deploy/helm/fbs/values-production.yaml
+PROMTOOL ?= docker run --rm --entrypoint promtool -v $(CURDIR):/repo:ro -w /repo prom/prometheus:v2.53.0
 ## Lint the Helm chart and validate its renders (defaults, every optional
 ## object, the staging example, the production values) against the
-## Kubernetes and CRD schemas.
+## Kubernetes and CRD schemas; check the alert rules and run their unit
+## tests (test/alerts) with promtool.
 chart-check:
 	$(HELM) lint deploy/helm/fbs
 	$(HELM) lint deploy/helm/fbs -f deploy/helm/fbs/examples/fakefb.yaml
 	$(HELM) lint deploy/helm/fbs $(PROD_VALUES)
+	$(PROMTOOL) check rules deploy/helm/fbs/files/alerts.yaml
+	$(PROMTOOL) test rules test/alerts/alerts_test.yaml
 	set -o pipefail; $(HELM) template fbs deploy/helm/fbs -n fbs $(PROD_VALUES) --set image.tag=0000000000000000000000000000000000000000 \
 	  | $(KUBECONFORM) $(KUBECONFORM_ARGS)
 	set -o pipefail; $(HELM) template fbs deploy/helm/fbs | $(KUBECONFORM) $(KUBECONFORM_ARGS)
@@ -167,6 +171,8 @@ PILOT_OUT = phase0/out
 PILOT_SINCE ?= 24h
 PILOT_PROJECT ?= 5000
 PILOT_COST_PER_GB ?= 4
+# A dedicated ISP IP a month (Decodo: $2.50-3.33, unlimited traffic).
+PILOT_COST_PER_IP ?= 3.33
 # Requests per second per IP (fb.identity_rps) for the pilot run; empty keeps
 # configs/default.yaml's. Phase 0's rate test passed 0.5 and 1.0 over a few
 # minutes. Read from the environment by pilot-up, never pasted into a command.
@@ -221,7 +227,7 @@ pilot-registry:
 ## Requests, bytes and blocks per page per day over the last PILOT_SINCE, projected to PILOT_PROJECT pages.
 pilot-report:
 	$(PILOT_RUN)
-	@$(PILOT_FBCTL) report load --since $(PILOT_SINCE) --pages $(PILOT_PROJECT) --cost-per-gb $(PILOT_COST_PER_GB)
+	@$(PILOT_FBCTL) report load --since $(PILOT_SINCE) --pages $(PILOT_PROJECT) --cost-per-gb $(PILOT_COST_PER_GB) --cost-per-ip $(PILOT_COST_PER_IP)
 
 ## Stops the pilot and keeps its database; pilot-clean also deletes it.
 pilot-down:

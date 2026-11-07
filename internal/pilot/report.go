@@ -188,6 +188,37 @@ type Projection struct {
 	// when they have no daily cap (mentions.page_load_share): the IPs
 	// collection needs are that much more.
 	CheckShare float64
+	// CostPerIP is a dedicated IP's price a month (Decodo's dedicated ISP
+	// IPs: unlimited traffic, priced per IP): the cost table, for Pages,
+	// 1,000 and 10,000 pages.
+	CostPerIP float64
+	// Exits are the static IPs the measured jobs ran on: with them, the
+	// page loads each IP made an hour.
+	Exits int
+}
+
+// ipsFor is the IPs n pages need, from the steady state's requests and
+// page loads per page per day: for the requests at IdentityRPS each, and
+// for the page loads at one per PageLoadInterval each (a failed one
+// pausing the IP for the backoff; with checks at no cap, their share kept
+// free), each with Headroom. 0 for what the projection can't tell.
+func (p Projection) ipsFor(n, reqDay, loadsDay, failed float64, counted bool) (reqIPs, loadIPs float64) {
+	if p.IdentityRPS > 0 {
+		reqIPs = math.Ceil(reqDay * n / 86400 / p.IdentityRPS * (1 + p.Headroom))
+	}
+	if p.PageLoadInterval <= 0 || !counted {
+		return reqIPs, 0
+	}
+	total := loadsDay*n + float64(p.ChecksPerDay)
+	each := 24 * time.Hour.Seconds() / p.PageLoadInterval.Seconds()
+	// A failed page load takes its slot and pauses the IP for the backoff:
+	// that many more intervals, at least (the backoff doubles).
+	cost := 1 + failed*p.PageLoadBackoff.Seconds()/p.PageLoadInterval.Seconds()
+	loadIPs = math.Ceil(total * cost / each * (1 + p.Headroom))
+	if p.ChecksPerDay <= 0 && p.CheckShare > 0 && p.CheckShare < 1 {
+		loadIPs = math.Ceil(total * cost / each / (1 - p.CheckShare) * (1 + p.Headroom))
+	}
+	return reqIPs, loadIPs
 }
 
 // Format renders the report and, with p.Pages, the projection.
@@ -233,25 +264,61 @@ func Format(r Report, p Projection) string {
 	if p.Pages > 0 {
 		n := float64(p.Pages)
 		fmt.Fprintf(&b, "\nfor %d pages: %.2fM requests and %s per day", p.Pages, reqDay*n/1e6, human(bytesDay*n))
-		var reqIPs float64
+		failed, counted := ratio(st.PageLoadsFailed, st.PageLoads), st.PageLoads > 0
+		reqIPs, loadIPs := p.ipsFor(n, reqDay, loadsDay, failed, counted)
 		if p.IdentityRPS > 0 {
-			reqIPs = math.Ceil(reqDay * n / 86400 / p.IdentityRPS * (1 + p.Headroom))
 			fmt.Fprintf(&b, "; about %.0f IPs at %.2g requests/s each (%.0f%% headroom)", reqIPs, p.IdentityRPS, 100*p.Headroom)
 		}
 		if p.CostPerGB > 0 {
 			fmt.Fprintf(&b, "; all on a $%.2f/GB tier: $%.0f a day", p.CostPerGB, bytesDay*n/1e9*p.CostPerGB)
 		}
 		b.WriteString("\n")
-		formatPageLoads(&b, loadsDay*n, ratio(st.PageLoadsFailed, st.PageLoads), reqIPs, st.PageLoads > 0, p)
+		formatPageLoads(&b, loadsDay*n, failed, reqIPs, loadIPs, counted, p)
 	}
+	formatPerIP(&b, st, days, reqDay, loadsDay, p)
 	return b.String()
+}
+
+// formatPerIP gives what each IP did (measured, with p.Exits) and, with
+// p.CostPerIP, what dedicated IPs cost for p.Pages, 1,000 and 10,000 pages
+// (estimated from the measured steady state).
+func formatPerIP(b *strings.Builder, st Row, days, reqDay, loadsDay float64, p Projection) {
+	hours := days * 24
+	if p.Exits > 0 && hours > 0 && st.PageLoads > 0 {
+		perIP := float64(st.PageLoads) / float64(p.Exits) / hours
+		fmt.Fprintf(b, "\nmeasured: %.1f page loads and %.0f requests per IP per hour on %d IPs", perIP,
+			float64(st.Requests)/float64(p.Exits)/hours, p.Exits)
+		if p.PageLoadInterval > 0 {
+			capacity := time.Hour.Seconds() / p.PageLoadInterval.Seconds()
+			fmt.Fprintf(b, " (page-load capacity %.0f an hour each: %.0f%% used)", capacity, 100*perIP/capacity)
+		}
+		b.WriteString("\n")
+	}
+	if p.CostPerIP <= 0 {
+		return
+	}
+	failed, counted := ratio(st.PageLoadsFailed, st.PageLoads), st.PageLoads > 0
+	scales := []int{1000, 10000}
+	if p.Pages > 0 && p.Pages != 1000 && p.Pages != 10000 {
+		scales = append([]int{p.Pages}, scales...)
+		sort.Ints(scales)
+	}
+	fmt.Fprintf(b, "\nestimated cost on dedicated IPs at $%.2f per IP a month (unlimited traffic; from the measured steady state, %.0f%% headroom):\n",
+		p.CostPerIP, 100*p.Headroom)
+	fmt.Fprintf(b, "%8s %6s %10s %14s\n", "pages", "IPs", "$ a month", "$ a page/month")
+	for _, n := range scales {
+		reqIPs, loadIPs := p.ipsFor(float64(n), reqDay, loadsDay, failed, counted)
+		ips := math.Max(math.Max(reqIPs, loadIPs), 1)
+		month := ips * p.CostPerIP
+		fmt.Fprintf(b, "%8d %6.0f %10.2f %14.3f\n", n, ips, month, month/float64(n))
+	}
 }
 
 // formatPageLoads projects the IPs the page loads need: each IP loads at
 // most one page per interval (its page-load gate), and each one that fails
 // (failed, the share) pauses it for at least the backoff, so page loads can
 // need more IPs than requests do.
-func formatPageLoads(b *strings.Builder, perDay, failed, reqIPs float64, counted bool, p Projection) {
+func formatPageLoads(b *strings.Builder, perDay, failed, reqIPs, loadIPs float64, counted bool, p Projection) {
 	if p.PageLoadInterval <= 0 {
 		return
 	}
@@ -261,14 +328,8 @@ func formatPageLoads(b *strings.Builder, perDay, failed, reqIPs float64, counted
 	}
 	total := perDay + float64(p.ChecksPerDay)
 	each := 24 * time.Hour.Seconds() / p.PageLoadInterval.Seconds()
-	// A failed page load takes its slot and pauses the IP for the backoff:
-	// that many more intervals, at least (the backoff doubles).
-	cost := 1 + failed*p.PageLoadBackoff.Seconds()/p.PageLoadInterval.Seconds()
-	ips := math.Ceil(total * cost / each * (1 + p.Headroom))
+	ips := loadIPs
 	share := p.ChecksPerDay <= 0 && p.CheckShare > 0 && p.CheckShare < 1
-	if share {
-		ips = math.Ceil(total * cost / each / (1 - p.CheckShare) * (1 + p.Headroom))
-	}
 	fmt.Fprintf(b, "page loads: %s a day", count(total))
 	if p.ChecksPerDay > 0 {
 		fmt.Fprintf(b, " (%d of them mention checks)", p.ChecksPerDay)
