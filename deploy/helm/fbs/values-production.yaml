@@ -57,11 +57,10 @@ config:
   # No daily caps in production (D-008; the owner, 7 November): 0 means no
   # limit. Mention checks are held to 20% of the exits' page loads instead
   # (mentions.page_load_share), so collection keeps the rest. The checker
-  # is turned on (here and components.crawler-check) after the first
-  # 48-hour run, which measures collection alone; then the owner's trial
-  # week.
+  # runs from the start (the owner, 7 November), here and in
+  # components.crawler-check.
   mentions:
-    enabled: false
+    enabled: true
     max_checks_per_day: 0
     max_new_per_day: 0
     page_load_share: 0.2
@@ -294,6 +293,12 @@ components:
     resources: {requests: {cpu: 250m, memory: 256Mi}}
   crawler-retry:
     resources: {requests: {cpu: 50m, memory: 64Mi}}
+  # Mention checks, through the proxies like the crawlers (it is in
+  # secretFiles.components and networkPolicy.egress.proxyComponents).
+  crawler-check:
+    enabled: true
+    replicas: 1
+    resources: {requests: {cpu: 50m, memory: 128Mi}}
   persister:
     replicas: 1
     resources: {requests: {cpu: 200m, memory: 256Mi}}
