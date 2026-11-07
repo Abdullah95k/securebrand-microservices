@@ -12,9 +12,9 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: {fetch-depth: 0}
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - name: Build
@@ -53,7 +53,7 @@ jobs:
       - name: Unit tests (parsers, fake Facebook client layer, accounting)
         env: {FBS_BROWSER_NO_SANDBOX: "1"} # runners may not allow the Chromium sandbox
         run: go test -race -count=1 ./...
-      - uses: golangci/golangci-lint-action@v8
+      - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.15.0
 
@@ -69,8 +69,8 @@ jobs:
         image: valkey/valkey:8-alpine
         ports: ["6379:6379"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
       - name: Start Redpanda
@@ -94,11 +94,11 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
       - name: Helm lint and render
         run: |
           go install github.com/yannh/kubeconform/cmd/kubeconform@v0.6.7
@@ -115,7 +115,7 @@ jobs:
       # fail the build; high ones are listed. The browser image isn't used in
       # production: listed only.
       - name: Image scan (production image)
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: fbs:ci
           severity: CRITICAL
