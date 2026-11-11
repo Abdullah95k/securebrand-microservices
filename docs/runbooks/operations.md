@@ -269,6 +269,7 @@ Sends what is already stored: pages, posts, comments and their count history (`d
    It reads that database and writes nothing to it; its events are marked `ACQUISITION_IMPORT`. Check it first the same way: an entry `pilot-check` with `args: ["--pilot", "--dry-run"]` and the same `sourceSecret`. The DSN only ever comes from the Secret, never a command line.
 4. **Stopped or failed:** the run resumes where it stopped: the Job retries on its own, and a re-created Job continues. A finished run exits at once, so leaving its entry does no harm; remove it once its report is read. `--restart` starts a run over (consumers ignore what they already have, by event ID).
 5. **Pace:** `--rate` events a second, 500 by default. Lower it if the platform's writer or analysis falls behind.
+6. **Pause and resume:** `suspend: true` on the run's entry stops its pod; `suspend: false` resumes it where it stopped. Use it to keep a consumer's queue under its limit (analysis pauses all new comments when its comment queue reaches 1.5 million), then resume once it has drained. `--rate` can't change on a Job once it is created: to change it, pause the run, then add an entry with a new `name`, `run` set to the old entry's name, and the new rate (it resumes from the same position), and remove the old entry.
 
 ## Media backlog / TTL expiries
 
