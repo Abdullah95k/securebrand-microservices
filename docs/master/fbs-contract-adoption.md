@@ -78,10 +78,23 @@ These are the review's items 1 to 3, 5 and 6, and the coverage and candidate row
    - Do the topics in `registry/topics.yaml` exist on production Kafka, with 7-day retention? The ones fbs needs in phase 1 are `content.account.v1`, `content.account_snapshot.v1`, `content.post.v1`, `content.comment.v1` and `content.metrics.v1`.
    - Does the writer ignore repeats by `event_id`?
 2. **For analysis:** it already gets Facebook items from `fb.*`. If it reads `content.*` too, should it skip items it has seen, by content ID and version? Or should fbs's backfill wait until analysis says how it handles repeats?
-3. **For the owner: the pilot's data.**
-   - 400 pages, about 2.57 million comments, 1 to 7 November. It's only in the backup (`s3://securebrand-prod-backups/fbs/shared-server/2026-11-07/fbs.dump`), not in production.
-   - Sending it to ClickHouse means restoring the dump into a separate, temporary database and running the same backfill with that database's address. Production is untouched, and nothing is deleted.
-   - Include it, yes or no?
+3. **The pilot's data: included (the owner, 11 November).** See "The pilot's data" below.
+
+## The pilot's data
+
+**What it is:** 400 pages and about 2.57 million comments, collected from 1 to 7 November. It's only in the backup (`s3://securebrand-prod-backups/fbs/shared-server/2026-11-07/fbs.dump`, SHA-256 checked when it was copied), not in production.
+
+**How it's sent:**
+1. The platform restores the dump into a separate, temporary database (`fbs_pilot`), not into fbs's production database. Its checksum is checked first.
+2. The same backfill runs against it:
+   ```bash
+   fbctl contract backfill --dsn <fbs_pilot> --rate 500
+   ```
+   - Its events say where they came from: `provenance` names the pilot, and the acquisition is marked as restored from the backup.
+   - Pages and items the pilot shares with production keep their IDs. Their pilot readings arrive as older versions, by `observed_at`, so the newest version still wins.
+3. It runs after the production backfill. It's paced like it, and can be resumed.
+
+**What's kept:** the temporary database stays until the owner confirms that ClickHouse has the pilot's data. The backup stays forever. Nothing on the shared server is touched.
 
 ## What doesn't change
 
