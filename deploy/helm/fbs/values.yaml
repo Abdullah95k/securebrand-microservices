@@ -162,6 +162,11 @@ api:
 
 # One Deployment per component. "lag" lists consumer groups/topics KEDA
 # watches (group and topic names get config.kafka.topic_prefix prepended).
+# "env" sets one component's own settings: FBS_<SECTION>__<KEY> overrides
+# config.<section>.<key> for that component alone, for example
+#   crawler-page: {env: [{name: FBS_CRAWLER__SLOTS, value: "60"}]}
+# gives the timeline fewer tasks in flight, so the comment and reply stages
+# get more of each exit's pace (fb.exit_rps is shared by every stage).
 components:
   api:
     enabled: true

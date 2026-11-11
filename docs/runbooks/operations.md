@@ -91,6 +91,15 @@ AIMD keeps adjusting from that value. To stop it, set `fb.aimd.enabled: false`. 
 
 Adding pods never adds load: every pod paces against the same fleet ceiling.
 
+* **One stage taking the exits' pace** (a timeline catch-up after a fix leaves comments and replies waiting): every stage shares each exit's `fb.exit_rps`. Give the busy stage fewer tasks in flight, for that component alone:
+  ```yaml
+  components:
+    crawler-page:
+      env: [{name: FBS_CRAWLER__SLOTS, value: "60"}]   # default 240
+  ```
+  Remove it once `fbs_schedule_lag_seconds` is back to normal.
+* **`fbs_identity_retired_total{reason="blocked"}`** counts identities that got two rate limits in a row. It grows with the volume of rate-limited requests, so read it against `fbs_fb_requests_total{class="rate_limited"}`, not alone.
+
 ## Identity pool low
 
 `FbsIdentityPoolLow` (under half the pool's peak of the last 6 hours, for 15 minutes) and `FbsIdentityPoolCritical` (a fifth of it or less, with crawl tasks waiting, for 10 minutes): identities retire faster than they are replaced. A new identity starts with a page load, and an exit loads one page per `fb.proxy.page_loads.interval` and none during a backoff after a wall, so when many exits back off at once the crawlers are left with few identities and the work slows to what they can do.
