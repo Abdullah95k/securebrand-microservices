@@ -116,7 +116,12 @@ var (
 	MediaDeleted           = counterVec("media_deleted_total", "Media objects deleted by reason.", "reason")
 
 	// Persistence and jobs.
-	PersistRows          = counterVec("persist_rows_total", "Rows written by the persister.", "entity", "op")
+	PersistRows = counterVec("persist_rows_total", "Rows written by the persister.", "entity", "op")
+	// ContractEvents counts the unified contract's events (content.*) by
+	// kind and outcome: published, unchanged (content or counts as last
+	// sent), invalid (refused by the contract's conformance checks, not
+	// sent) or failed (the produce failed; the backfill sends it later).
+	ContractEvents       = counterVec("contract_events_total", "Events for the unified contract's topics, by kind and outcome.", "kind", "outcome")
 	CommentChanges       = counterVec("comment_changes_total", "Stored comments edited, marked deleted or seen again after a deletion, by kind (edited, deleted, restored).", "kind")
 	DeletionChecks       = counterVec("deletion_checks_total", "Full comment reads of a post checked for deleted comments, by outcome (checked, skipped_partial).", "outcome")
 	PersistBatch         = histVec("persist_batch_seconds", "Persister batch flush duration.", prometheus.ExponentialBuckets(0.005, 2, 12), "entity")

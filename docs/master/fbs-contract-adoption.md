@@ -1,6 +1,6 @@
 # fbs: adopting the unified contract (REQ-018, contract v1.2.0)
 
-**Status:** plan, 11 November 2026. Approved by the owner as REQ-018 ("start the contract work", after production collects). Field-by-field mapping: [`fbs-contract-review.md`](fbs-contract-review.md) (section 1), still right for v1.2.0 apart from the additions listed below.
+**Status:** phase 1's live publishing is built, behind `contract.enabled` (off), 11 November 2026; the backfill is next. Approved by the owner as REQ-018 ("start the contract work", after production collects); phase 1 brought forward to now (the owner, 11 November, 16:50Z). Field-by-field mapping: [`fbs-contract-review.md`](fbs-contract-review.md) (section 1), still right for v1.2.0 apart from the additions listed below.
 
 ## Why now
 
@@ -31,7 +31,7 @@
 
 ## Phases
 
-### Phase 1: what ClickHouse needs. Target: in production on 14 November (Iraq time)
+### Phase 1: what ClickHouse needs. Target: now (was 14 November)
 
 | Work | Notes |
 |---|---|
@@ -43,6 +43,20 @@
 | `fbctl contract backfill` | Below |
 | Conformance in CI | `conformance` runs on every event the end-to-end test against fakefb produces, and on the mapping's unit tests. CI fails on any violation. |
 | Docs | Operations runbook, `status.md`, the fixes tracker |
+
+**Built (live publishing):**
+- `internal/contract`: the mapping (`map.go`) and the publisher (`publish.go`). The persister calls it after each committed batch, before it commits its Kafka offsets.
+- **What it sends:** only what was stored, after erasure: nothing of an erased page; an erased author's comment with its text and author hidden; erased people's mentions without their IDs.
+- **Volume rule:** `contract_state` (migration 00013) keeps, per item, the hashes last sent. Content goes out when it changed. Counts go out when they changed, or once a day while fbs still reads the item. A re-read that changed nothing sends nothing.
+- **Checks:** every event passes the contract's own conformance checks before it's sent (production checks where `service.env` is `prod`). A refused event is logged by kind and ID only, never its content, and counted (`fbs_contract_events_total{outcome="invalid"}`).
+- **If Kafka refuses a send:** the persister keeps storing; the event is counted as failed, and the backfill sends it.
+- **Tested:** the mapping's unit tests; the publisher against Postgres and Kafka; and the end-to-end test against fakefb, which reads all five topics back and checks every event, its key and its headers.
+
+**Not in this first step (the backfill covers the first two):**
+- Comments the finalizer marks deleted when a full re-read no longer has them send no deletion event yet. They're stored as deleted, so the backfill sends them. Comments Facebook shows as deleted do send one.
+- `ItemCoverage` on posts: phase 2, with the parser fix.
+- `Post.account` carries the page's ID only; the page's details are on `content.account.v1`.
+- Media references point to Media records that come in phase 2.
 
 ### Phase 2: the rest of the contract. Target: 20 November
 

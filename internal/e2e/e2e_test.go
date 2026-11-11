@@ -18,6 +18,7 @@ import (
 
 	fbv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fb/v1"
 	"github.com/abdullah95k/securebrand-microservices/internal/api"
+	"github.com/abdullah95k/securebrand-microservices/internal/contract"
 	"github.com/abdullah95k/securebrand-microservices/internal/fakefb"
 	"github.com/abdullah95k/securebrand-microservices/internal/pilot"
 	"github.com/abdullah95k/securebrand-microservices/internal/topics"
@@ -143,6 +144,19 @@ func TestEndToEnd(t *testing.T) {
 	}
 	if n := count(t, s, `SELECT count(*) FROM pages WHERE page_id = $1 AND name = $2 AND followers_count > 0 AND kind = 'page'`, page.ID, page.Name); n != 1 {
 		t.Fatal("page profile (a page) not stored")
+	}
+	// The unified contract's topics carry what was stored, every event
+	// passing the contract's production checks (contractIDs).
+	acct := fmt.Sprintf("fb:account:%d", page.ID)
+	cids := waitContract(t, s, func(ids map[string]map[string]bool) bool {
+		return len(ids[contract.TopicPost]) == len(truth.Posts) && len(ids[contract.TopicComment]) == wantComments && ids[contract.TopicAccount][acct]
+	})
+	if len(cids[contract.TopicPost]) != len(truth.Posts) || len(cids[contract.TopicComment]) != wantComments ||
+		!cids[contract.TopicAccount][acct] || !cids[contract.TopicAccountSnapshot][acct] ||
+		len(cids[contract.TopicMetrics]) != len(truth.Posts)+wantComments {
+		t.Fatalf("contract topics: %d posts, %d comments, %d metrics, account %v (want %d posts, %d comments)",
+			len(cids[contract.TopicPost]), len(cids[contract.TopicComment]), len(cids[contract.TopicMetrics]),
+			cids[contract.TopicAccount][acct], len(truth.Posts), wantComments)
 	}
 	// Its website and its accounts elsewhere (fakefb lists one of each, the
 	// Instagram one behind Facebook's link shim), stored and served.

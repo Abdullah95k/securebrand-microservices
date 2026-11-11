@@ -26,7 +26,9 @@
   - **Transaction pooling:** leases instead of session advisory locks (two schedulers can run again); pgx `cache_describe` on every pool; 4 connections per process; a full database waited out at start-up (deploy hooks up to 45 minutes).
   - **Fewer idle queries:** readiness checked at most once a minute, idle loops back off, crawlers reread the registry every 60 s.
   - **Tested:** CI runs the integration tests through PgBouncer in transaction mode with `max_prepared_statements = 0`.
-- **Next:** REQ-018 (contract v1.2.0): plan in [`docs/master/fbs-contract-adoption.md`](master/fbs-contract-adoption.md). Phase 1 (posts, comments, counts and accounts on `content.*`, and the backfill) targets 14 Nov; phase 2 targets 20 Nov.
+- **REQ-018** (contract v1.2.0), phase 1 brought forward to now (the owner, 11 Nov): plan in [`docs/master/fbs-contract-adoption.md`](master/fbs-contract-adoption.md).
+  - **Live publishing:** in a PR. The persister publishes accounts, account snapshots, posts, comments and counts on the five `content.*` topics, only when they change, behind `contract.enabled` (off until the platform confirms the topics).
+  - **Next:** the backfill (`fbctl contract backfill`, production then the pilot's data). Phase 2 targets 20 Nov.
 
 ## Production pin
 

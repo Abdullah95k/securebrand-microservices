@@ -220,6 +220,18 @@ Symptom: `fbs_parse_total{outcome="drift"}` (alert `FbsSchemaDrift`), or a field
 * Comments of posts older than `privacy.retention.comments_days` are not
   written (`op="past_retention"`): retention would drop them within the hour.
 
+## The unified contract's topics (`content.*`)
+
+The persister publishes what it stores on the platform's topics (REQ-018, contract v1.2.0; `docs/master/fbs-contract-adoption.md`): `content.account.v1`, `content.account_snapshot.v1`, `content.post.v1`, `content.comment.v1` and `content.metrics.v1`, beside `fb.*`.
+
+* **Turning it on:** `config.contract.enabled: true` in `values-production.yaml`, once the platform confirms the five topics exist and fbs's Kafka user may write them. fbs creates none. The persister logs "publishing the unified contract's topics" at start.
+* **What it sends:** a change only. `contract_state` keeps the hashes last sent per item. Counts also go out once a day while fbs still reads the item.
+* **Watch** `fbs_contract_events_total` by `kind` and `outcome`:
+  - `published` and `unchanged`: normal. Most re-reads are `unchanged`.
+  - `invalid`: an event the contract's checks refused, not sent. The log has the kind, the ID and the rule broken, never the content. A steady count means a mapping bug: send the log lines to the fbs session.
+  - `failed`: Kafka refused the send (a missing topic, ACLs, the brokers). The persister keeps storing and its lag is unaffected. Fix the cause, then run the backfill to send what was missed.
+* **Turning it off** stops publishing; nothing else changes. `contract_state` stays, so turning it back on sends only what changed meanwhile, and the backfill sends the rest.
+
 ## Media backlog / TTL expiries
 
 * `fbs_media_deleted_total{reason="ttl_expired"}` rising: the analysis service

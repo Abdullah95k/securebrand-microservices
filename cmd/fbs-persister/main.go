@@ -8,6 +8,8 @@ import (
 	"os"
 	"time"
 
+	contracts "github.com/abdullah95k/securebrand-contracts"
+
 	"github.com/abdullah95k/securebrand-microservices/internal/app"
 	"github.com/abdullah95k/securebrand-microservices/internal/config"
 	"github.com/abdullah95k/securebrand-microservices/internal/persist"
@@ -16,6 +18,9 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/pg"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/run"
 )
+
+// version is the build, set by the image build (-X main.version).
+var version = "dev"
 
 func main() {
 	fs := flag.NewFlagSet("fbs-persister", flag.ExitOnError)
@@ -40,6 +45,16 @@ func main() {
 	}
 	ops := httpserver.NewOps(cfg.HTTP.OpsAddr)
 	ops.AddCheck("postgres", db.Ping)
+	if cfg.Contract.Enabled {
+		pub, err := app.ContractPublisher(cfg, db, version)
+		if err != nil {
+			slog.Error("contract", "err", err)
+			os.Exit(1)
+		}
+		defer pub.Producer.Close()
+		c.Contract = pub
+		slog.Info("publishing the unified contract's topics", "contract", contracts.Version)
+	}
 	if err := run.Group(ctx, ops.Run, c.Run); err != nil {
 		slog.Error("fbs-persister exited", "err", err)
 		os.Exit(1)
