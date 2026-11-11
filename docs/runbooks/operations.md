@@ -232,6 +232,35 @@ The persister publishes what it stores on the platform's topics (REQ-018, contra
   - `failed`: Kafka refused the send (a missing topic, ACLs, the brokers). The persister keeps storing and its lag is unaffected. Fix the cause, then run the backfill to send what was missed.
 * **Turning it off** stops publishing; nothing else changes. `contract_state` stays, so turning it back on sends only what changed meanwhile, and the backfill sends the rest.
 
+### The backfill (`fbctl contract backfill`)
+
+Sends what is already stored: pages, posts, comments and their count history (`docs/master/fbs-contract-adoption.md`, "The backfill"). Only once analysis skips items it has already analysed.
+
+1. **Check first:** a dry run reads, maps and checks everything and sends and records nothing. Run it as its own entry, then read its JSON report at the end of the Job's log: each stage's `invalid` should be 0.
+   ```yaml
+   contractBackfill:
+     runs:
+       - name: production-check
+         args: ["--dry-run"]
+   ```
+2. **Run it:** add a run to the values and sync:
+   ```yaml
+   contractBackfill:
+     runs:
+       - name: production
+         args: ["--rate", "500"]
+   ```
+   The Job `fbs-contract-backfill-production` logs its counts every minute (no page names) and prints a JSON report at the end.
+3. **The pilot's copy:** a Secret holding the DSN of the restored copy (key `dsn`), then a second run:
+   ```yaml
+       - name: pilot
+         args: ["--pilot", "--rate", "500"]
+         sourceSecret: {name: fbs-pilot-db, key: dsn}
+   ```
+   It reads that database and writes nothing to it; its events are marked `ACQUISITION_IMPORT`. Check it first the same way: an entry `pilot-check` with `args: ["--pilot", "--dry-run"]` and the same `sourceSecret`. The DSN only ever comes from the Secret, never a command line.
+4. **Stopped or failed:** the run resumes where it stopped: the Job retries on its own, and a re-created Job continues. A finished run exits at once, so leaving its entry does no harm; remove it once its report is read. `--restart` starts a run over (consumers ignore what they already have, by event ID).
+5. **Pace:** `--rate` events a second, 500 by default. Lower it if the platform's writer or analysis falls behind.
+
 ## Media backlog / TTL expiries
 
 * `fbs_media_deleted_total{reason="ttl_expired"}` rising: the analysis service

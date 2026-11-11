@@ -136,6 +136,20 @@ hooks:
   # new one is backfilled (config.pages.seed_backfill).
   seedPages: false
 
+# REQ-018: `fbctl contract backfill` Jobs, one per run, sending what is
+# stored on the unified contract's topics (contract.enabled must be on).
+# A run resumes where it stopped; a finished one exits at once. Remove an
+# entry once its run is done (docs/runbooks/operations.md).
+contractBackfill:
+  runs: []
+  # - name: production
+  #   args: ["--rate", "500"]
+  # - name: pilot          # the pilot's copy, read from a Secret's DSN
+  #   args: ["--pilot", "--rate", "500"]
+  #   sourceSecret: {name: fbs-pilot-db, key: dsn}
+  backoffLimit: 6
+  resources: {requests: {cpu: 100m, memory: 128Mi}, limits: {memory: 512Mi}}
+
 api:
   service:
     type: ClusterIP

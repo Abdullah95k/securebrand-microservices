@@ -116,8 +116,21 @@ func (p *Publisher) Publish(ctx context.Context, b Batch) Result {
 	return p.PublishEvents(ctx, p.Events(b))
 }
 
-// PublishEvents sends events (Publish, and the backfill).
+// PublishEvents sends events that changed since contract_state's record of
+// what was sent, and records them (Publish, and the backfill of what fbs's
+// database holds now).
 func (p *Publisher) PublishEvents(ctx context.Context, evs []Event) Result {
+	return p.send(ctx, evs, true)
+}
+
+// PublishAll sends every event, without reading or writing contract_state:
+// the backfill of count history and of another database (the pilot's),
+// whose versions are older than what was sent live.
+func (p *Publisher) PublishAll(ctx context.Context, evs []Event) Result {
+	return p.send(ctx, evs, false)
+}
+
+func (p *Publisher) send(ctx context.Context, evs []Event, withState bool) Result {
 	var res Result
 	if len(evs) == 0 {
 		return res
@@ -134,7 +147,11 @@ func (p *Publisher) PublishEvents(ctx context.Context, evs []Event) Result {
 			ids = append(ids, e.ID)
 		}
 	}
-	states, err := p.load(ctx, ids)
+	states := map[string]state{}
+	var err error
+	if withState {
+		states, err = p.load(ctx, ids)
+	}
 	if err != nil {
 		slog.Warn("contract: reading contract_state failed; nothing sent", "err", err)
 		res.Failed = len(evs)
@@ -194,9 +211,11 @@ func (p *Publisher) PublishEvents(ctx context.Context, evs []Event) Result {
 		metrics.ContractEvents.WithLabelValues("all", "failed").Add(float64(len(recs)))
 		return res
 	}
-	if err := p.save(ctx, sent, t); err != nil {
-		// Sent but not recorded: the next read sends them again, as repeats.
-		slog.Warn("contract: recording contract_state failed", "err", err)
+	if withState {
+		if err := p.save(ctx, sent, t); err != nil {
+			// Sent but not recorded: the next read sends them again, as repeats.
+			slog.Warn("contract: recording contract_state failed", "err", err)
+		}
 	}
 	for _, e := range sent {
 		metrics.ContractEvents.WithLabelValues(kind(e), "published").Inc()

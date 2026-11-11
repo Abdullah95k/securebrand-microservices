@@ -42,6 +42,9 @@ type Meta struct {
 	// Mode overrides the crawl mode of every event (CRAWL_MODE_BACKFILL for
 	// the backfill); unspecified keeps each observation's own.
 	Mode contentv1.CrawlMode
+	// ParserVersion overrides the observations' own (stored rows don't keep
+	// theirs: the backfill says "unknown").
+	ParserVersion string
 }
 
 // Event is one message for a content.* topic.
@@ -109,7 +112,7 @@ func envelope(m Meta, kind, id, native string, o *fbv1.Observation, hash []byte,
 		Provenance: &contentv1.Provenance{
 			Collector:        m.Collector,
 			CollectorVersion: m.CollectorVersion,
-			ParserVersion:    strconv.FormatUint(uint64(o.GetParserVersion()), 10),
+			ParserVersion:    parserVersion(m, o),
 			SourceOperation:  o.GetQueryName(),
 			SourceVariant:    o.GetDocId(),
 			JobIds:           o.GetJobIds(),
@@ -117,6 +120,13 @@ func envelope(m Meta, kind, id, native string, o *fbv1.Observation, hash []byte,
 			Mode:             mode,
 		},
 	}
+}
+
+func parserVersion(m Meta, o *fbv1.Observation) string {
+	if m.ParserVersion != "" {
+		return m.ParserVersion
+	}
+	return strconv.FormatUint(uint64(o.GetParserVersion()), 10)
 }
 
 // hashOf hashes a message's deterministic encoding.

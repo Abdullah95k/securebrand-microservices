@@ -27,8 +27,9 @@
   - **Fewer idle queries:** readiness checked at most once a minute, idle loops back off, crawlers reread the registry every 60 s.
   - **Tested:** CI runs the integration tests through PgBouncer in transaction mode with `max_prepared_statements = 0`.
 - **REQ-018** (contract v1.2.0), phase 1 brought forward to now (the owner, 11 Nov): plan in [`docs/master/fbs-contract-adoption.md`](master/fbs-contract-adoption.md).
-  - **Live publishing:** in a PR. The persister publishes accounts, account snapshots, posts, comments and counts on the five `content.*` topics, only when they change, behind `contract.enabled` (off until the platform confirms the topics).
-  - **Next:** the backfill (`fbctl contract backfill`, production then the pilot's data). Phase 2 targets 20 Nov.
+  - **Live publishing:** merged ([#83](https://github.com/Abdullah95k/securebrand-microservices/pull/83)). The persister publishes accounts, account snapshots, posts, comments and counts on the five `content.*` topics, only when they change, behind `contract.enabled`.
+  - **Backfill:** in a PR. `fbctl contract backfill` and its Job (`contractBackfill.runs`): production, then the pilot's copy. Runs only once analysis skips items it has already analysed.
+  - Phase 2 targets 20 Nov.
 
 ## Production pin
 

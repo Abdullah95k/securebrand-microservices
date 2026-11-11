@@ -1,0 +1,42 @@
+{{- /*
+REQ-018: one Job per entry of contractBackfill.runs, each running
+`fbctl contract backfill --run <name>`. A run resumes where it stopped and a
+finished one exits at once, so a Job that is re-created sends nothing twice.
+Not a hook: it runs alongside the release, for hours, at its --rate.
+*/ -}}
+{{- $root := . -}}
+{{- range .Values.contractBackfill.runs }}
+{{- $args := list "contract" "backfill" "--run" .name }}
+{{- range .args }}{{ $args = append $args (toString .) }}{{ end }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "fbs.fullname" $root }}-contract-backfill-{{ .name }}
+  labels: {{- include "fbs.labels" $root | nindent 4 }}
+spec:
+  backoffLimit: {{ $root.Values.contractBackfill.backoffLimit }}
+  template:
+    spec:
+      restartPolicy: OnFailure
+      securityContext: {{- toYaml $root.Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: contract-backfill
+          image: "{{ $root.Values.image.repository }}:{{ $root.Values.image.tag | default $root.Chart.AppVersion }}"
+          command: ["/usr/local/bin/fbctl"]
+          args: {{- toYaml $args | nindent 12 }}
+          {{- $pod := dict "root" $root "name" "contract-backfill" }}
+          env:
+            {{- include "fbs.env" $pod | nindent 12 }}
+            {{- with .sourceSecret }}
+            # The database to read (the pilot's copy): from a Secret, never in the args.
+            - name: FBS_BACKFILL_SOURCE_DSN
+              valueFrom:
+                secretKeyRef: {name: {{ .name }}, key: {{ .key }}}
+            {{- end }}
+          {{- include "fbs.envFrom" $root | nindent 10 }}
+          securityContext: {{- toYaml $root.Values.securityContext | nindent 12 }}
+          resources: {{- toYaml $root.Values.contractBackfill.resources | nindent 12 }}
+          volumeMounts: {{- include "fbs.volumeMounts" $pod | nindent 12 }}
+      volumes: {{- include "fbs.hookVolumes" $pod | nindent 8 }}
+{{- end }}
