@@ -123,8 +123,8 @@ The `query:timeline|<doc_id>` breaker (`fb.query_breaker`) may open. While it is
 
 Usually `fbs-registry-sync` heals this on its own within `registry_sync.interval` (30m). Each run:
 
-1. **Loads** the canary pages (`registry_sync.canary_pages`) and scans them and their JS bundles for Relay operation ids, the same scan as `fbs-spike docids`. Bundles are content-addressed and fetched once each.
-2. **Records** each doc_id it finds for a query's friendly name, if the query does not know it yet, as a `candidate` with the same variables and parser.
+1. **Loads** the canary pages (`registry_sync.canary_pages`) and scans them and their JS bundles for Relay operation ids, the same scan as `fbs-spike docids`. Bundles are content-addressed and fetched once each. A canary page load goes through the same per-exit gate as the crawlers' (page loads per exit, above). When every exit is pacing its page loads, as while new pages backfill, the run tries again every 5s for up to `registry_sync.canary_wait` (4m). Only then does a canary count as not loaded (`proxy: every exit of the tier is pacing its page loads`).
+2. **Records** each doc_id it finds for a query's friendly name, if the query does not know it yet, as a `candidate` with the same variables and parser. Every run then gives each candidate it recorded the active entry's current request inputs, which an import or a manual change may have replaced since, and clears its failures. These are listed under `refreshed` in the run report. A candidate checked with old inputs would fail on them (1675012, a missing required variable), not on its doc_id. A candidate set by hand keeps its own inputs.
 3. **Checks** the active entry and the candidates with a real request on a canary page: the timeline first, then comments on a busy post it returned (or on a stored post when the timeline fails), then a reply thread. Verdicts:
    - `ok`: the response parsed and had data;
    - `stale`: Facebook rejects the doc_id;
@@ -132,7 +132,7 @@ Usually `fbs-registry-sync` heals this on its own within `registry_sync.interval
    - `inconclusive`: blocked, no data, or a transport error; it says nothing about the entry.
 4. **Promotes** a candidate that is `ok` and declared by the current bundles. The old active entry becomes a `fallback`, which the client tries on a stale doc_id. When the active entry fails and no current candidate passes, a passing older candidate or fallback is promoted. Only `registry_sync.keep_fallbacks` (2) fallbacks are kept. A candidate or fallback that fails `retire_after` (3) checks in a row is retired.
 
-Crawlers reload the registry within `fb.registry_refresh` (30s), and parked tasks come back from the 5m retry topic. The query breaker is keyed by doc_id, so the new one starts closed.
+Crawlers reload the registry within `fb.registry_refresh` (60s), and parked tasks come back from the 5m retry topic. The query breaker is keyed by doc_id, so the new one starts closed.
 
 When it does not heal:
 

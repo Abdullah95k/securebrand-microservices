@@ -208,6 +208,54 @@ func TestSyncFollowsRotation(t *testing.T) {
 	}
 }
 
+// A candidate recorded before the active entry's request inputs were
+// replaced (an import) is checked, and promoted, with the new inputs; one
+// set by hand keeps its own.
+func TestSyncRefreshesCandidateInputs(t *testing.T) {
+	f := start(t, fakefb.Faults{}, nil)
+	ctx := context.Background()
+	next := f.rotate()["ProfileCometTimelineFeedRefetchQuery"]
+	if _, err := f.s.DB.Exec(ctx, `INSERT INTO fb_queries (name, doc_id, friendly_name, variables_template, parser,
+			parser_version, status, priority, source, check_failures)
+		SELECT name, $1, friendly_name, '{"stale": true}', parser, parser_version, 'candidate', priority, 'bundle', 2
+		FROM fb_queries WHERE name = 'timeline' AND status = 'active'`, next); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.s.DB.Exec(ctx, `INSERT INTO fb_queries (name, doc_id, friendly_name, variables_template, parser,
+			parser_version, status, priority, source)
+		SELECT name, '1234567890123', friendly_name, '{"manual": 1}', parser, parser_version, 'candidate', priority, 'manual'
+		FROM fb_queries WHERE name = 'timeline' AND status = 'active'`); err != nil {
+		t.Fatal(err)
+	}
+
+	rep := f.run()
+	if len(rep.Refreshed) != 1 || rep.Refreshed[0] != "timeline/"+next {
+		t.Fatalf("refreshed %v, want [timeline/%s]", rep.Refreshed, next)
+	}
+	if v := verdicts(rep)["timeline/"+next]; v != registrysync.OK {
+		t.Fatalf("refreshed candidate: %v (%+v)", v, rep.Checks)
+	}
+	var same, manualKept bool
+	if err := f.s.DB.QueryRow(ctx, `SELECT
+			(SELECT variables_template FROM fb_queries WHERE name = 'timeline' AND doc_id = $1) =
+			(SELECT variables_template FROM fb_queries WHERE name = 'timeline' AND doc_id = $2),
+			(SELECT variables_template FROM fb_queries WHERE name = 'timeline' AND doc_id = '1234567890123') = '{"manual": 1}'::jsonb`,
+		next, docOf(f.seed, "timeline")).Scan(&same, &manualKept); err != nil {
+		t.Fatal(err)
+	}
+	if !same || !manualKept {
+		t.Fatalf("promoted with the active inputs: %v; manual candidate kept its own: %v", same, manualKept)
+	}
+	if rows := f.rows(); rows["timeline/"+next] != registry.StatusActive {
+		t.Fatalf("not promoted: %v", rows)
+	}
+
+	// Nothing left to refresh.
+	if rep = f.run(); len(rep.Refreshed) != 0 {
+		t.Fatalf("second run refreshed %v", rep.Refreshed)
+	}
+}
+
 func q0(r *registry.DB) string {
 	q, _ := r.Get("timeline")
 	return q.DocID
