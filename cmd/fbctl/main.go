@@ -15,6 +15,7 @@
 //	fbctl media ack --consumer analysis [--status processed]   (dev: simulate analysis-service acks)
 //	fbctl pages import --api URL --key KEY FILE   register many pages through the API (safe to re-run)
 //	fbctl discovery keywords seed|import --file F|list   discovery keywords (seed: the Iraq list)
+//	fbctl contract backfill [--pilot] [--dry-run]   publish what is stored on the unified contract's topics (resumes)
 package main
 
 import (
@@ -48,7 +49,8 @@ commands:
   media ack --consumer NAME [--status processed|failed_permanent|failed_retryable] [--max N]
   pages import --api URL --key KEY [--interval-hours N] [--rps 5] [--backfill=false] FILE
   pages seed [--wait 25m]   (registers the config's pages.seed; already scheduled pages are left alone)
-  discovery keywords seed | discovery keywords import --file F | discovery keywords list [--language L] [--group G]`)
+  discovery keywords seed | discovery keywords import --file F | discovery keywords list [--language L] [--group G]
+  contract backfill [--pilot] [--run NAME] [--since T] [--rate 500] [--batch 500] [--dry-run] [--restart]`)
 	os.Exit(2)
 }
 
@@ -103,6 +105,11 @@ func main() {
 		err = mediaAck(ctx, cfg, rest)
 	case "discovery keywords":
 		err = discoveryKeywords(ctx, cfg, rest)
+	case "contract backfill":
+		// Runs for hours at its pace (it resumes if stopped); Ctrl-C or SIGTERM stops it.
+		bctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		err = contractBackfill(bctx, cfg, rest)
+		stop()
 	case "pages seed":
 		err = pagesSeed(ctx, cfg, rest)
 	case "pages import":

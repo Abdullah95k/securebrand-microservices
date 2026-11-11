@@ -91,6 +91,15 @@ AIMD keeps adjusting from that value. To stop it, set `fb.aimd.enabled: false`. 
 
 Adding pods never adds load: every pod paces against the same fleet ceiling.
 
+* **One stage taking the exits' pace** (a timeline catch-up after a fix leaves comments and replies waiting): every stage shares each exit's `fb.exit_rps`. Give the busy stage fewer tasks in flight, for that component alone:
+  ```yaml
+  components:
+    crawler-page:
+      env: [{name: FBS_CRAWLER__SLOTS, value: "60"}]   # default 240
+  ```
+  Remove it once `fbs_schedule_lag_seconds` is back to normal.
+* **`fbs_identity_retired_total{reason="blocked"}`** counts identities that got two rate limits in a row. It grows with the volume of rate-limited requests, so read it against `fbs_fb_requests_total{class="rate_limited"}`, not alone.
+
 ## Identity pool low
 
 `FbsIdentityPoolLow` (under half the pool's peak of the last 6 hours, for 15 minutes) and `FbsIdentityPoolCritical` (a fifth of it or less, with crawl tasks waiting, for 10 minutes): identities retire faster than they are replaced. A new identity starts with a page load, and an exit loads one page per `fb.proxy.page_loads.interval` and none during a backoff after a wall, so when many exits back off at once the crawlers are left with few identities and the work slows to what they can do.
@@ -231,6 +240,35 @@ The persister publishes what it stores on the platform's topics (REQ-018, contra
   - `invalid`: an event the contract's checks refused, not sent. The log has the kind, the ID and the rule broken, never the content. A steady count means a mapping bug: send the log lines to the fbs session.
   - `failed`: Kafka refused the send (a missing topic, ACLs, the brokers). The persister keeps storing and its lag is unaffected. Fix the cause, then run the backfill to send what was missed.
 * **Turning it off** stops publishing; nothing else changes. `contract_state` stays, so turning it back on sends only what changed meanwhile, and the backfill sends the rest.
+
+### The backfill (`fbctl contract backfill`)
+
+Sends what is already stored: pages, posts, comments and their count history (`docs/master/fbs-contract-adoption.md`, "The backfill"). Only once analysis skips items it has already analysed.
+
+1. **Check first:** a dry run reads, maps and checks everything and sends and records nothing. Run it as its own entry, then read its JSON report at the end of the Job's log: each stage's `invalid` should be 0.
+   ```yaml
+   contractBackfill:
+     runs:
+       - name: production-check
+         args: ["--dry-run"]
+   ```
+2. **Run it:** add a run to the values and sync:
+   ```yaml
+   contractBackfill:
+     runs:
+       - name: production
+         args: ["--rate", "500"]
+   ```
+   The Job `fbs-contract-backfill-production` logs its counts every minute (no page names) and prints a JSON report at the end.
+3. **The pilot's copy:** a Secret holding the DSN of the restored copy (key `dsn`), then a second run:
+   ```yaml
+       - name: pilot
+         args: ["--pilot", "--rate", "500"]
+         sourceSecret: {name: fbs-pilot-db, key: dsn}
+   ```
+   It reads that database and writes nothing to it; its events are marked `ACQUISITION_IMPORT`. Check it first the same way: an entry `pilot-check` with `args: ["--pilot", "--dry-run"]` and the same `sourceSecret`. The DSN only ever comes from the Secret, never a command line.
+4. **Stopped or failed:** the run resumes where it stopped: the Job retries on its own, and a re-created Job continues. A finished run exits at once, so leaving its entry does no harm; remove it once its report is read. `--restart` starts a run over (consumers ignore what they already have, by event ID).
+5. **Pace:** `--rate` events a second, 500 by default. Lower it if the platform's writer or analysis falls behind.
 
 ## Media backlog / TTL expiries
 

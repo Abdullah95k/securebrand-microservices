@@ -1,6 +1,6 @@
 # fbs: adopting the unified contract (REQ-018, contract v1.2.0)
 
-**Status:** phase 1's live publishing is built, behind `contract.enabled` (off), 11 November 2026; the backfill is next. Approved by the owner as REQ-018 ("start the contract work", after production collects); phase 1 brought forward to now (the owner, 11 November, 16:50Z). Field-by-field mapping: [`fbs-contract-review.md`](fbs-contract-review.md) (section 1), still right for v1.2.0 apart from the additions listed below.
+**Status:** phase 1 is built, 11 November 2026: live publishing (merged, behind `contract.enabled`) and the backfill. Approved by the owner as REQ-018 ("start the contract work", after production collects); phase 1 brought forward to now (the owner, 11 November, 16:50Z). Field-by-field mapping: [`fbs-contract-review.md`](fbs-contract-review.md) (section 1), still right for v1.2.0 apart from the additions listed below.
 
 ## Why now
 
@@ -40,7 +40,7 @@
 | `ItemCoverage` on posts from the finalizer's state | `PARTIAL` for a read stopped by the per-post cap. The parser fix that records it is in phase 2; until then a capped read says `COMPLETE`, as today. |
 | The volume rule for Metrics | A count is published when it changed, and at least once a day per item still refreshed. The last published counts are kept in Postgres. |
 | The emitter in the persister, behind `contract.enabled` | Topics and headers as above |
-| `fbctl contract backfill` | Below |
+| `fbctl contract backfill` and its Job | Below. Built |
 | Conformance in CI | `conformance` runs on every event the end-to-end test against fakefb produces, and on the mapping's unit tests. CI fails on any violation. |
 | Docs | Operations runbook, `status.md`, the fixes tracker |
 
@@ -52,8 +52,8 @@
 - **If Kafka refuses a send:** the persister keeps storing; the event is counted as failed, and the backfill sends it.
 - **Tested:** the mapping's unit tests; the publisher against Postgres and Kafka; and the end-to-end test against fakefb, which reads all five topics back and checks every event, its key and its headers.
 
-**Not in this first step (the backfill covers the first two):**
-- Comments the finalizer marks deleted when a full re-read no longer has them send no deletion event yet. They're stored as deleted, so the backfill sends them. Comments Facebook shows as deleted do send one.
+**Not in this first step (the backfill covers the first one):**
+- Comments the finalizer marks deleted when a full re-read no longer has them send no deletion event live yet. They're stored as deleted, so a backfill run sends them. Comments Facebook shows as deleted do send one.
 - `ItemCoverage` on posts: phase 2, with the parser fix.
 - `Post.account` carries the page's ID only; the page's details are on `content.account.v1`.
 - Media references point to Media records that come in phase 2.
@@ -73,18 +73,33 @@ These are the review's items 1 to 3, 5 and 6, and the coverage and candidate row
 
 ## The backfill
 
-- **What it is:** a one-off command, run as a Job in namespace `fbs` like the registry import:
-  ```bash
-  fbctl contract backfill --since 2026-11-10T20:54:00Z --rate 500
-  ```
-- **What it sends:**
-  - It reads Postgres and publishes every stored page, post, comment and reply since the seed: accounts first, then posts, then comments and metrics.
-  - Each item's latest version goes as a full event, and older versions as their own events. ClickHouse keeps every version (D-004), so it gets the history, not just the current text.
-- **Pace:** at `--rate` events a second (500 by default). The platform's writer and analysis aren't flooded: the analysis queue was about 201,000 at 11:29Z.
-- **Re-runs and stops:**
-  - A re-run publishes the same event IDs, which consumers ignore.
-  - A stopped run resumes from its last committed position (`--resume`).
-- **Report:** it prints counts per kind, with no page names.
+**What it is:** `fbctl contract backfill`, run as a Job from the chart (`contractBackfill.runs` in the values), one Job per run. It needs `contract.enabled` on.
+
+**What it sends, in this order:**
+1. Every stored page (`content.account.v1`, with its counts on `content.account_snapshot.v1`), then each page's count history (`page_snapshots`).
+2. Every stored post (`content.post.v1`, with its counts on `content.metrics.v1`), then each post's count history (`post_metrics`).
+3. Every stored comment and reply (`content.comment.v1`, and its counts when it has them). A comment stored as deleted goes as a deletion (a partial event, `DELETED`).
+
+**What it can't send:** Postgres keeps each post's and comment's current content, not earlier text, so older versions of the text can't be sent; only the count history can. Rows don't keep the job, query, doc_id, parser version, a reshare's owner or a post's Facebook links, so backfilled events go without them.
+
+**How its events are marked:**
+- `provenance.mode = CRAWL_MODE_BACKFILL` and `parser_version = "unknown"`.
+- The pilot's: also `acquisition = ACQUISITION_IMPORT` and `collector_version = "pilot"`.
+- IDs, versions and event IDs are as live: an item's event for its last reading has the same event ID as the live one, so consumers that keep event IDs ignore it.
+
+**What it skips:**
+- From fbs's own database: what live publishing already sent with the same content (`contract_state`).
+- Everything of an erased page, as of the run. An erased author's comments go without text or author. Erasure is read from fbs's suppression list, whichever database is read.
+
+**Pace and restarts:**
+- At `--rate` events a second (500 by default, 5,000 at most), `--batch` rows a read (500).
+- It records its position after each batch (`contract_backfill`, migration 00014). A stopped run resumes there, and a finished one exits at once, so a Job that is re-created sends nothing twice. `--restart` starts a run over.
+- A send that fails stops the run before its position moves. The Job retries, or a re-run resumes.
+- `--dry-run` reads, maps and checks everything, and sends and records nothing. It's the check to run first on the pilot's copy.
+
+**Report:** counts per stage (read, published, unchanged, invalid, skipped), in the log every minute and as JSON at the end. Never page names or content.
+
+**Before any real run:** analysis must skip items it has already analysed, by ID (`fb:post:<id>`, `fb:comment:<id>`). Otherwise it analyses again what it got from `fb.*`.
 
 ## Questions before phase 1 goes live
 
@@ -100,11 +115,10 @@ These are the review's items 1 to 3, 5 and 6, and the coverage and candidate row
 
 **How it's sent:**
 1. The platform restores the dump into a separate, temporary database (`fbs_pilot`), not into fbs's production database. Its checksum is checked first.
-2. The same backfill runs against it:
-   ```bash
-   fbctl contract backfill --dsn <fbs_pilot> --rate 500
-   ```
-   - Its events say where they came from: `provenance` names the pilot, and the acquisition is marked as restored from the backup.
+2. The same backfill runs against it: the run `pilot`, with `--pilot`, which reads the database whose DSN is in `$FBS_BACKFILL_SOURCE_DSN` (from a Secret, never in the command). It reads that copy and writes nothing to it.
+   - Its events say where they came from: `acquisition = ACQUISITION_IMPORT`, `collector_version = "pilot"`.
+   - It sends everything and records nothing in `contract_state`: its readings are older than what fbs sent live.
+   - The pilot's database may be from before some migrations; the columns it lacks read as empty.
    - Pages and items the pilot shares with production keep their IDs. Their pilot readings arrive as older versions, by `observed_at`, so the newest version still wins.
 3. It runs after the production backfill. It's paced like it, and can be resumed.
 

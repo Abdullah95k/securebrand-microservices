@@ -42,6 +42,8 @@ spec:
           command: {{- toYaml $c.command | nindent 12 }}
           {{- $pod := dict "root" $root "name" $name }}
           env: {{- include "fbs.env" $pod | nindent 12 }}
+            {{- /* This component's own settings: FBS_<SECTION>__<KEY> overrides config.<section>.<key> for it alone. */}}
+            {{- with $c.env }}{{ toYaml . | nindent 12 }}{{ end }}
           {{- include "fbs.envFrom" $root | nindent 10 }}
           ports:
             - {name: metrics, containerPort: 9090}
