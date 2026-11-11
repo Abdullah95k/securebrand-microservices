@@ -68,6 +68,9 @@ func MediaFromNode(n gjson.Result, typename string, o Owner) []*fbv1.Media {
 		}
 		add(mk("original", img.Get("uri").String(), kind, img.Get("width").Int(), img.Get("height").Int()))
 	case "Video":
+		if !o.Comment {
+			probeCaptions(n)
+		}
 		kind := fbv1.MediaKind_MEDIA_KIND_VIDEO
 		if o.Reel || n.Get("is_reel").Bool() {
 			kind = fbv1.MediaKind_MEDIA_KIND_REEL

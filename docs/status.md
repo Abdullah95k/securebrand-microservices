@@ -29,6 +29,7 @@
 - **REQ-018** (contract v1.2.0), phase 1 brought forward to now (the owner, 11 Nov): plan in [`docs/master/fbs-contract-adoption.md`](master/fbs-contract-adoption.md).
   - **Live publishing:** merged ([#83](https://github.com/Abdullah95k/securebrand-microservices/pull/83)). The persister publishes accounts, account snapshots, posts, comments and counts on the five `content.*` topics, only when they change, behind `contract.enabled`.
   - **Identities:** rate limits alone retire an identity after six in a row, not two; it cools down in between (approved 11 Nov). In a PR.
+  - **Video captions (D-056, the owner, 11 Nov):** step 1, a probe that sends nothing: where caption-like keys appear in the video nodes fbs already reads (`fbs_caption_fields_total` by path and type, never values), and the bundles' caption operations in registry-sync's report. Step 2, reading the captions of videos from the last 7 days, is built on what it finds.
   - **Backfill:** merged ([#84](https://github.com/Abdullah95k/securebrand-microservices/pull/84)). `fbctl contract backfill` and its Job (`contractBackfill.runs`): production, then the pilot's copy. Runs only once analysis skips items it has already analysed.
   - Phase 2 targets 20 Nov.
 

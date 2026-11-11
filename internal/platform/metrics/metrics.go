@@ -74,6 +74,11 @@ var (
 	// so the process paced that page load on its own.
 	PageGateErrors = counter("proxy_page_gate_errors_total", "Shared page-load gate calls that failed (the process paced on its own).")
 
+	// The caption probe (D-056): video nodes of posts parsed, and the
+	// caption-like keys found in them, by path and value type (never values).
+	VideoNodes    = counter("video_nodes_total", "Video nodes of posts the parsers read (the caption probe).")
+	CaptionFields = counterVec("caption_fields_total", "Caption-like keys in posts' video nodes, by path from the node and value type; never values.", "path")
+
 	// Discovery: keyword searches by outcome (ok, error, unavailable),
 	// posts they returned, and what became of each: a mention of a page
 	// already scheduled (existing), one that added a page (added), one
