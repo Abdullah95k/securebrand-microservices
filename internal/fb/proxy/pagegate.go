@@ -29,6 +29,10 @@ type pageGate struct {
 	// other process sharing it; exits then fall back to this process's own
 	// pacing (exits) only while it can't be reached.
 	shared *sharedGate
+	// holder names this process in page-load claims (Pool.ClaimPageLoad).
+	// While another holder's claim stands, this process takes no page load
+	// on a shared exit ("claimed"); "" never holds one.
+	holder string
 }
 
 type gateExit struct {
@@ -76,7 +80,7 @@ func (g *pageGate) take(exit string) (ok bool, why string, restore func()) {
 		return true, "", noop // not gated (a gateway, or direct)
 	}
 	if g.shared != nil && g.shared.up() {
-		ok, why, restore, err := g.shared.take(exit, g.cfg.Interval)
+		ok, why, restore, err := g.shared.take(exit, g.cfg.Interval, g.holder)
 		if err == nil {
 			return ok, why, restore
 		}
@@ -110,7 +114,7 @@ func (g *pageGate) ready(exit string) bool {
 		return true // not gated (a gateway, or direct)
 	}
 	if g.shared != nil && g.shared.up() {
-		ok, err := g.shared.ready(exit)
+		ok, err := g.shared.ready(exit, g.holder)
 		if err == nil {
 			return ok
 		}
