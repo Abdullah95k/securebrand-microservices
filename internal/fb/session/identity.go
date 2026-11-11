@@ -153,6 +153,15 @@ func (id *Identity) Wait(ctx context.Context) error {
 // answering, and a fresh identity gets another.
 const MaxTransportFailures = 3
 
+// MaxRateLimits is how many rate limits in a row retire an identity as
+// "blocked". Facebook's rate limits fall on the exit (its IP and the query)
+// more than on the session, so a fresh identity on the same exit meets the
+// same limit and costs a page load, the scarcest thing fbs has. In between,
+// the identity cools down for longer each time (1, 2, 4, 8, then 15 minutes):
+// a short limit is waited out, and an identity Facebook keeps refusing goes
+// after about half an hour (11 Nov: two in a row retired 153 an hour).
+const MaxRateLimits = 6
+
 // Soft errors in a row (server errors, HTML instead of GraphQL, an error
 // payload without data): the second drops the identity's tokens, so its next
 // use loads a page for fresh ones (stale tokens fail every request alike),
@@ -208,7 +217,7 @@ func (id *Identity) record(c detect.Class, pageLoad bool) (retire bool, reason s
 		id.retired = "checkpoint"
 	case c == detect.LoginWall:
 		id.retired = "login_wall"
-	case id.consecBlocks >= 2:
+	case id.consecBlocks >= MaxRateLimits:
 		id.retired = "blocked"
 	case id.consecFails >= MaxTransportFailures:
 		// Health alone never retires a dead exit: transport failures

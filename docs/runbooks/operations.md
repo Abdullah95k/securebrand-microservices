@@ -98,7 +98,7 @@ Adding pods never adds load: every pod paces against the same fleet ceiling.
       env: [{name: FBS_CRAWLER__SLOTS, value: "60"}]   # default 240
   ```
   Remove it once `fbs_schedule_lag_seconds` is back to normal.
-* **`fbs_identity_retired_total{reason="blocked"}`** counts identities that got two rate limits in a row. It grows with the volume of rate-limited requests, so read it against `fbs_fb_requests_total{class="rate_limited"}`, not alone.
+* **`fbs_identity_retired_total{reason="blocked"}`** counts identities that got six rate limits in a row (`session.MaxRateLimits`). In between, an identity cools down for longer each time (1, 2, 4, 8, then 15 minutes), because Facebook's rate limits fall on the exit more than on the session: a fresh identity on the same exit meets the same limit and costs a page load. Read it against `fbs_fb_requests_total{class="rate_limited"}`. Until 11 November two in a row retired an identity, which retired 153 an hour during the timeline catch-up.
 
 ## Identity pool low
 
@@ -269,6 +269,7 @@ Sends what is already stored: pages, posts, comments and their count history (`d
    It reads that database and writes nothing to it; its events are marked `ACQUISITION_IMPORT`. Check it first the same way: an entry `pilot-check` with `args: ["--pilot", "--dry-run"]` and the same `sourceSecret`. The DSN only ever comes from the Secret, never a command line.
 4. **Stopped or failed:** the run resumes where it stopped: the Job retries on its own, and a re-created Job continues. A finished run exits at once, so leaving its entry does no harm; remove it once its report is read. `--restart` starts a run over (consumers ignore what they already have, by event ID).
 5. **Pace:** `--rate` events a second, 500 by default. Lower it if the platform's writer or analysis falls behind.
+6. **Pause and resume:** `suspend: true` on the run's entry stops its pod; `suspend: false` resumes it where it stopped. Use it to keep a consumer's queue under its limit (analysis pauses all new comments when its comment queue reaches 1.5 million), then resume once it has drained. `--rate` can't change on a Job once it is created: to change it, pause the run, then add an entry with a new `name`, `run` set to the old entry's name, and the new rate (it resumes from the same position), and remove the old entry.
 
 ## Media backlog / TTL expiries
 

@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -100,6 +101,9 @@ type Report struct {
 	// their doc_id; Operations counts every operation the bundles declared.
 	Discovered map[string]string `json:"discovered,omitempty"`
 	Operations int               `json:"operations"`
+	// CaptionOperations are the bundles' operations whose names mention
+	// captions, subtitles or transcripts, with their doc_ids (D-056).
+	CaptionOperations map[string]string `json:"caption_operations,omitempty"`
 	// NotFound are friendly names of registry queries no bundle declared:
 	// Facebook may have renamed the operation.
 	NotFound []string `json:"not_found,omitempty"`
@@ -228,7 +232,8 @@ func (s *Sync) finish(ctx context.Context, rep Report, err error) (Report, error
 	}
 	slog.Log(ctx, lvl, "registry-sync: run finished", "status", rep.Status, "err", rep.Error,
 		"operations", rep.Operations, "discovered", len(rep.Discovered), "candidates", rep.Candidates, "promoted", len(rep.Promoted),
-		"failing", rep.Failing, "unchecked", rep.Unchecked, "not_found", rep.NotFound)
+		"failing", rep.Failing, "unchecked", rep.Unchecked, "not_found", rep.NotFound,
+		"caption_operations", captionNames(rep.CaptionOperations))
 	return rep, err
 }
 
@@ -261,6 +266,16 @@ func (s *Sync) run(ctx context.Context, rep *Report) error {
 	}
 	rep.Operations = len(found)
 	metrics.RegistryDiscovered.Set(float64(len(found)))
+	// The caption probe (D-056): operations the bundles declare for
+	// captions, subtitles or transcripts (Facebook's code names, no data).
+	for name, d := range found {
+		if captionOperation.MatchString(name) {
+			if rep.CaptionOperations == nil {
+				rep.CaptionOperations = map[string]string{}
+			}
+			rep.CaptionOperations[name] = d
+		}
+	}
 
 	entries, err := s.entries(ctx)
 	if err != nil {
@@ -1059,4 +1074,17 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n]
+}
+
+// captionOperation matches operation names about captions (D-056).
+var captionOperation = regexp.MustCompile(`(?i)caption|subtitle|transcript`)
+
+// captionNames lists the caption operations' names, sorted, for the log.
+func captionNames(ops map[string]string) []string {
+	names := make([]string, 0, len(ops))
+	for n := range ops {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
 }

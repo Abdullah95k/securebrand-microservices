@@ -147,6 +147,9 @@ contractBackfill:
   # - name: pilot          # the pilot's copy, read from a Secret's DSN
   #   args: ["--pilot", "--rate", "500"]
   #   sourceSecret: {name: fbs-pilot-db, key: dsn}
+  #   suspend: false       # true pauses the run (its pod stops); false resumes it
+  # - name: pilot-slow     # carries on the run "pilot" at another rate
+  #   run: pilot
   backoffLimit: 6
   resources: {requests: {cpu: 100m, memory: 128Mi}, limits: {memory: 512Mi}}
 

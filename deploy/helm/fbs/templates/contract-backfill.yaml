@@ -6,7 +6,8 @@ Not a hook: it runs alongside the release, for hours, at its --rate.
 */ -}}
 {{- $root := . -}}
 {{- range .Values.contractBackfill.runs }}
-{{- $args := list "contract" "backfill" "--run" .name }}
+{{- /* run: the position it resumes from (default: the entry's name), so a new entry can carry on a run at another --rate. */}}
+{{- $args := list "contract" "backfill" "--run" (.run | default .name) }}
 {{- range .args }}{{ $args = append $args (toString .) }}{{ end }}
 ---
 apiVersion: batch/v1
@@ -15,6 +16,8 @@ metadata:
   name: {{ include "fbs.fullname" $root }}-contract-backfill-{{ .name }}
   labels: {{- include "fbs.labels" $root | nindent 4 }}
 spec:
+  # suspend: true stops the run's pod; false again resumes it where it stopped.
+  suspend: {{ .suspend | default false }}
   backoffLimit: {{ $root.Values.contractBackfill.backoffLimit }}
   template:
     spec:

@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"time"
 
 	contracts "github.com/abdullah95k/securebrand-contracts"
@@ -83,6 +84,22 @@ func Check(e Event, production bool) error {
 		return conformance.Metrics(m, opt)
 	}
 	return fmt.Errorf("contract: no check for %T", e.Msg)
+}
+
+// quoted is what a conformance message quotes: IDs, kinds, platforms.
+var quoted = regexp.MustCompile(`"[^"]*"`)
+
+// refused is what a refusal logs: the kind, the rule broken with the values
+// it quotes left out (an ID there can be a person's account), and the
+// entity's ID except for an account, which can be a person's profile.
+// Never the content.
+func refused(e Event, err error) []any {
+	k := kind(e)
+	args := []any{"kind", k, "rule", quoted.ReplaceAllString(err.Error(), `"…"`)}
+	if k != "account" && k != "account_snapshot" {
+		args = append(args, "id", e.ID)
+	}
+	return args
 }
 
 func kind(e Event) string {
@@ -183,7 +200,7 @@ func (p *Publisher) send(ctx context.Context, evs []Event, withState bool) Resul
 		}
 		if err := Check(e, p.Production); err != nil {
 			// Never the content: the rule broken and the entity's ID.
-			slog.Warn("contract: event refused by the contract's checks; not sent", "kind", k, "id", e.ID, "err", err)
+			slog.Warn("contract: event refused by the contract's checks; not sent", refused(e, err)...)
 			res.Invalid++
 			metrics.ContractEvents.WithLabelValues(k, "invalid").Inc()
 			continue

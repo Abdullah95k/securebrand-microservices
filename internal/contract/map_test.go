@@ -2,6 +2,8 @@ package contract
 
 import (
 	"bytes"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -228,5 +230,17 @@ func TestPagesMapToContract(t *testing.T) {
 	check(t, evs)
 	if len(evs) != 1 || !evs[0].Msg.(*contentv1.Account).Envelope.Partial {
 		t.Fatalf("an unavailable page is one partial event: %+v", evs)
+	}
+}
+
+// A refusal logs the rule, never the values it quotes nor an account's ID.
+func TestRefusedLogsNoValues(t *testing.T) {
+	err := fmt.Errorf(`author.account.id "fb:account:100000000000001" differs from "x"`)
+	args := refused(Event{ID: "fb:comment:1", Msg: &contentv1.Comment{}}, err)
+	if fmt.Sprint(args) != `[kind comment rule author.account.id "…" differs from "…" id fb:comment:1]` {
+		t.Fatalf("%v", args)
+	}
+	if args := refused(Event{ID: "fb:account:100000000000001", Msg: &contentv1.Account{}}, err); strings.Contains(fmt.Sprint(args), "100000000000001") {
+		t.Fatalf("an account's ID logged: %v", args)
 	}
 }
