@@ -84,12 +84,17 @@ jobs:
       # mode with no prepared statements kept (the platform's
       # docs/platform/postgres.md): the tests go through the same.
       - name: Start PgBouncer (transaction mode)
+        # From its container image, not apt: on 11 Nov Ubuntu's package
+        # mirrors couldn't be resolved from the runners for over an hour, while
+        # image pulls (the service containers') worked. The client tools come
+        # from the PostgreSQL image the job already pulled.
         run: |
-          sudo apt-get update -q && sudo apt-get install -y -q pgbouncer
-          sudo systemctl stop pgbouncer || true
-          nohup pgbouncer test/pgbouncer/pgbouncer.ini > "$RUNNER_TEMP/pgbouncer.log" 2>&1 &
-          for i in $(seq 1 30); do pg_isready -h 127.0.0.1 -p 6432 && break; sleep 1; done
-          psql "postgres://fbs:fbs@127.0.0.1:6432/fbs?sslmode=disable" -Atc 'select 1'
+          docker run -d --name pgbouncer --network host \
+            -v "$PWD/test/pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro" \
+            edoburu/pgbouncer:v1.25.2-p0
+          pg() { docker run --rm --network host postgres:18-alpine "$@"; }
+          for i in $(seq 1 30); do pg pg_isready -q -h 127.0.0.1 -p 6432 && break; sleep 1; done
+          pg psql "postgres://fbs:fbs@127.0.0.1:6432/fbs?sslmode=disable" -Atc 'select 1' || { docker logs pgbouncer; exit 1; }
       - name: Integration and end-to-end tests
         env:
           FBS_TEST_PG_DSN: postgres://fbs:fbs@127.0.0.1:6432/fbs?sslmode=disable
