@@ -258,7 +258,7 @@ func (b *Backfill) send(ctx context.Context, stage string, evs []Event) Result {
 		var r Result
 		for _, e := range evs {
 			if err := Check(e, b.Production); err != nil {
-				slog.Warn("contract backfill: event refused by the contract's checks", "kind", kind(e), "id", e.ID, "err", err)
+				slog.Warn("contract backfill: event refused by the contract's checks", refused(e, err)...)
 				r.Invalid++
 			} else {
 				r.Published++

@@ -98,7 +98,7 @@ Adding pods never adds load: every pod paces against the same fleet ceiling.
       env: [{name: FBS_CRAWLER__SLOTS, value: "60"}]   # default 240
   ```
   Remove it once `fbs_schedule_lag_seconds` is back to normal.
-* **`fbs_identity_retired_total{reason="blocked"}`** counts identities that got two rate limits in a row. It grows with the volume of rate-limited requests, so read it against `fbs_fb_requests_total{class="rate_limited"}`, not alone.
+* **`fbs_identity_retired_total{reason="blocked"}`** counts identities that got six rate limits in a row (`session.MaxRateLimits`). In between, an identity cools down for longer each time (1, 2, 4, 8, then 15 minutes), because Facebook's rate limits fall on the exit more than on the session: a fresh identity on the same exit meets the same limit and costs a page load. Read it against `fbs_fb_requests_total{class="rate_limited"}`. Until 11 November two in a row retired an identity, which retired 153 an hour during the timeline catch-up.
 
 ## Identity pool low
 

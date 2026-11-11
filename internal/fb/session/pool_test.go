@@ -91,6 +91,43 @@ func TestTransportFailuresRetireAnIdentity(t *testing.T) {
 	}
 }
 
+// Rate limits fall on the exit: an identity waits them out, longer each
+// time, and is retired as blocked only after MaxRateLimits in a row.
+func TestRateLimitsCoolAnIdentityDown(t *testing.T) {
+	id := newIdentity("x", proxy.Endpoint{Tier: "isp"}, Fingerprint{}, nil, nil, 1, 1, 0)
+	var last time.Duration
+	for i := 1; i < MaxRateLimits; i++ {
+		if retire, _ := id.Record(detect.RateLimited); retire {
+			t.Fatalf("retired after %d rate limits", i)
+		}
+		if !id.coolingDown() {
+			t.Fatalf("not cooling down after rate limit %d", i)
+		}
+		id.mu.Lock()
+		wait := time.Until(id.cooldown)
+		id.mu.Unlock()
+		if wait < last {
+			t.Fatalf("cooldown %s after %s", wait, last)
+		}
+		last = wait
+	}
+	// An answer in between starts the count again.
+	id.Record(detect.OK)
+	for i := 1; i < MaxRateLimits; i++ {
+		if retire, _ := id.Record(detect.RateLimited); retire {
+			t.Fatalf("retired after an answer and %d rate limits", i)
+		}
+	}
+	if retire, reason := id.Record(detect.RateLimited); !retire || reason != "blocked" {
+		t.Fatalf("after %d in a row: retire=%v reason=%q", MaxRateLimits, retire, reason)
+	}
+	// A login wall still retires at once.
+	w := newIdentity("y", proxy.Endpoint{Tier: "isp"}, Fingerprint{}, nil, nil, 1, 1, 0)
+	if retire, reason := w.Record(detect.LoginWall); !retire || reason != "login_wall" {
+		t.Fatalf("login wall: %v %q", retire, reason)
+	}
+}
+
 // doer fails every request with the error fail returns.
 type doer struct {
 	transport.Doer
