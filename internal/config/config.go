@@ -173,6 +173,10 @@ type RegistrySync struct {
 	RecheckRetired time.Duration `koanf:"recheck_retired"`
 	// Timeout bounds one run.
 	Timeout time.Duration `koanf:"timeout"`
+	// CanaryWait is how long a run keeps trying canary page loads the exits
+	// put off (they pace page loads, which the crawlers keep busy); 0: one
+	// try each.
+	CanaryWait time.Duration `koanf:"canary_wait"`
 }
 
 type Service struct {

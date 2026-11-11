@@ -31,6 +31,7 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/docids"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/graphql"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/parse"
+	"github.com/abdullah95k/securebrand-microservices/internal/fb/proxy"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/registry"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/session"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/transport"
@@ -106,8 +107,11 @@ type Report struct {
 	// made, for friendly names the bundles did not declare.
 	Rendered   map[string]string `json:"rendered,omitempty"`
 	Candidates []string          `json:"candidates,omitempty"` // name/doc_id recorded this run
-	Checks     []Check           `json:"checks,omitempty"`
-	Promoted   []Promotion       `json:"promoted,omitempty"`
+	// Refreshed are candidates (name/doc_id) given their active entry's
+	// current request inputs this run.
+	Refreshed []string    `json:"refreshed,omitempty"`
+	Checks    []Check     `json:"checks,omitempty"`
+	Promoted  []Promotion `json:"promoted,omitempty"`
 	// Proposed are the promotions a dry run (promote: false) would make.
 	Proposed []Promotion `json:"proposed,omitempty"`
 	Retired  []string    `json:"retired,omitempty"` // name/doc_id
@@ -266,6 +270,9 @@ func (s *Sync) run(ctx context.Context, rep *Report) error {
 	if err := s.recordCandidates(ctx, entries, found, rep); err != nil {
 		return err
 	}
+	if err := s.refreshCandidates(ctx, rep); err != nil {
+		return err
+	}
 	if entries, err = s.entries(ctx); err != nil {
 		return err
 	}
@@ -326,11 +333,18 @@ func (s *Sync) renderMissing(ctx context.Context, pages []*canary, entries []*en
 	}
 }
 
-// loadCanaries loads every canary page through its own identity.
+// canaryRetry is how long a canary page load waits before trying again
+// while every exit it was offered was pacing its page loads.
+var canaryRetry = 5 * time.Second
+
+// loadCanaries loads every canary page through its own identity. A page
+// load the exits put off (they pace page loads, and the crawlers keep them
+// busy) is tried again until CanaryWait has passed since the first one.
 func (s *Sync) loadCanaries(ctx context.Context, rep *Report) []*canary {
 	var out []*canary
+	until := time.Now().Add(s.Cfg.CanaryWait)
 	for _, p := range s.Cfg.CanaryPages {
-		c, err := s.loadCanary(ctx, p)
+		c, err := retryPaced(ctx, until, canaryRetry, func() (*canary, error) { return s.loadCanary(ctx, p) })
 		if err != nil {
 			rep.Pages = append(rep.Pages, PageResult{Page: p, Reason: err.Error()})
 			continue
@@ -346,7 +360,9 @@ func (s *Sync) loadCanary(ctx context.Context, page string) (*canary, error) {
 	if err != nil {
 		return nil, err
 	}
-	id, err := s.Pool.Acquire(ctx, s.Cfg.Tier)
+	// An identity whose exit can load a page now: most idle ones are on an
+	// exit pacing its page loads.
+	id, err := s.Pool.AcquireForPageLoad(ctx, s.Cfg.Tier)
 	if err != nil {
 		return nil, err
 	}
@@ -507,6 +523,56 @@ func (s *Sync) recordCandidates(ctx context.Context, entries []*entry, found map
 	}
 	sort.Strings(rep.NotFound)
 	return nil
+}
+
+// refreshCandidates gives every candidate it recorded the request inputs of its query's
+// active entry, which an import or a manual change may have replaced since
+// the candidate was recorded: a candidate checked with stale inputs fails on
+// them (1675012, a missing required variable), not on its doc_id. Its
+// failures so far are forgotten with them.
+func (s *Sync) refreshCandidates(ctx context.Context, rep *Report) error {
+	rows, err := s.DB.Query(ctx, `
+		UPDATE fb_queries c SET variables_template = a.variables_template, check_failures = 0, updated_at = now()
+		FROM fb_queries a
+		WHERE a.name = c.name AND a.status = 'active' AND c.status = 'candidate' AND c.source = 'bundle'
+			AND c.variables_template IS DISTINCT FROM a.variables_template
+		RETURNING c.name, c.doc_id`)
+	if err != nil {
+		return fmt.Errorf("registry-sync: refresh candidates: %w", err)
+	}
+	refreshed, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (string, error) {
+		var name, doc string
+		err := row.Scan(&name, &doc)
+		return key(name, doc), err
+	})
+	if err != nil {
+		return fmt.Errorf("registry-sync: refresh candidates: %w", err)
+	}
+	sort.Strings(refreshed)
+	rep.Refreshed = refreshed
+	return nil
+}
+
+// paced reports whether a canary page load failed only because the exits
+// were pacing their page loads: nothing was sent.
+func paced(err error) bool {
+	return errors.Is(err, session.ErrPaced) || errors.Is(err, proxy.ErrExitsPaced)
+}
+
+// retryPaced calls try, and again every 'every' while it fails only because
+// the exits pace their page loads and another try can start before until.
+// Any other result, or ctx ending, is returned as it is.
+func retryPaced[T any](ctx context.Context, until time.Time, every time.Duration, try func() (T, error)) (T, error) {
+	v, err := try()
+	for paced(err) && time.Now().Add(every).Before(until) {
+		select {
+		case <-ctx.Done():
+			return v, err
+		case <-time.After(every):
+		}
+		v, err = try()
+	}
+	return v, err
 }
 
 // Probe kinds by parser, in the order their inputs chain.

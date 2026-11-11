@@ -517,7 +517,8 @@ paths:
       summary: Latest fbs-registry-sync runs, newest first (admin)
       description: >-
         Each run's report lists the canary page loads, the doc_ids found in
-        the bundles, new candidates, every check and its verdict, promotions,
+        the bundles, new candidates, candidates given the active entry's
+        current request inputs (refreshed), every check and its verdict, promotions,
         retired entries, failing queries (active doc_id stale or drifted with
         no replacement) and unchecked ones.
       parameters:

@@ -429,3 +429,7 @@ registry_sync:
   retire_after: 3
   recheck_retired: 24h
   timeout: 10m
+  # Keep trying canary page loads the exits put off for this long: each
+  # exit loads one page per fb.proxy.page_loads.interval, and the crawlers
+  # keep them busy. Leaves the rest of the timeout for the checks.
+  canary_wait: 4m
