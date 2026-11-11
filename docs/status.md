@@ -26,7 +26,7 @@
   - **Transaction pooling:** leases instead of session advisory locks (two schedulers can run again); pgx `cache_describe` on every pool; 4 connections per process; a full database waited out at start-up (deploy hooks up to 45 minutes).
   - **Fewer idle queries:** readiness checked at most once a minute, idle loops back off, crawlers reread the registry every 60 s.
   - **Tested:** CI runs the integration tests through PgBouncer in transaction mode with `max_prepared_statements = 0`.
-- **Next:** REQ-018 (contract v1.0.0).
+- **Next:** REQ-018 (contract v1.2.0): plan in [`docs/master/fbs-contract-adoption.md`](master/fbs-contract-adoption.md). Phase 1 (posts, comments, counts and accounts on `content.*`, and the backfill) targets 14 Nov; phase 2 targets 20 Nov.
 
 ## Production pin
 

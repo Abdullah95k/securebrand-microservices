@@ -24,4 +24,4 @@
 
 ## REQ-018 (contract v1.0.0)
 
-Not started: it comes after the fixes REQ-007 lists before the production canary, and after REQ-017.
+Planned in [`fbs-contract-adoption.md`](fbs-contract-adoption.md), now against contract v1.2.0: phase 1 targets 14 Nov, phase 2 20 Nov.
