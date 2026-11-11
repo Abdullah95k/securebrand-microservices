@@ -54,6 +54,12 @@ config:
     proxy:
       routing:
         default: [isp]
+  # REQ-018: the persister publishes what it stores on the unified
+  # contract's topics (content.account.v1, content.account_snapshot.v1,
+  # content.post.v1, content.comment.v1, content.metrics.v1). Off until the
+  # platform confirms the five topics exist and fbs's user may write them:
+  # fbs never creates them.
+  contract: {enabled: false}
   # No daily caps in production (D-008; the owner, 7 November): 0 means no
   # limit. Mention checks are held to 20% of the exits' page loads instead
   # (mentions.page_load_share), so collection keeps the rest. The checker

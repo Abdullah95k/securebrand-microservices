@@ -24,4 +24,9 @@
 
 ## REQ-018 (contract v1.0.0)
 
-Planned in [`fbs-contract-adoption.md`](fbs-contract-adoption.md), now against contract v1.2.0: phase 1 targets 14 Nov, phase 2 20 Nov.
+Planned in [`fbs-contract-adoption.md`](fbs-contract-adoption.md), now against contract v1.2.0: phase 1 brought forward to now (the owner, 11 Nov), phase 2 targets 20 Nov.
+
+| Step | PR | Status | Evidence |
+|---|---|---|---|
+| Live publishing on `content.account.v1`, `content.account_snapshot.v1`, `content.post.v1`, `content.comment.v1`, `content.metrics.v1`, behind `contract.enabled` | in a PR | built; off until the platform confirms the topics | `internal/contract` tests (every mapped event passes the contract's production checks; only changes are sent; counts at least daily); `TestSuppressedDataInFlight` (nothing of an erased page, an erased author hidden); `TestEndToEnd` reads all five topics back and checks every event |
+| `fbctl contract backfill` and its Job (production, then the pilot's data in `fbs_pilot`) | | next | |

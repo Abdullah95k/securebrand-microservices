@@ -433,3 +433,12 @@ registry_sync:
   # exit loads one page per fb.proxy.page_loads.interval, and the crawlers
   # keep them busy. Leaves the rest of the timeout for the checks.
   canary_wait: 4m
+
+# The unified contract (REQ-018, contract v1.2.0): the persister publishes
+# the pages, posts, comments and counts it stores on content.account.v1,
+# content.account_snapshot.v1, content.post.v1, content.comment.v1 and
+# content.metrics.v1, beside fb.*. Off until the platform has created those
+# topics: fbs creates none. docs/master/fbs-contract-adoption.md.
+contract:
+  enabled: false
+  topic_prefix: ""

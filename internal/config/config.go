@@ -43,6 +43,9 @@ type Config struct {
 	// whether those not on the main list are public, and adds the public
 	// ones (docs/runbooks/operations.md, "Mentions").
 	Mentions Mentions `koanf:"mentions"`
+	// Contract publishes what fbs stores on the unified contract's topics
+	// (content.*; docs/master/fbs-contract-adoption.md).
+	Contract Contract `koanf:"contract"`
 	// Platform: the shared production platform's conventions.
 	Platform Platform `koanf:"platform"`
 	Pages    Pages    `koanf:"pages"`
@@ -74,6 +77,16 @@ type Platform struct {
 // daily cap), and the crawler's check stage loads each one logged out
 // through the identity pool and the page-load gate. Public ones are added
 // to the schedule (source "mention"), under their own daily cap.
+// Contract configures the unified contract's topics (REQ-018).
+type Contract struct {
+	// Enabled makes the persister publish what it stores on content.*.
+	// Off until the platform has created the topics: fbs creates none.
+	Enabled bool `koanf:"enabled"`
+	// TopicPrefix goes before content.* (tests isolate their topics with
+	// it); empty in production, where the topics are the platform's.
+	TopicPrefix string `koanf:"topic_prefix"`
+}
+
 type Mentions struct {
 	Enabled bool `koanf:"enabled"`
 	// IncludeCommentAuthors counts every comment's author as mentioned by

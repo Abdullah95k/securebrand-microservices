@@ -7,11 +7,13 @@ import (
 	"testing"
 	"time"
 
+	contentv1 "github.com/abdullah95k/securebrand-contracts/gen/go/securebrand/content/v1"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	fbv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fb/v1"
+	"github.com/abdullah95k/securebrand-microservices/internal/contract"
 	"github.com/abdullah95k/securebrand-microservices/internal/gdpr"
 	"github.com/abdullah95k/securebrand-microservices/internal/mentions"
 	"github.com/abdullah95k/securebrand-microservices/internal/store"
@@ -307,7 +309,8 @@ func TestSuppressedDataInFlight(t *testing.T) {
 	if _, err := store.EnsurePartitions(ctx, db, now, store.PartitionWindow{MonthsBack: 2, MonthsAhead: 1, DaysBack: 1, DaysAhead: 1}); err != nil {
 		t.Fatal(err)
 	}
-	w := &Writer{DB: db}
+	var sent contract.Batch // what the unified contract's topics would carry
+	w := &Writer{DB: db, Collect: &sent}
 	created := timestamppb.New(now.Add(-time.Hour))
 	erasedAuthor := []byte{0xab, 0xcd}
 	f := int64(5)
@@ -377,6 +380,22 @@ func TestSuppressedDataInFlight(t *testing.T) {
 		}
 		if n != want {
 			t.Errorf("%s = %d, want %d", q, n, want)
+		}
+	}
+
+	// Nothing of an erased page reaches the contract's topics, and an
+	// erased author's comment goes without its text or author.
+	if len(sent.Pages) != 0 || len(sent.Posts) != 1 || sent.Posts[0].PostId != 80 || len(sent.Comments) != 2 {
+		t.Fatalf("collected: %d pages, %d posts, %d comments", len(sent.Pages), len(sent.Posts), len(sent.Comments))
+	}
+	for _, c := range sent.Comments {
+		evs := contract.Comment(c, contract.Meta{Collector: "fbs", CollectorVersion: "test"})
+		cm := evs[0].Msg.(*contentv1.Comment)
+		if c.CommentId == 800 && (!cm.Author.GetHidden() || cm.Author.GetAccount() != nil || cm.Text != nil) {
+			t.Errorf("an erased author's comment carries %+v", cm)
+		}
+		if c.CommentId == 801 && cm.Author.GetAccount().GetId() != "fb:account:y" {
+			t.Errorf("kept comment's author: %+v", cm.Author)
 		}
 	}
 }

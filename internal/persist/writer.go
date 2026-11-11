@@ -16,6 +16,7 @@ import (
 
 	fbv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fb/v1"
 	"github.com/abdullah95k/securebrand-microservices/internal/config"
+	"github.com/abdullah95k/securebrand-microservices/internal/contract"
 	"github.com/abdullah95k/securebrand-microservices/internal/gdpr"
 	"github.com/abdullah95k/securebrand-microservices/internal/mentions"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/metrics"
@@ -41,6 +42,11 @@ type Writer struct {
 	// ago are left out (0 = none): retention would delete them at once.
 	Mentions       *mentions.Options
 	MentionsMaxAge time.Duration
+	// Collect, when set, receives what each write stored once it is
+	// committed, with erasure applied (an erased page's items left out, an
+	// erased author's comments redacted, erased people's mentions
+	// scrubbed): what the unified contract's topics may carry.
+	Collect *contract.Batch
 }
 
 // NewWriter configures a writer from cfg: comment retention, the author
@@ -193,8 +199,9 @@ func (w *Writer) Posts(ctx context.Context, posts []*fbv1.Post) error {
 	lookup := append(append([]int64{}, pageIDs...), targetIDs...)
 	var written int64
 	var found map[string]int
+	var stored []*fbv1.Post
 	err := w.withPartitions(ctx, "posts", months, func() error {
-		written, found = 0, nil
+		written, found, stored = 0, nil, nil
 		return pgx.BeginFunc(ctx, w.DB, func(tx pgx.Tx) error {
 			// Posts of an erased page still in flight are dropped, and
 			// erased authors' mentions cleared.
@@ -207,6 +214,7 @@ func (w *Writer) Posts(ctx context.Context, posts []*fbv1.Post) error {
 				if !sup.PageSuppressed(p.PageId) {
 					gdpr.ScrubSuppressedMentions(sup, p.TextRanges, keys[i])
 					rows = append(rows, postRow(p))
+					stored = append(stored, p)
 				}
 			}
 			if len(rows) == 0 {
@@ -282,6 +290,9 @@ func (w *Writer) Posts(ctx context.Context, posts []*fbv1.Post) error {
 	})
 	if err != nil {
 		return fmt.Errorf("persist: posts: %w", err)
+	}
+	if w.Collect != nil {
+		w.Collect.Posts = append(w.Collect.Posts, stored...)
 	}
 	countMentions(found)
 	metrics.PersistRows.WithLabelValues("post", "written").Add(float64(written))
@@ -370,8 +381,9 @@ func (w *Writer) Comments(ctx context.Context, cs []*fbv1.Comment) error {
 	}
 	var written, edited, restored, upserted int64
 	var found map[string]int
+	var stored []*fbv1.Comment
 	err := w.withPartitions(ctx, "comments", months, func() error {
-		written, edited, restored, found = 0, 0, 0, nil
+		written, edited, restored, found, stored = 0, 0, 0, nil, nil
 		return pgx.BeginFunc(ctx, w.DB, func(tx pgx.Tx) error {
 			// Comments of an erased page still in flight are dropped, an
 			// erased author's are stored redacted, without an author row,
@@ -391,6 +403,7 @@ func (w *Writer) Comments(ctx context.Context, cs []*fbv1.Comment) error {
 					gdpr.Redact(c)
 				}
 				gdpr.ScrubSuppressedMentions(sup, c.TextRanges, mentionKeys[c])
+				stored = append(stored, c)
 				if c.Status == fbv1.CommentStatus_COMMENT_STATUS_DELETED {
 					dels = append(dels, c)
 					continue
@@ -450,6 +463,9 @@ func (w *Writer) Comments(ctx context.Context, cs []*fbv1.Comment) error {
 	})
 	if err != nil {
 		return fmt.Errorf("persist: comments: %w", err)
+	}
+	if w.Collect != nil {
+		w.Collect.Comments = append(w.Collect.Comments, stored...)
 	}
 	countMentions(found)
 	metrics.PersistRows.WithLabelValues("comment", "written").Add(float64(written))
@@ -595,15 +611,18 @@ func (w *Writer) Pages(ctx context.Context, ps []*fbv1.Page) error {
 	start := time.Now()
 	for _, p := range ps {
 		seen := observed(p.Obs)
+		var stored bool
 		err := pgx.BeginFunc(ctx, w.DB, func(tx pgx.Tx) error {
+			stored = false
 			// An erased page stays erased, with or without a row yet.
 			if sup, err := gdpr.Guard(ctx, tx, nil, []int64{p.PageId}); err != nil || sup.PageSuppressed(p.PageId) {
 				return err
 			}
 			if p.Status == fbv1.PageStatus_PAGE_STATUS_UNAVAILABLE {
-				_, err := tx.Exec(ctx, `INSERT INTO pages (page_id, status, last_scraped_at) VALUES ($1, 'unavailable', $2)
+				tag, err := tx.Exec(ctx, `INSERT INTO pages (page_id, status, last_scraped_at) VALUES ($1, 'unavailable', $2)
 					ON CONFLICT (page_id) DO UPDATE SET status = 'unavailable', last_scraped_at = $2
 					WHERE pages.status <> 'suppressed'`, p.PageId, seen)
+				stored = err == nil && tag.RowsAffected() > 0
 				return err
 			}
 			vanity := p.Vanity
@@ -668,6 +687,7 @@ func (w *Writer) Pages(ctx context.Context, ps []*fbv1.Page) error {
 			if err != nil {
 				return err
 			}
+			stored = true
 			// The checked-accounts list (mentions) takes the kind the
 			// account's own page shows, as each added account's profile
 			// is read.
@@ -697,6 +717,9 @@ func (w *Writer) Pages(ctx context.Context, ps []*fbv1.Page) error {
 		})
 		if err != nil {
 			return fmt.Errorf("persist: page %d: %w", p.PageId, err)
+		}
+		if stored && w.Collect != nil {
+			w.Collect.Pages = append(w.Collect.Pages, p)
 		}
 	}
 	metrics.PersistRows.WithLabelValues("page", "written").Add(float64(len(ps)))

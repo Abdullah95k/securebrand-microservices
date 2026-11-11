@@ -13,6 +13,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	fbv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fb/v1"
+	"github.com/abdullah95k/securebrand-microservices/internal/contract"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/kafka"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/metrics"
 	"github.com/abdullah95k/securebrand-microservices/internal/topics"
@@ -29,6 +30,10 @@ type Consumer struct {
 	prefix   string
 	maxBatch int
 	linger   time.Duration
+	// Contract, when set (contract.enabled), publishes what each batch
+	// stored on the unified contract's topics, before the batch's offsets
+	// are committed: a crash in between publishes it again, as repeats.
+	Contract *contract.Publisher
 }
 
 func NewConsumer(cfg kafka.ClientConfig, w *Writer, maxBatch int, linger time.Duration) (*Consumer, error) {
@@ -83,6 +88,8 @@ func (c *Consumer) Run(ctx context.Context) error {
 			c.cl.AllowRebalance()
 			continue
 		}
+		var stored contract.Batch
+		c.collect(&stored)
 		if err := c.flushSkipping(ctx, recs); err != nil {
 			if ctx.Err() != nil {
 				// Shutting down: the batch is not committed and is read again.
@@ -94,6 +101,8 @@ func (c *Consumer) Run(ctx context.Context) error {
 			// unwritten data.
 			for ctx.Err() == nil {
 				time.Sleep(2 * time.Second)
+				stored = contract.Batch{} // what the failed attempts collected was rolled back
+				c.collect(&stored)
 				if err = c.flushSkipping(ctx, recs); err == nil {
 					break
 				}
@@ -104,10 +113,20 @@ func (c *Consumer) Run(ctx context.Context) error {
 				return nil
 			}
 		}
+		if c.Contract != nil {
+			c.Contract.Publish(ctx, stored)
+		}
 		if err := c.cl.CommitRecords(ctx, recs...); err != nil {
 			slog.Warn("persist: commit failed", "err", err)
 		}
 		c.cl.AllowRebalance()
+	}
+}
+
+// collect points the writer at b while the contract is published.
+func (c *Consumer) collect(b *contract.Batch) {
+	if c.Contract != nil {
+		c.w.Collect = b
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	contentv1 "github.com/abdullah95k/securebrand-contracts/gen/go/securebrand/content/v1"
 	"github.com/johannesboyne/gofakes3"
 	"github.com/johannesboyne/gofakes3/backend/s3mem"
 	"github.com/minio/minio-go/v7"
@@ -26,6 +27,7 @@ import (
 	"github.com/abdullah95k/securebrand-microservices/internal/api"
 	"github.com/abdullah95k/securebrand-microservices/internal/app"
 	"github.com/abdullah95k/securebrand-microservices/internal/config"
+	"github.com/abdullah95k/securebrand-microservices/internal/contract"
 	"github.com/abdullah95k/securebrand-microservices/internal/crawl/jobs"
 	"github.com/abdullah95k/securebrand-microservices/internal/discovery"
 	"github.com/abdullah95k/securebrand-microservices/internal/dispatch"
@@ -174,6 +176,10 @@ func Start(t *testing.T, o Options) *Stack {
 	for i := range doc.Topics {
 		doc.Topics[i].Partitions = min(doc.Topics[i].Partitions, 3)
 	}
+	// The unified contract's topics, which the platform creates in production.
+	for _, tp := range contract.Topics {
+		doc.Topics = append(doc.Topics, kafka.TopicSpec{Name: tp, Partitions: 3})
+	}
 	if err := kafka.EnsureTopics(ctx, producer.Client(), prefix, doc.Topics, 1); err != nil {
 		t.Fatal(err)
 	}
@@ -284,6 +290,9 @@ func (s *Stack) RestartPersister(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// contract.enabled, with the production checks.
+	pc.Contract = &contract.Publisher{DB: s.DB, Producer: s.Producer, Production: true,
+		Meta: contract.Meta{Collector: "fbs", CollectorVersion: "e2e", Acquisition: contentv1.Acquisition_ACQUISITION_SCRAPED_LOGGED_OUT}}
 	s.start("persister", pc.Run)
 }
 
