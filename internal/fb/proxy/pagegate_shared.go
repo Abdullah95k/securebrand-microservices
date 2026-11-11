@@ -87,16 +87,22 @@ local function ms(x) return string.format('%.0f', x) end
 // can't be reached.
 
 // takeScript returns 1, no reason and prev when it takes the page load
-// (next moved from prev); 0, the reason ("paced" or "backoff") and next
-// when the exit must wait; then the state.
+// (next moved from prev); 0, the reason ("claimed", "paced" or "backoff")
+// and next when the exit must wait; then the state. KEYS[2] is the claim
+// (ClaimPageLoad) and ARGV[3] the caller's holder: while another holder's
+// claim stands the exit is refused, and the holder's own take uses up its
+// claim.
 var takeScript = redis.NewScript(nowLua + `
 local h = redis.call('HMGET', KEYS[1], 'next', 'paused', 'backoff')
 local nxt, paused, b = tonumber(h[1]) or 0, tonumber(h[2]) or 0, tonumber(h[3]) or 0
+local c = redis.call('GET', KEYS[2])
+if c and c ~= ARGV[3] then return {0, 'claimed', nxt, nxt, paused, b} end
 if now < paused then return {0, 'backoff', nxt, nxt, paused, b} end
 if now < nxt then return {0, 'paced', nxt, nxt, paused, b} end
 local set = now + tonumber(ARGV[1])
 redis.call('HSET', KEYS[1], 'next', ms(set))
 redis.call('PEXPIRE', KEYS[1], ARGV[2])
+if c then redis.call('DEL', KEYS[2]) end
 return {1, '', nxt, set, paused, b}
 `)
 
@@ -110,13 +116,21 @@ return 0
 `)
 
 // readyScript returns 1 when the exit may load a page now, else 0; then
-// the state.
+// the state. KEYS[2] and ARGV[1] are the claim and the caller's holder, as
+// for takeScript.
 var readyScript = redis.NewScript(nowLua + `
 local h = redis.call('HMGET', KEYS[1], 'next', 'paused', 'backoff')
 local nxt, paused, b = tonumber(h[1]) or 0, tonumber(h[2]) or 0, tonumber(h[3]) or 0
+local c = redis.call('GET', KEYS[2])
 local ok = 1
-if now < paused or now < nxt then ok = 0 end
+if (c and c ~= ARGV[1]) or now < paused or now < nxt then ok = 0 end
 return {ok, nxt, paused, b}
+`)
+
+// unclaimScript removes the claim if ARGV[1] still holds it.
+var unclaimScript = redis.NewScript(`
+if redis.call('GET', KEYS[1]) == ARGV[1] then redis.call('DEL', KEYS[1]) end
+return 0
 `)
 
 // observeScript records a page load: ARGV[1] is 1 for a failed one, 0 for
@@ -140,6 +154,24 @@ return {b, nxt, paused, b}
 var errBadReply = errors.New("proxy: shared page-load gate: unexpected reply")
 
 func (s *sharedGate) key(exit string) string { return s.prefix + exit }
+
+// claimKey holds the page-load claim, one for every exit sharing the gate
+// (exits are named <tier>#<n>, so it can't be one of theirs).
+func (s *sharedGate) claimKey() string { return s.prefix + "claim" }
+
+// claim puts holder first in line for ttl (see Pool.ClaimPageLoad).
+func (s *sharedGate) claim(holder string, ttl time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), sharedTimeout)
+	defer cancel()
+	return s.rdb.Set(ctx, s.claimKey(), holder, ttl).Err()
+}
+
+// unclaim drops holder's claim, if it still stands.
+func (s *sharedGate) unclaim(holder string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), sharedTimeout)
+	defer cancel()
+	return unclaimScript.Run(ctx, s.rdb, []string{s.claimKey()}, holder).Err()
+}
 
 // up reports whether to call Valkey: not within sharedRetry of a failure.
 func (s *sharedGate) up() bool { return s.now().UnixNano() >= s.downUntil.Load() }
@@ -173,11 +205,11 @@ func (s *sharedGate) state(exit string, v []int64) {
 	}
 }
 
-func (s *sharedGate) take(exit string, interval time.Duration) (ok bool, why string, restore func(), err error) {
+func (s *sharedGate) take(exit string, interval time.Duration, holder string) (ok bool, why string, restore func(), err error) {
 	s.forget(exit)
 	ctx, cancel := context.WithTimeout(context.Background(), sharedTimeout)
 	defer cancel()
-	res, err := takeScript.Run(ctx, s.rdb, []string{s.key(exit)}, interval.Milliseconds(), sharedTTL.Milliseconds()).Slice()
+	res, err := takeScript.Run(ctx, s.rdb, []string{s.key(exit), s.claimKey()}, interval.Milliseconds(), sharedTTL.Milliseconds(), holder).Slice()
 	if err != nil {
 		return false, "", nil, err
 	}
@@ -201,7 +233,7 @@ func (s *sharedGate) take(exit string, interval time.Duration) (ok bool, why str
 	}, nil
 }
 
-func (s *sharedGate) ready(exit string) (bool, error) {
+func (s *sharedGate) ready(exit, holder string) (bool, error) {
 	now := s.now()
 	s.mu.Lock()
 	r, ok := s.seen[exit]
@@ -211,7 +243,7 @@ func (s *sharedGate) ready(exit string) (bool, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), sharedTimeout)
 	defer cancel()
-	res, err := readyScript.Run(ctx, s.rdb, []string{s.key(exit)}).Slice()
+	res, err := readyScript.Run(ctx, s.rdb, []string{s.key(exit), s.claimKey()}, holder).Slice()
 	if err != nil {
 		return false, err
 	}

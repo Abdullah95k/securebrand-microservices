@@ -183,7 +183,8 @@ func (p *Pool) Next(tier string) (Endpoint, error) {
 		}
 		ok, why, restore := p.pages.take(e.Exit)
 		if !ok {
-			paced, backoff = paced || why == "paced", backoff || why == "backoff"
+			// A claimed exit (ClaimPageLoad) is a short wait, as a paced one.
+			paced, backoff = paced || why == "paced" || why == "claimed", backoff || why == "backoff"
 			return false
 		}
 		if !p.breakers.Allow(e.Bucket) {
@@ -227,6 +228,41 @@ func (p *Pool) PageLoad(ep Endpoint) (bool, string) {
 		deferred(ep.Tier, why)
 	}
 	return ok, why
+}
+
+// SetPageLoadHolder names this process in page-load claims; see
+// ClaimPageLoad. Call it before the pool is used.
+func (p *Pool) SetPageLoadHolder(holder string) { p.pages.holder = holder }
+
+// ClaimPageLoad puts this process (its holder, SetPageLoadHolder) first in
+// line for the next page load on any exit sharing the gate: until it takes
+// one, or ttl passes, every other process is refused page loads there
+// ("claimed"), so the next exit to come free goes to this one. It is for
+// fbs-registry-sync's few canary page loads, which would otherwise rarely
+// find a free exit while the crawlers keep every exit at its pace. Without
+// a shared gate (SharePageGate, Valkey reachable) or a holder it does
+// nothing: no other process could see the claim.
+func (p *Pool) ClaimPageLoad(ttl time.Duration) error {
+	s := p.pages.shared
+	if s == nil || p.pages.holder == "" || !s.up() {
+		return nil
+	}
+	err := s.claim(p.pages.holder, ttl)
+	if err != nil {
+		s.failed(err)
+	}
+	return err
+}
+
+// UnclaimPageLoad drops this process's claim, if it still stands.
+func (p *Pool) UnclaimPageLoad() {
+	s := p.pages.shared
+	if s == nil || p.pages.holder == "" || !s.up() {
+		return
+	}
+	if err := s.unclaim(p.pages.holder); err != nil {
+		s.failed(err) // the claim's ttl ends it
+	}
 }
 
 // CanLoadPage reports whether ep's exit may load a page now: its gate

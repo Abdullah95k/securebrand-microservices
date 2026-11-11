@@ -289,3 +289,85 @@ func gateErrors() float64 {
 	_ = metrics.PageGateErrors.Write(&m)
 	return m.GetCounter().GetValue()
 }
+
+// registry-sync's claim puts it first in line: while the claim stands, the
+// crawlers take no page load on any exit, so the next exit to come free
+// goes to registry-sync. Its own page load uses the claim up; a claim
+// nobody uses lapses after its ttl, and UnclaimPageLoad drops it at once.
+func TestSharedGateClaimGoesFirst(t *testing.T) {
+	crawler, rs, mr := sharedPools(t)
+	rs.SetPageLoadHolder("registry-sync")
+	at := func(sec int) {
+		mr.SetTime(time.Date(2026, 11, 6, 3, 0, 0, 0, time.UTC).Add(time.Duration(sec) * time.Second))
+	}
+	// The crawlers keep both exits at their pace.
+	if ok1, _ := crawler.PageLoad(ep(exit1)); !ok1 {
+		t.Fatal("setup: exit1")
+	}
+	if ok2, _ := crawler.PageLoad(ep(exit2)); !ok2 {
+		t.Fatal("setup: exit2")
+	}
+	if err := rs.ClaimPageLoad(time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	at(120) // both exits come free
+	if ok, why := crawler.PageLoad(ep(exit1)); ok || why != "claimed" {
+		t.Fatalf("a crawler took a free exit while registry-sync claimed it: %v %q", ok, why)
+	}
+	if crawler.CanLoadPage(ep(exit2)) {
+		t.Fatal("a claimed exit is offered to a crawler")
+	}
+	if _, err := crawler.Next("isp"); !errors.Is(err, ErrExitsPaced) {
+		t.Fatalf("a crawler's new identity while claimed: %v, want ErrExitsPaced (a short wait)", err)
+	}
+	if !rs.CanLoadPage(ep(exit1)) {
+		t.Fatal("the claimant is not offered the free exit")
+	}
+	if ok, why := rs.PageLoad(ep(exit1)); !ok {
+		t.Fatalf("the claimant was refused the free exit: %q", why)
+	}
+	if ok, why := crawler.PageLoad(ep(exit2)); !ok {
+		t.Fatalf("the claim outlived the claimant's page load: %q", why)
+	}
+
+	// A claim nobody uses lapses after its ttl.
+	at(240)
+	if err := rs.ClaimPageLoad(time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if ok, why := crawler.PageLoad(ep(exit1)); ok || why != "claimed" {
+		t.Fatalf("second claim: %v %q", ok, why)
+	}
+	mr.FastForward(61 * time.Second)
+	if ok, why := crawler.PageLoad(ep(exit1)); !ok {
+		t.Fatalf("a lapsed claim still holds the crawlers: %q", why)
+	}
+
+	// UnclaimPageLoad drops it at once; a crawler's call drops nothing.
+	at(480)
+	if err := rs.ClaimPageLoad(time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	crawler.UnclaimPageLoad()
+	if ok, why := crawler.PageLoad(ep(exit1)); ok || why != "claimed" {
+		t.Fatalf("a crawler dropped registry-sync's claim: %v %q", ok, why)
+	}
+	rs.UnclaimPageLoad()
+	if ok, why := crawler.PageLoad(ep(exit1)); !ok {
+		t.Fatalf("after UnclaimPageLoad: %q", why)
+	}
+}
+
+// Without a shared gate a claim would be seen by no other process: it does
+// nothing.
+func TestClaimNeedsTheSharedGate(t *testing.T) {
+	p, _ := gatedPool(t, pilotGate)
+	p.SetPageLoadHolder("registry-sync")
+	if err := p.ClaimPageLoad(time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if ok, why := p.PageLoad(ep(exit1)); !ok {
+		t.Fatalf("a local claim refused a page load: %q", why)
+	}
+	p.UnclaimPageLoad()
+}

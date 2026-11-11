@@ -131,11 +131,14 @@ func (r Report) Checked() bool {
 
 // Sync runs registry syncs.
 type Sync struct {
-	DB     *pgxpool.Pool
-	Cfg    config.RegistrySync
-	Pool   *session.Pool
-	Loader *session.Loader
-	Rules  detect.Rules
+	DB   *pgxpool.Pool
+	Cfg  config.RegistrySync
+	Pool *session.Pool
+	// Proxies, when set, lets the canary page loads claim the next free
+	// page load ahead of the crawlers (proxy.Pool.ClaimPageLoad).
+	Proxies *proxy.Pool
+	Loader  *session.Loader
+	Rules   detect.Rules
 	// Params returns the global GraphQL form parameters.
 	Params         func() map[string]string
 	AcceptLanguage string
@@ -235,8 +238,11 @@ func (s *Sync) run(ctx context.Context, rep *Report) error {
 	}
 	pages := s.loadCanaries(ctx, rep)
 	defer func() {
+		// Retired, not kept: every run loads its canary pages afresh, and an
+		// identity kept on an exit that is paused would hold one of the
+		// pool's few places while another exit is free.
 		for _, c := range pages {
-			s.Pool.Release(c.id)
+			s.Pool.Retire(c.id, "run_done")
 		}
 	}()
 	if len(pages) == 0 {
@@ -337,14 +343,30 @@ func (s *Sync) renderMissing(ctx context.Context, pages []*canary, entries []*en
 // while every exit it was offered was pacing its page loads.
 var canaryRetry = 5 * time.Second
 
-// loadCanaries loads every canary page through its own identity. A page
-// load the exits put off (they pace page loads, and the crawlers keep them
-// busy) is tried again until CanaryWait has passed since the first one.
+// canaryClaim is how long a claim on the next free page load stands
+// before it must be renewed: each try renews it, so a run that ends (or
+// dies) holding one leaves the crawlers waiting at most this long.
+const canaryClaim = time.Minute
+
+// loadCanaries loads every canary page through its own identity. Before
+// each one it claims the next page load that comes free on any exit
+// (proxy.Pool.ClaimPageLoad): the crawlers keep every exit at its pace, so
+// otherwise a free exit almost always goes to one of them. A page load the
+// exits still put off is tried again until CanaryWait has passed since the
+// first one.
 func (s *Sync) loadCanaries(ctx context.Context, rep *Report) []*canary {
 	var out []*canary
 	until := time.Now().Add(s.Cfg.CanaryWait)
+	if s.Proxies != nil {
+		defer s.Proxies.UnclaimPageLoad()
+	}
 	for _, p := range s.Cfg.CanaryPages {
-		c, err := retryPaced(ctx, until, canaryRetry, func() (*canary, error) { return s.loadCanary(ctx, p) })
+		c, err := retryPaced(ctx, until, canaryRetry, func() (*canary, error) {
+			if s.Proxies != nil {
+				_ = s.Proxies.ClaimPageLoad(canaryClaim) // without the claim, the try just competes as before
+			}
+			return s.loadCanary(ctx, p)
+		})
 		if err != nil {
 			rep.Pages = append(rep.Pages, PageResult{Page: p, Reason: err.Error()})
 			continue
