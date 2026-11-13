@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -92,11 +93,26 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 		body = b
 	}
 	err := c.send(ctx, method, path, body, out)
-	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, syscall.ECONNRESET) ||
-		(err != nil && strings.Contains(err.Error(), "server closed idle connection")) {
+	if dropped(err) {
 		err = c.send(ctx, method, path, body, out)
 	}
 	return err
+}
+
+// dropped reports whether err is the registry dropping the connection
+// under a request: once, on a fresh connection, it is sent again (every
+// call here may be repeated: checks read, registering a registered schema
+// returns its version, compatibility levels are set, not added). net/http
+// replays a request itself only when nothing of it was written; a
+// kept-alive connection closed while the request was being written fails
+// with "use of closed network connection" or a broken pipe.
+func dropped(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EPIPE) || errors.Is(err, net.ErrClosed) ||
+		strings.Contains(err.Error(), "server closed idle connection")
 }
 
 func (c *Client) send(ctx context.Context, method, path string, body []byte, out any) error {
