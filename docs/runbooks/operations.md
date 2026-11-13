@@ -124,6 +124,20 @@ The pool recovers by itself as backoffs end; the alerts clear once it is back ab
 3. The persister: `FbsPersisterLag`, its logs, and `fbs_persist_rows_total{entity="comment"}` by `op` (`rejected` rising means records it can't write).
 4. `fbs_identity_active` (see "Identity pool low"): with almost no identities, only page profiles may be read.
 
+## No new posts
+
+`FbsNoNewPosts`: page tasks ran for 30 minutes and not one post list (`timeline`) request succeeded. `fbs_schedule_lag_seconds` stays at 0 meanwhile: the pages are dispatched, their tasks wait (13 Nov, 14:11 to about 16:30Z). Read why they wait:
+
+1. `sum by (stage, tier, reason) (increase(fbs_retries_total[30m]))`:
+   - `tier_open`: no identity, every exit cooling down behind its breaker (`fbs_breaker_state{name=~"proxy:.*"}`): see "Block storm";
+   - `query_breaker`: the timeline query's breaker is open and nothing is sent (`fbs_fb_query_short_circuit_total`): see "Registry stale" and "Schema drift";
+   - `rate_limited`, `login_wall`, `checkpoint`: Facebook refuses; see "Block storm";
+   - `exits_paced`, `exit_paused`, `paced`: waiting for page loads (identity starts and profile reads), after walled page loads;
+   - `store`, `produce`, `checkpoint`: fbs's own Postgres, Valkey or Kafka.
+2. `fbs_fb_requests_total{query="timeline"}` by class: few requests at all means fbs isn't sending (breakers), many refused means Facebook is limiting.
+
+A restart (a rollout) clears each pod's breakers, so the first minutes after one send more requests, and a stall that ends right after a rollout may have been breakers held open by refusals.
+
 ## Registry stale (doc_id rotated)
 
 Symptom: `class="registry_stale"` rising, tasks retrying with delay 5m.
@@ -455,7 +469,7 @@ The mentions flow finds every account (page or profile) our posts and comments m
    - ranks: **page** (an account Facebook typed Page, or that a check found a page), then **mentioned** (tagged, linked or the owner of a shared post in a post or comment of ours, or a candidate), then **author** (only seen as a comment's author). So pages are never stuck behind the commenters, who are most of the queue;
    - priority: `ln(1+mentions) + 2·ln(1+pages) + weeks since 1970 of the latest mention` (+ `candidate_weight` for candidates from other tools). So within a rank an account mentioned often, by many of our pages and recently goes first; each week of age weighs as much as e (2.7) times the mentions.
    - **Daily check cap** (`max_checks_per_day`, 300 by default; **0 means no limit**, as in production): a hard cap on page loads, per day in `time_zone` (Iraq time). The crawler takes one from `mention_check_days` right before each page load (counted with or without a cap); a check whose exit could not load a page gives it back. With a cap, the leader also spreads the day's checks over the day (by any hour, the share of the cap the day has run plus an hour's worth), so they never come in one burst.
-   - **Page-load share** (`page_load_share`, 20% by default, 30% in production since 13 November, in `share_window`s of 10 minutes): checks use at most that share of the page-load capacity of the check tier's exits, so collection always keeps the rest. Each static exit loads one page per `fb.proxy.page_loads.interval` (2m), so ten exits give 50 page loads a window and checks may start 10 of them at 20% (15 at 30%: at most 2,160 a day). The crawlers count the window's checks together in Valkey; a check past the share takes no identity and its account waits for a later window. The leader keeps no more than one window's checks in flight. With a gateway or direct tier (no paced exits) there is no share to hold. Checks move to their own IPs by routing `check` to a tier of their own.
+   - **Page-load share** (`page_load_share`, 20%; 30% in production on 13 November from 14:11Z until walls on page loads rose that evening; in `share_window`s of 10 minutes): checks use at most that share of the page-load capacity of the check tier's exits, so collection always keeps the rest. Each static exit loads one page per `fb.proxy.page_loads.interval` (2m), so ten exits give 50 page loads a window and checks may start 10 of them at 20% (15 at 30%: at most 2,160 a day). The crawlers count the window's checks together in Valkey; a check past the share takes no identity and its account waits for a later window. The leader keeps no more than one window's checks in flight (`fbs_mention_checks_in_flight`). A check that gets no page load within 15 minutes of being queued gives its account back to the queue and ends (`outcome="no_page_load"`): before 13 Nov it waited up to 4 hours and, dead-lettered, held its place for 6, so no other check was queued. With a gateway or direct tier (no paced exits) there is no share to hold. Checks move to their own IPs by routing `check` to a tier of their own.
    - While the traffic budget pauses backfill (`scheduler.budget`), no checks are queued.
    - A check task not finished after 6 hours is taken for lost and queued again.
 4. **Checking** (the crawler's `check` stage, `--stages ...,check`; Helm `crawler-check`; the pilot's crawler runs it). Logged out, through the identity pool and the exit's page-load gate (`fb.proxy.page_loads`), like any page load, and counted in the traffic budget and AIMD:
@@ -488,7 +502,8 @@ A candidate is one more mention of its account and goes through the same checks,
 
 **Signals:**
 - `fbs_mentions_found_total{via}`: mentions recorded (tag, link, share, author);
-- `fbs_mention_checks_total{outcome}`: public, private, unavailable, listed, failed, suppressed, capped (the daily cap), share (the page-load share's window was used up: the task did nothing, sent nothing, and its account went back to the queue; not a check);
+- `fbs_mention_checks_total{outcome}`: public, private, unavailable, listed, failed, suppressed, capped (the daily cap), share (the page-load share's window was used up: the task did nothing, sent nothing, and its account went back to the queue; not a check), no_page_load (no exit could load a page within 15 minutes of the check being queued: the account went back to the queue);
+- `fbs_mention_checks_in_flight` (leader): check tasks queued and not finished. At the share's window (15 at 30%, 10 at 20%) no more are queued; a check gives its place back after 15 minutes without a page load;
 - `fbs_mention_check_failures_total{step,reason}`: why checks fail. `step` is `page` (the account's page load) or `timeline` (its timeline request); `reason` a page-load or response class (`login_wall`, `rate_limited`, `checkpoint`, `soft_error`, `content_unavailable`, ...), `transport` (proxy or network), `drift` (the parsers no longer read the answer), `names_nothing` (a first "names nothing"), `bad_reference` or `database`;
 - `fbs_mention_pages_added_total{kind}`;
 - `fbs_mention_cap_hits_total{cap}`: days the `checks` or `adds` cap was reached;

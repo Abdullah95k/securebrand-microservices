@@ -121,6 +121,7 @@ func (m *Mentions) Queue(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	metrics.MentionInFlight.Set(float64(inflight))
 	n := queueBatch - inflight
 	if capped {
 		n = min(allowedBy(now, day, m.Cfg.MaxChecksPerDay)-used-inflight, queueBatch)

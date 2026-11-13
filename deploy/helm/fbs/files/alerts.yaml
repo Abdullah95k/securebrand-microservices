@@ -119,6 +119,23 @@ groups:
             query is failing or rotated, the parser drifted, the persister
             is stuck, or every page is quiet (rare across a full list).
           runbook_url: https://github.com/abdullah95k/securebrand-microservices/blob/main/docs/runbooks/operations.md#no-new-comments
+      - alert: FbsNoNewPosts
+        # Freshness: page tasks at work for 30 minutes, and not one post
+        # list (timeline) request answered. fbs_schedule_lag_seconds does
+        # not show this: the pages are dispatched, their tasks wait.
+        expr: |
+          (sum(increase(fbs_fb_requests_total{query="timeline",class="ok"}[30m])) or vector(0)) == 0
+            and on () sum(increase(fbs_tasks_total{stage="page"}[30m])) > 0
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: No post list read in 30 minutes while page tasks run
+          description: >-
+            Page tasks run but no timeline request succeeds: the exits are
+            cooling down, the timeline query's breaker is open, or every
+            request is rate-limited. fbs_retries_total{stage="page"} by
+            reason says which.
+          runbook_url: https://github.com/abdullah95k/securebrand-microservices/blob/main/docs/runbooks/operations.md#no-new-posts
       - alert: FbsCrawlersIdleWithBacklog
         # Tasks, not requests: fbs-registry-sync's own requests every 30m
         # would otherwise keep resetting the for timer.

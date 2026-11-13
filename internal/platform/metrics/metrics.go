@@ -45,7 +45,7 @@ func ResetLeaderGauges() {
 		ScheduleLag, PageTier, BudgetUsed, BudgetProjected, BudgetLimit} {
 		v.Reset()
 	}
-	for _, g := range []prometheus.Gauge{MentionChecksUsed, MentionEvents, AIMDCeiling, FleetRPS,
+	for _, g := range []prometheus.Gauge{MentionChecksUsed, MentionInFlight, MentionEvents, AIMDCeiling, FleetRPS,
 		BudgetBackfillPaused, BudgetStretch, FleetBlockRate} {
 		g.Set(0)
 	}
@@ -126,6 +126,7 @@ var (
 	// mention, ...) and what their own page reads as (page, profile: a
 	// person, unknown).
 	ScheduledKinds    = gaugeVec("scheduled_kinds", "Enabled scheduled pages by source and kind (leader scheduler).", "source", "kind")
+	MentionInFlight   = gauge("mention_checks_in_flight", "Check tasks queued and not finished, against the page-load share's window (leader scheduler).")
 	MentionChecksUsed = gauge("mention_checks_used", "Checks started today, against mentions.max_checks_per_day (leader scheduler).")
 	MentionEvents     = gauge("mention_events_pending", "Mention events the persister wrote and the leader has not counted yet.")
 
@@ -134,7 +135,10 @@ var (
 	TaskSeconds = histVec("task_seconds", "Crawl task duration.", prometheus.ExponentialBuckets(0.1, 2, 12), "stage")
 	TaskYields  = counterVec("task_yields_total", "Tasks that yielded a continuation.", "stage")
 	DLQ         = counterVec("dlq_total", "Tasks sent to the dead letter queue.", "stage", "reason")
-	Retries     = counterVec("retries_total", "Tasks sent to a retry topic.", "stage", "tier")
+	// Retries: reason is a short code (RetryReason), never the free text:
+	// tier_open, exits_paced, exit_paused, paced, query_breaker, a response
+	// class, transport, produce, checkpoint, database, ... or other.
+	Retries = counterVec("retries_total", "Tasks sent to a retry topic, by stage, delay tier and reason.", "stage", "tier", "reason")
 
 	// Coverage.
 	CommentCompleteness = histVec("comment_completeness_ratio", "Collected / reported comments per post at job completion.", []float64{0.1, 0.25, 0.5, 0.7, 0.8, 0.9, 0.95, 0.99, 1.0, 1.01}, "lane")
