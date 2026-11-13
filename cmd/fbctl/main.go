@@ -4,6 +4,7 @@
 //	fbctl kafka apply                    create/grow topics from configs/topics.yaml
 //	fbctl schemas apply|check            register the fb.v1 schemas (BACKWARD_TRANSITIVE) / dry run
 //	fbctl apikey create --name N --scopes jobs:write,data:read
+//	fbctl apikey import --name N --scopes discovery:write --key-file /keys/key
 //	fbctl apikey revoke --prefix P
 //	fbctl registry list
 //	fbctl registry set --file query.json
@@ -40,6 +41,7 @@ commands:
   kafka apply [--partitions-cap N] [--replicas N]
   schemas apply | schemas check
   apikey create --name NAME --scopes s1,s2 [--rate N]
+  apikey import --name NAME --scopes s1,s2 --key-file FILE [--rate N]
   apikey revoke --prefix PREFIX
   registry list | registry set --file query.json | registry import --file registry.yaml
   report load [--since 24h] [--pages N] [--cost-per-gb P] [--json]
@@ -85,6 +87,8 @@ func main() {
 		err = schemasApply(ctx, cfg, sub == "check")
 	case "apikey create":
 		err = apikeyCreate(ctx, cfg, rest)
+	case "apikey import":
+		err = apikeyImport(ctx, cfg, rest)
 	case "apikey revoke":
 		err = apikeyRevoke(ctx, cfg, rest)
 	case "registry list":

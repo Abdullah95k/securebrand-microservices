@@ -1,0 +1,61 @@
+{{- /*
+D-065: one Job per entry of apiKeys, running `fbctl apikey import` on a key
+the platform made inside the cluster and wrote to a Secret (never printed,
+never in chat). fbs keeps only the key's hash. Import is idempotent, so the
+Job is re-created on every change (Argo CD: Force + Replace) and on each run
+changes nothing, or brings the name, scopes and rate to the entry; a revoked
+key stays revoked (`fbctl apikey revoke --prefix ...`).
+*/ -}}
+{{- $root := . -}}
+{{- range .Values.apiKeys }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "fbs.fullname" $root }}-apikey-{{ .name }}
+  labels: {{- include "fbs.labels" $root | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-options: Force=true,Replace=true
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels: {{- include "fbs.selector" (dict "root" $root "name" "apikey-import") | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      securityContext: {{- toYaml $root.Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: apikey-import
+          image: "{{ $root.Values.image.repository }}:{{ $root.Values.image.tag | default $root.Chart.AppVersion }}"
+          command: ["/usr/local/bin/fbctl"]
+          args:
+            - apikey
+            - import
+            - --name
+            - {{ .name | quote }}
+            - --scopes
+            - {{ join "," .scopes | quote }}
+            - --key-file
+            - /etc/fbs-apikey/{{ .secret.key }}
+            {{- with .rate }}
+            - --rate
+            - {{ . | toString | quote }}
+            {{- end }}
+          {{- $pod := dict "root" $root "name" "apikey-import" }}
+          env:
+            {{- include "fbs.env" $pod | nindent 12 }}
+          {{- include "fbs.envFrom" $root | nindent 10 }}
+          securityContext: {{- toYaml $root.Values.securityContext | nindent 12 }}
+          resources: {requests: {cpu: 10m, memory: 32Mi}, limits: {memory: 128Mi}}
+          volumeMounts:
+            {{- include "fbs.volumeMounts" $pod | nindent 12 }}
+            - name: apikey
+              mountPath: /etc/fbs-apikey
+              readOnly: true
+      volumes:
+        {{- include "fbs.hookVolumes" $pod | nindent 8 }}
+        - name: apikey
+          secret:
+            secretName: {{ .secret.name }}
+            items: [{key: {{ .secret.key }}, path: {{ .secret.key }}}]
+{{- end }}
