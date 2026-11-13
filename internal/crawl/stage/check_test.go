@@ -1,12 +1,16 @@
 package stage
 
 import (
+	"context"
 	"testing"
+	"time"
 
+	taskv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fbs/task/v1"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/detect"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/parse"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/session"
 	"github.com/abdullah95k/securebrand-microservices/internal/mentions"
+	"github.com/abdullah95k/securebrand-microservices/internal/testenv"
 )
 
 // A page load decides only what it can prove: a 404 is unavailable; a page
@@ -85,5 +89,37 @@ func TestAccountKind(t *testing.T) {
 		if k, by := accountKind(c.read, "sig", c.hint); k != c.kind || by != c.by {
 			t.Errorf("read %q, hint %q: %q by %q, want %q by %q", c.read, c.hint, k, by, c.kind, c.by)
 		}
+	}
+}
+
+// A check that has waited for a page load since 15 minutes after it was
+// queued gives the account back to the queue and ends; a younger one keeps
+// waiting.
+func TestCheckGivesBackAfterWaiting(t *testing.T) {
+	db := testenv.Postgres(t)
+	ctx := context.Background()
+	now := time.Date(2026, 11, 13, 18, 0, 0, 0, time.UTC)
+	s := &CheckStage{D: &Deps{DB: db, Now: func() time.Time { return now }}}
+	if _, err := db.Exec(ctx, `INSERT INTO checked_accounts (account_ref, source, first_seen_at, last_seen_at, queued_at)
+		VALUES ('id:42', 'mention', now(), now(), now())`); err != nil {
+		t.Fatal(err)
+	}
+	task := &taskv1.Task{}
+	waiting := retry(task, "", "30s", "no identity: wait", map[string]int64{})
+	waiting.Waiting = true
+	if out := s.wait(ctx, task, "id:42", now.Add(-5*time.Minute), waiting); out.Result != Retry {
+		t.Fatalf("a 5-minute wait ended: %+v", out)
+	}
+	if n, _ := mentions.InFlight(ctx, db); n != 1 {
+		t.Fatalf("in flight %d while waiting", n)
+	}
+	if out := s.wait(ctx, task, "id:42", now.Add(-16*time.Minute), waiting); out.Result != Done {
+		t.Fatalf("a 16-minute wait goes on: %+v", out)
+	}
+	if n, _ := mentions.InFlight(ctx, db); n != 0 {
+		t.Fatalf("in flight %d after giving the account back", n)
+	}
+	if a, err := mentions.Get(ctx, db, "id:42"); err != nil || !a.InQueue {
+		t.Fatalf("the account left the queue: %+v %v", a, err)
 	}
 }

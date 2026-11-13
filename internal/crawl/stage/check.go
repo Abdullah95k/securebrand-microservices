@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"strconv"
+	"time"
 
 	taskv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fbs/task/v1"
 	"github.com/abdullah95k/securebrand-microservices/internal/config"
@@ -134,7 +135,7 @@ func (s *CheckStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	id, err := d.Pool.AcquireForPageLoad(ctx, d.tierFor("check", t.Stalls))
 	if err != nil {
 		unclaim()
-		return noIdentity(t, err, c)
+		return s.wait(ctx, t, ref, sc.QueuedAt.AsTime(), noIdentity(t, err, c))
 	}
 	defer d.Pool.Release(id)
 	u, err := id.Base.Parse(task.RefPath(ref))
@@ -146,7 +147,7 @@ func (s *CheckStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	if errors.Is(err, session.ErrPaced) {
 		// The exit can't load a page now; nothing was sent.
 		unclaim()
-		return pacedRetry(t, "", err, c)
+		return s.wait(ctx, t, ref, sc.QueuedAt.AsTime(), pacedRetry(t, "", err, c))
 	}
 	d.observeLoad(pl, err, t.Lane)
 	countPageLoad(c, pl, err)
@@ -200,6 +201,26 @@ func (s *CheckStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	}
 	judgeTimeline(&v, tl)
 	return s.record(ctx, t, ref, v, c)
+}
+
+// checkMaxWait bounds how long a check waits for a page load. Past it the
+// account goes back to the queue (the leader queues it again later) and the
+// task ends: a check waiting for hours, while walls keep the exits' page
+// loads paused, held its place in the share's window, and one dead-lettered
+// held it until taken for lost (6 hours), so no other check was queued.
+const checkMaxWait = 15 * time.Minute
+
+// wait returns out (a wait for a page load) while the check is younger than
+// checkMaxWait, else gives the account back and ends the task.
+func (s *CheckStage) wait(ctx context.Context, t *taskv1.Task, ref string, queued time.Time, out Outcome) Outcome {
+	if s.D.now().Sub(queued) < checkMaxWait {
+		return out
+	}
+	metrics.MentionChecks.WithLabelValues("no_page_load").Inc()
+	if err := mentions.Release(ctx, s.D.DB, ref); err != nil {
+		return out
+	}
+	return done(out.Counters)
 }
 
 // accountKind is a checked account's kind: what its own page reads as

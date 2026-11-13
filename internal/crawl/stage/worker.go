@@ -162,7 +162,7 @@ func (w *Worker) Run(ctx context.Context, t *taskv1.Task) error {
 			}
 		}
 		metrics.Tasks.WithLabelValues(name, lane, "retry").Inc()
-		metrics.Retries.WithLabelValues(name, out.Delay).Inc()
+		metrics.Retries.WithLabelValues(name, out.Delay, RetryReason(out.Reason)).Inc()
 		slog.Debug("task retry", "stage", name, "task", t.TaskId, "attempt", next.Attempt, "stalls", next.Stalls,
 			"delay", out.Delay, "reason", out.Reason)
 		return w.toRetry(ctx, next, out.Delay)

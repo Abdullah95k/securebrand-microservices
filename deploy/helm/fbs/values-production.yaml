@@ -61,17 +61,16 @@ config:
   # fbs never creates them.
   contract: {enabled: false}
   # No daily caps in production (D-008; the owner, 7 November): 0 means no
-  # limit. Mention checks are held to 30% of the exits' page loads instead
-  # (mentions.page_load_share; 20% until the master's note of 13 Nov, while
-  # page loads run far under capacity), so collection keeps the rest. Back
-  # to 0.2 if login walls on page loads rise or live identities fall. The
-  # checker runs from the start (the owner, 7 November), here and in
-  # components.crawler-check.
+  # limit. Mention checks are held to 20% of the exits' page loads instead
+  # (mentions.page_load_share), so collection keeps the rest. It was 0.3
+  # from 13 Nov 14:11Z; back to 0.2 that evening by its own rule, as login
+  # walls on page loads rose from 16% to about 40%. The checker runs from
+  # the start (the owner, 7 November), here and in components.crawler-check.
   mentions:
     enabled: true
     max_checks_per_day: 0
     max_new_per_day: 0
-    page_load_share: 0.3
+    page_load_share: 0.2
   discovery:
     max_new_per_day: 0
   # fbs-registry-sync finds the real query ids on these public pages, which
