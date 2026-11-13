@@ -231,6 +231,50 @@ func TestPick(t *testing.T) {
 	}
 }
 
+// Pages go first, then accounts mentioned in a post or comment, then
+// those only seen as a comment's author, whatever their priority; the
+// queue is counted by rank. A page that comments counts as a page.
+func TestPickByRank(t *testing.T) {
+	db := testenv.Postgres(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	page := ev("id:7001", 1, 1, 0, ViaTag, now.Add(-60*24*time.Hour))
+	page.Kind = KindPage
+	commentingPage := ev("id:7002", 1, 2, 3, ViaAuthor, now.Add(-90*24*time.Hour))
+	commentingPage.Kind = KindPage
+	copyEvents(t, db,
+		// The busiest author: many mentions, by many pages, today.
+		ev("id:7101", 1, 10, 11, ViaAuthor, now), ev("id:7101", 2, 12, 13, ViaAuthor, now), ev("id:7101", 3, 14, 15, ViaAuthor, now),
+		ev("v:linked.one", 1, 20, 0, ViaLink, now.Add(-30*24*time.Hour)),
+		// An author also tagged in a post: mentioned.
+		ev("id:7102", 1, 30, 31, ViaAuthor, now), ev("id:7102", 1, 32, 0, ViaTag, now.Add(-40*24*time.Hour)),
+		page, commentingPage,
+	)
+	aggregate(t, db)
+	if q, err := QueueByRank(ctx, db); err != nil || q["page"] != 2 || q["mentioned"] != 2 || q["author"] != 1 {
+		t.Fatalf("queue %v %v", q, err)
+	}
+	due, err := Pick(ctx, db, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, d := range due {
+		got = append(got, d.Ref)
+	}
+	want := []string{"id:7001", "id:7002", "id:7102", "v:linked.one", "id:7101"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("order %v, want %v", got, want)
+	}
+	// A check that finds an unknown account is a page moves it up.
+	if _, err := db.Exec(ctx, `UPDATE checked_accounts SET kind = 'page' WHERE account_ref = 'id:7101'`); err != nil {
+		t.Fatal(err)
+	}
+	if due, _ := Pick(ctx, db, 1); len(due) != 1 || due[0].Ref != "id:7101" {
+		t.Fatalf("after its kind changed: %v", due)
+	}
+}
+
 // The daily check cap is hard: a claim past it fails; a claim that sent
 // nothing is given back; each day starts again.
 func TestClaimCheck(t *testing.T) {

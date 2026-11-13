@@ -8,12 +8,14 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/abdullah95k/securebrand-microservices/internal/config"
 	"github.com/abdullah95k/securebrand-microservices/internal/fb/ratelimit"
 	"github.com/abdullah95k/securebrand-microservices/internal/gdpr"
 	"github.com/abdullah95k/securebrand-microservices/internal/mentions"
 	"github.com/abdullah95k/securebrand-microservices/internal/platform/kafka"
+	"github.com/abdullah95k/securebrand-microservices/internal/platform/metrics"
 	"github.com/abdullah95k/securebrand-microservices/internal/testenv"
 )
 
@@ -170,5 +172,44 @@ func TestMentionsQueueWithoutCap(t *testing.T) {
 	}
 	if err := m.Queue(ctx); err != nil || inFlight() != 10 {
 		t.Fatalf("queued more with a window's checks in flight: %d %v", inFlight(), err)
+	}
+}
+
+// The gauges count the queue by rank and the scheduled pages by source and
+// kind; a pair gone since reads absent.
+func TestMentionsGauges(t *testing.T) {
+	db := testenv.Postgres(t)
+	ctx := context.Background()
+	m := &Mentions{DB: db}
+	for _, q := range []string{
+		`INSERT INTO checked_accounts (account_ref, kind, vias, source, first_seen_at, last_seen_at) VALUES
+			('id:1', 'page', '{author}', 'mention', now(), now()),
+			('id:2', 'unknown', '{link}', 'mention', now(), now()),
+			('id:3', 'unknown', '{author}', 'mention', now(), now()),
+			('id:4', 'unknown', '{author}', 'mention', now(), now())`,
+		`INSERT INTO pages (page_id, status, kind) VALUES (11, 'active', 'page'), (12, 'active', 'profile')`,
+		`INSERT INTO page_schedule (page_ref, page_id, interval_seconds, next_run_at, source) VALUES
+			('id:11', 11, 3600, now(), 'seed'), ('id:12', 12, 3600, now(), 'mention'), ('v:new.one', NULL, 3600, now(), 'mention')`,
+	} {
+		if _, err := db.Exec(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	metrics.ScheduledKinds.WithLabelValues("mention", "stale").Set(9)
+	if err := m.Gauges(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for rank, want := range map[string]float64{"page": 1, "mentioned": 1, "author": 2} {
+		if got := gaugeValue(metrics.MentionQueue.WithLabelValues(rank)); got != want {
+			t.Errorf("queue %s = %v, want %v", rank, got, want)
+		}
+	}
+	for k, want := range map[[2]string]float64{{"seed", "page"}: 1, {"mention", "profile"}: 1, {"mention", "unknown"}: 1} {
+		if got := gaugeValue(metrics.ScheduledKinds.WithLabelValues(k[0], k[1])); got != want {
+			t.Errorf("scheduled %v = %v, want %v", k, got, want)
+		}
+	}
+	if n := testutil.CollectAndCount(metrics.ScheduledKinds); n != 3 {
+		t.Errorf("%d scheduled-kind series, want 3 (the stale one gone)", n)
 	}
 }

@@ -28,11 +28,12 @@
   - **Tested:** CI runs the integration tests through PgBouncer in transaction mode with `max_prepared_statements = 0`.
 - **REQ-018** (contract v1.2.0), phase 1 brought forward to now (the owner, 11 Nov): plan in [`docs/master/fbs-contract-adoption.md`](master/fbs-contract-adoption.md).
   - **Live publishing:** merged ([#83](https://github.com/Abdullah95k/securebrand-microservices/pull/83)). The persister publishes accounts, account snapshots, posts, comments and counts on the five `content.*` topics, only when they change, behind `contract.enabled`.
-  - **Identities:** rate limits alone retire an identity after six in a row, not two; it cools down in between (approved 11 Nov). In a PR.
-  - **Page pictures (D-061, the owner, 13 Nov):** monitored pages' profile pictures and covers go to analysis, when first seen and when they change. In a PR.
-  - **Video captions (D-056, the owner, 11 Nov):** step 2a in a PR: the caption files videos up to 7 days old link to are read once and sent with the post. Step 1, a probe that sends nothing: where caption-like keys appear in the video nodes fbs already reads (`fbs_caption_fields_total` by path and type, never values), and the bundles' caption operations in registry-sync's report. Step 2, reading the captions of videos from the last 7 days, is built on what it finds.
+  - **Identities:** rate limits alone retire an identity after six in a row, not two; it cools down in between (approved 11 Nov). Merged ([#85](https://github.com/Abdullah95k/securebrand-microservices/pull/85)).
+  - **Page pictures (D-061, the owner, 13 Nov):** monitored pages' profile pictures and covers go to analysis, when first seen and when they change. Merged ([#86](https://github.com/Abdullah95k/securebrand-microservices/pull/86)).
+  - **Video captions (D-056, the owner, 11 Nov):** the caption files videos up to 7 days old link to are read once and sent with the post. Merged ([#86](https://github.com/Abdullah95k/securebrand-microservices/pull/86)).
   - **Backfill:** merged ([#84](https://github.com/Abdullah95k/securebrand-microservices/pull/84)). `fbctl contract backfill` and its Job (`contractBackfill.runs`): production, then the pilot's copy. Runs only once analysis skips items it has already analysed.
   - Phase 2 targets 20 Nov.
+- **Discovery (D-054; the master's note of 13 Nov 12:00Z):** the mention checker checks pages first, then accounts mentioned in posts and comments, then comment authors (`fbs_mention_queue{rank}`), with 30% of page loads in production (was 20%). Why checks fail: `fbs_mention_check_failures_total{step,reason}`; people's profiles on the schedule: `fbs_scheduled_kinds`. In a PR. Keyword search stays off (not built) until a feasibility test is decided.
 
 ## Production pin
 
