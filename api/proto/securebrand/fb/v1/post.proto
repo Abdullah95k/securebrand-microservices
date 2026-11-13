@@ -78,6 +78,21 @@ message Post {
   // posts), unwrapped from l.facebook.com. Links to other sites are in
   // links.
   repeated string facebook_links = 29;
+  // The video's caption tracks (D-056): read once, from the caption files
+  // the video's own data links to, while the post is at most 7 days old.
+  repeated CaptionTrack captions = 30;
+  // "fetched" (captions holds them), "none" (no caption file, or Facebook
+  // refused it: not tried again), or empty (not tried).
+  string captions_state = 31;
+}
+
+// CaptionTrack is one language of a video's captions, as plain text.
+message CaptionTrack {
+  // Facebook's locale (for example ar_AR).
+  string locale = 1;
+  string text = 2;
+  // "uploader", "auto" (Facebook's speech-to-text) or empty (not stated).
+  string source = 3;
 }
 
 // PostMetrics is a point-in-time engagement sample, on fb.post_metrics.v1.

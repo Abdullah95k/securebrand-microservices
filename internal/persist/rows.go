@@ -107,6 +107,7 @@ func postRow(p *fbv1.Post) []any {
 		nilIfEmpty(p.SharedPostUrl), p.IsPinned, p.IsPaidPartnership, nilIfEmpty(p.AuthorId), nilIfEmpty(p.AuthorName),
 		reactionCount, reactions, complete, p.CommentCount, p.ShareCount, p.ViewCount, nilIfEmpty(p.FeedbackId),
 		p.MediaIds, extraJSON(p.ExtraJson), hash, status, seen, seen,
+		protoListJSON(p.Captions), nilIfEmpty(p.CaptionsState),
 	}
 }
 
@@ -116,6 +117,7 @@ var postCols = []string{
 	"shared_post_url", "is_pinned", "is_paid_partnership", "author_id", "author_name",
 	"reaction_count", "reactions", "reactions_complete", "comment_count_total", "share_count", "view_count", "feedback_id",
 	"media_ids", "extra", "content_hash", "status", "first_seen_at", "last_seen_at",
+	"captions", "captions_state",
 }
 
 var commentCols = []string{

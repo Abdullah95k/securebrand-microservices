@@ -133,8 +133,19 @@ func (s *PageStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 			sc.PageId = page.PageId
 			page.RequestedRef = sc.PageRef
 			b := d.Producer.NewBatch()
-			if err := d.Emit.Page(ctx, b, emit.Source{JobID: t.JobId, Query: "page_html", ParserVersion: parse.PageVersion, Mode: t.Mode}, page); err != nil {
+			psrc := emit.Source{JobID: t.JobId, Query: "page_html", ParserVersion: parse.PageVersion, Mode: t.Mode}
+			if err := d.Emit.Page(ctx, b, psrc, page); err != nil {
 				return retry(t, "", "30s", err.Error(), c)
+			}
+			// A monitored page's profile picture and cover go to analysis
+			// (D-061): pages only, never people's profiles; a picture
+			// already handed over isn't downloaded again.
+			if page.Kind == "page" {
+				n, err := d.media(ctx, b, t, psrc, parse.PageImages(page), false)
+				if err != nil {
+					return retry(t, "", "30s", err.Error(), c)
+				}
+				c["media_queued"] += n
 			}
 			if err := b.Wait(ctx); err != nil {
 				return retry(t, "", "30s", "produce: "+err.Error(), c)
@@ -240,6 +251,9 @@ timeline:
 			return done(c)
 		}
 
+		cn := d.captions(ctx, id, tl.Posts)
+		c["captions_fetched"] += cn.fetched
+		c["captions_none"] += cn.none
 		b := d.Producer.NewBatch()
 		var children []*taskv1.Task
 		for _, pb := range tl.Posts {

@@ -36,3 +36,22 @@ func TestCaptionProbeCountsPathsNotValues(t *testing.T) {
 		t.Errorf("per-node count %v, want 2", v)
 	}
 }
+
+// Caption links come from the locales list (with locale and maker) and from
+// captions_url; a link-only copy of a listed track is dropped. Synthetic.
+func TestCaptionRefs(t *testing.T) {
+	n := gjson.Parse(`{"captions_url":"https://cdn.example/c/1.srt?oe=1",
+		"video_available_captions_locales":[{"locale":"ar_AR","captions_url":"https://cdn.example/c/1.srt?oe=2","localized_creation_method":"Auto-generated"},
+			{"locale":"en_US","captions_url":"https://cdn.example/c/2.srt","localized_creation_method":"Uploaded by the page"}],
+		"video_grid_renderer":{"video":{"video_available_captions_locales":[{"locale":"ar_AR","captions_url":"https://cdn.example/c/1.srt?oe=3"}]}}}`)
+	refs := dedupeCaptions(CaptionRefs(n))
+	if len(refs) != 2 || refs[0].Locale != "ar_AR" || refs[0].Source != "auto" || refs[1].Source != "uploader" {
+		t.Fatalf("%+v", refs)
+	}
+	if got := CaptionRefs(gjson.Parse(`{"captions_url":null}`)); len(got) != 0 {
+		t.Fatalf("a null link read as a caption: %+v", got)
+	}
+	if got := dedupeCaptions(CaptionRefs(gjson.Parse(`{"captions_url":"https://cdn.example/c/9.srt"}`))); len(got) != 1 || got[0].Locale != "" {
+		t.Fatalf("a link-only track: %+v", got)
+	}
+}

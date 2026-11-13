@@ -188,7 +188,7 @@ func (b *Backfill) read(ctx context.Context, s schema, stage string, pos cursor)
 	case "posts", "post_metrics":
 		var ps []*fbv1.Post
 		if stage == "posts" {
-			ps, next, err = readPosts(ctx, b.Source, pos, b.Since, b.Batch)
+			ps, next, err = readPosts(ctx, b.Source, s, pos, b.Since, b.Batch)
 		} else {
 			ps, next, err = readPostMetrics(ctx, b.Source, pos, b.Since, b.Batch)
 		}

@@ -108,13 +108,25 @@ func (r *renderer) postURL(p *Page, post *Post) string {
 func (r *renderer) mediaNode(m *MediaItem) obj {
 	switch m.Kind {
 	case "video":
-		return obj{
+		v := obj{
 			"__typename": "Video", "id": strconv.FormatInt(m.ID, 10),
 			"browser_native_sd_url": r.mediaURL(m, "sd"), "browser_native_hd_url": r.mediaURL(m, "hd"),
 			"playable_url": r.mediaURL(m, "sd"), "playable_url_quality_hd": r.mediaURL(m, "hd"),
 			"length_in_second": m.Duration, "width": m.Width, "height": m.Height,
 			"preferred_thumbnail": obj{"image": obj{"uri": r.mediaURL(m, "thumb")}},
+			"captions_url":        nil, "captions_settings": nil,
 		}
+		// Caption tracks, as Facebook lists them (D-056): even videos have
+		// one; every third odd one links to a file that is gone.
+		id := strconv.FormatInt(m.ID, 10)
+		switch {
+		case m.ID%2 == 0:
+			v["video_available_captions_locales"] = []obj{{"locale": "ar_AR",
+				"captions_url": r.base + "/captions/" + id + "_ar.srt?oe=0", "localized_creation_method": "Auto-generated"}}
+		case m.ID%3 == 0:
+			v["video_available_captions_locales"] = []obj{{"locale": "ar_AR", "captions_url": r.base + "/captions/gone_" + id + ".srt"}}
+		}
+		return v
 	case "sticker":
 		return obj{"__typename": "Sticker", "id": strconv.FormatInt(m.ID, 10),
 			"image": obj{"uri": r.mediaURL(m, "orig"), "width": 240, "height": 240}}

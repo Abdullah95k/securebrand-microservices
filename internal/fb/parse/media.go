@@ -1,6 +1,9 @@
 package parse
 
 import (
+	"net/url"
+	"path"
+
 	"github.com/tidwall/gjson"
 
 	fbv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fb/v1"
@@ -117,4 +120,42 @@ func MediaFromNode(n gjson.Result, typename string, o Owner) []*fbv1.Media {
 		add(mk("link_preview", img.Get("uri").String(), kind, img.Get("width").Int(), img.Get("height").Int()))
 	}
 	return out
+}
+
+// PageImages returns a page's profile picture and cover photo as media
+// (D-061, the owner, 13 Nov: monitored pages' pictures go to analysis).
+// Their IDs follow the picture's own file in its link, not the link's
+// signed query, so the same picture read again is the same media (and is
+// not downloaded again), and a changed picture is new media.
+func PageImages(p *fbv1.Page) []*fbv1.Media {
+	var out []*fbv1.Media
+	add := func(img *fbv1.ImageRef, kind fbv1.MediaKind, variant string) {
+		if img == nil || img.Url == "" {
+			return
+		}
+		id := imageFileID(img.Url)
+		if id == "" {
+			return
+		}
+		out = append(out, &fbv1.Media{MediaId: MediaID(id, variant), FbMediaId: id, Kind: kind, Variant: variant,
+			OwnerType: "page", OwnerId: p.PageId, PageId: p.PageId, SourceUrl: img.Url,
+			SourceExpiresAt: URLExpiry(img.Url), Width: img.Width, Height: img.Height})
+	}
+	add(p.GetProfilePicture(), fbv1.MediaKind_MEDIA_KIND_PROFILE_PIC, "profile")
+	add(p.GetCoverPhoto(), fbv1.MediaKind_MEDIA_KIND_COVER, "cover")
+	return out
+}
+
+// imageFileID is the file name of a picture's link, without its query: the
+// part of an fbcdn link that changes only when the picture does.
+func imageFileID(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	base := path.Base(u.Path)
+	if base == "" || base == "." || base == "/" {
+		return ""
+	}
+	return "image:" + base
 }

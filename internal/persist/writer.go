@@ -225,7 +225,12 @@ func (w *Writer) Posts(ctx context.Context, posts []*fbv1.Post) error {
 			}
 			set := make([]string, 0, len(postCols))
 			for _, c := range postCols {
-				if c == "post_created_at" || c == "post_id" || c == "first_seen_at" {
+				switch c {
+				case "post_created_at", "post_id", "first_seen_at":
+					continue
+				case "captions", "captions_state":
+					// Read once (D-056): a read without them keeps them.
+					set = append(set, c+" = COALESCE(EXCLUDED."+c+", t."+c+")")
 					continue
 				}
 				set = append(set, c+" = EXCLUDED."+c)

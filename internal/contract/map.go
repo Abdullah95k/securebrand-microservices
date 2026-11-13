@@ -68,6 +68,12 @@ const (
 	TopicMetrics         = "content.metrics.v1"
 )
 
+// captionSources maps fb.v1 CaptionTrack.source (D-056).
+var captionSources = map[string]contentv1.CaptionSource{
+	"uploader": contentv1.CaptionSource_CAPTION_SOURCE_UPLOADER,
+	"auto":     contentv1.CaptionSource_CAPTION_SOURCE_PLATFORM_ASR,
+}
+
 // Topics are the contract topics fbs publishes. The platform creates them.
 var Topics = []string{TopicAccount, TopicAccountSnapshot, TopicPost, TopicComment, TopicMetrics}
 
@@ -325,6 +331,10 @@ func Post(p *fbv1.Post, m Meta) []Event {
 	}
 	if p.IsPinned != nil {
 		cp.Flags = &contentv1.PostFlags{Pinned: p.IsPinned}
+	}
+	for _, t := range p.Captions {
+		cp.Captions = append(cp.Captions, &contentv1.CaptionTrack{Language: strings.ReplaceAll(t.Locale, "_", "-"),
+			Text: t.Text, Source: captionSources[t.Source]})
 	}
 	if p.IsPaidPartnership != nil {
 		cp.Labels = &contentv1.ContentLabels{PaidPartnership: p.IsPaidPartnership}

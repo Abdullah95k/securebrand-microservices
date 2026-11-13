@@ -17,6 +17,8 @@ const TimelineVersion = 1
 type PostBundle struct {
 	Post  *fbv1.Post
 	Media []*fbv1.Media
+	// Captions are the caption files the post's videos link to (D-056).
+	Captions []CaptionRef
 }
 
 // TimelineResult is one parsed timeline page.
@@ -214,6 +216,7 @@ func story(n *Node, all []*Node, pageID int64, baseURL string) (PostBundle, Repo
 	reel := strings.Contains(p.Permalink, "/reel/")
 	owner := Owner{Type: "post", ID: postID, PostID: postID, PageID: pageID, Reel: reel}
 	var media []*fbv1.Media
+	var captions []CaptionRef
 	photos, videos := 0, 0
 	seenMedia := map[string]bool{} // a copy of the story repeats its media
 	for _, x := range all {
@@ -231,6 +234,7 @@ func story(n *Node, all []*Node, pageID int64, baseURL string) (PostBundle, Repo
 			photos++
 		case "Video":
 			videos++
+			captions = append(captions, CaptionRefs(x.V)...)
 		}
 		for _, m := range MediaFromNode(x.V, x.Typename, owner) {
 			media = append(media, m)
@@ -263,7 +267,7 @@ func story(n *Node, all []*Node, pageID int64, baseURL string) (PostBundle, Repo
 	}
 
 	p.Type = postType(v, p, photos, videos, reel)
-	return PostBundle{Post: p, Media: media}, rep
+	return PostBundle{Post: p, Media: media, Captions: dedupeCaptions(captions)}, rep
 }
 
 // ufiFeedbackPaths are where a story's own feedback (reactions, counts)

@@ -160,11 +160,11 @@ func readPages(ctx context.Context, db *pgxpool.Pool, s schema, after cursor, si
 	return out, after, rows.Err()
 }
 
-func readPosts(ctx context.Context, db *pgxpool.Pool, after cursor, since time.Time, n int) ([]*fbv1.Post, cursor, error) {
+func readPosts(ctx context.Context, db *pgxpool.Pool, s schema, after cursor, since time.Time, n int) ([]*fbv1.Post, cursor, error) {
 	rows, err := db.Query(ctx, `SELECT post_created_at, post_id, page_id, story_id, permalink, post_type, text, text_ranges,
 		hashtags, links, shared_post_id, shared_post_url, is_pinned, is_paid_partnership, author_id, author_name,
 		reaction_count, reactions, reactions_complete, comment_count_total, share_count, view_count, feedback_id,
-		media_ids, status, last_seen_at
+		media_ids, status, last_seen_at, `+s.col("", "posts", "captions", "jsonb")+`, `+s.col("", "posts", "captions_state", "text")+`
 		FROM posts WHERE (post_created_at, post_id) > ($1, $2) AND last_seen_at >= $3
 		ORDER BY post_created_at, post_id LIMIT $4`, after.T, after.A, since, n)
 	if err != nil {
@@ -178,14 +178,15 @@ func readPosts(ctx context.Context, db *pgxpool.Pool, after cursor, since time.T
 			created, seen                                           time.Time
 			story, permalink, typ, text, sharedURL, aID, aName, fid *string
 			status                                                  string
-			ranges, links, byType                                   []byte
+			ranges, links, byType, captions                         []byte
+			captionsState                                           *string
 			total                                                   *int64
 			complete                                                *bool
 		)
 		if err := rows.Scan(&created, &p.PostId, &p.PageId, &story, &permalink, &typ, &text, &ranges,
 			&p.Hashtags, &links, &p.SharedPostId, &sharedURL, &p.IsPinned, &p.IsPaidPartnership, &aID, &aName,
 			&total, &byType, &complete, &p.CommentCount, &p.ShareCount, &p.ViewCount, &fid,
-			&p.MediaIds, &status, &seen); err != nil {
+			&p.MediaIds, &status, &seen, &captions, &captionsState); err != nil {
 			return nil, after, err
 		}
 		p.Obs, p.CreatedAt = obsAt(seen), timestamppb.New(created)
@@ -195,6 +196,8 @@ func readPosts(ctx context.Context, db *pgxpool.Pool, after cursor, since time.T
 		p.TextRanges = protoList(ranges, func() *fbv1.TextRange { return &fbv1.TextRange{} })
 		p.Links = protoList(links, func() *fbv1.LinkAttachment { return &fbv1.LinkAttachment{} })
 		p.Reactions = reactions(total, byType, complete)
+		p.Captions = protoList(captions, func() *fbv1.CaptionTrack { return &fbv1.CaptionTrack{} })
+		p.CaptionsState = str(captionsState)
 		p.Status = fbv1.PostStatus_POST_STATUS_VISIBLE
 		if status == "unavailable" {
 			p.Status = fbv1.PostStatus_POST_STATUS_UNAVAILABLE

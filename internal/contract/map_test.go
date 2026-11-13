@@ -244,3 +244,15 @@ func TestRefusedLogsNoValues(t *testing.T) {
 		t.Fatalf("an account's ID logged: %v", args)
 	}
 }
+
+func TestPostCaptions(t *testing.T) {
+	p := samplePost()
+	p.Captions = []*fbv1.CaptionTrack{{Locale: "ar_AR", Text: "Synthetic line", Source: "auto"}, {Locale: "en_US", Text: "Line", Source: "uploader"}}
+	evs := Post(p, meta)
+	check(t, evs)
+	c := evs[0].Msg.(*contentv1.Post).Captions
+	if len(c) != 2 || c[0].Language != "ar-AR" || c[0].Source != contentv1.CaptionSource_CAPTION_SOURCE_PLATFORM_ASR ||
+		c[1].Source != contentv1.CaptionSource_CAPTION_SOURCE_UPLOADER || c[0].Text != "Synthetic line" {
+		t.Fatalf("%+v", c)
+	}
+}

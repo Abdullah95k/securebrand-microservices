@@ -158,6 +158,23 @@ func TestEndToEnd(t *testing.T) {
 			len(cids[contract.TopicPost]), len(cids[contract.TopicComment]), len(cids[contract.TopicMetrics]),
 			cids[contract.TopicAccount][acct], len(truth.Posts), wantComments)
 	}
+	// The page's profile picture and cover go to analysis as page media (D-061).
+	if n := count(t, s, `SELECT count(*) FROM media WHERE page_id = $1 AND owner_type = 'page' AND kind IN ('profile_pic', 'cover')`, page.ID); n != 2 {
+		t.Fatalf("page pictures queued: %d, want 2", n)
+	}
+	// Captions (D-056): every post up to 7 days old whose video lists a
+	// caption file (fakefb: even video IDs) has them; none older is touched.
+	wantCaptions := count(t, s, `SELECT count(DISTINCT p.post_id) FROM posts p JOIN media m ON m.post_id = p.post_id AND m.kind IN ('video', 'reel')
+		WHERE p.page_id = $1 AND p.post_created_at > now() - interval '7 days' AND m.fb_media_id ~ '^[0-9]+$' AND m.fb_media_id::bigint % 2 = 0`, page.ID)
+	if got := count(t, s, `SELECT count(*) FROM posts WHERE page_id = $1 AND captions_state = 'fetched'
+		AND captions::text LIKE '%Synthetic caption line one%'`, page.ID); got < wantCaptions {
+		t.Fatalf("posts with captions: %d, want at least %d", got, wantCaptions)
+	}
+	if n := count(t, s, `SELECT count(*) FROM posts WHERE page_id = $1 AND captions_state IS NOT NULL
+		AND post_created_at < now() - interval '7 days 1 hour'`, page.ID); n != 0 {
+		t.Fatalf("captions read for %d posts older than 7 days", n)
+	}
+	t.Logf("captions: %d posts expected", wantCaptions)
 	// Its website and its accounts elsewhere (fakefb lists one of each, the
 	// Instagram one behind Facebook's link shim), stored and served.
 	if n := count(t, s, `SELECT count(*) FROM pages WHERE page_id = $1 AND websites = ARRAY[$2]
@@ -341,6 +358,15 @@ func TestEndToEnd(t *testing.T) {
 	if err := s.Fake.World.Mutate(page.ID, 1, 7); err != nil {
 		t.Fatal(err)
 	}
+	// Two new video posts: one with a caption file, one whose file is gone.
+	withCaptions, err := s.Fake.World.AddVideoPost(page.ID, time.Now().Add(-time.Minute), 9_000_002)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goneCaptions, err := s.Fake.World.AddVideoPost(page.ID, time.Now().Add(-2*time.Minute), 9_000_003)
+	if err != nil {
+		t.Fatal(err)
+	}
 	truth2, _ := s.Fake.World.TruthFor(page.ID, time.Time{})
 	want2 := 0
 	for _, p := range truth2.Posts {
@@ -356,6 +382,13 @@ func TestEndToEnd(t *testing.T) {
 	}
 	if got := count(t, s, `SELECT count(*) FROM comments WHERE page_id = $1`, page.ID); got != want2 {
 		t.Fatalf("comments after incremental = %d, want %d", got, want2)
+	}
+	if n := count(t, s, `SELECT count(*) FROM posts WHERE post_id = $1 AND captions_state = 'fetched'
+		AND captions::text LIKE '%Synthetic caption line one for video 9000002%' AND captions::text NOT LIKE '%<i>%'`, withCaptions.ID); n != 1 {
+		t.Fatal("a new video post's captions were not read")
+	}
+	if n := count(t, s, `SELECT count(*) FROM posts WHERE post_id = $1 AND captions_state = 'none' AND captions IS NULL`, goneCaptions.ID); n != 1 {
+		t.Fatal("a video whose caption file is gone is not recorded as none")
 	}
 	if j2.Counters["requests"] >= j.Counters["requests"] {
 		t.Fatalf("incremental used %d requests, full used %d: expected far fewer", j2.Counters["requests"], j.Counters["requests"])
