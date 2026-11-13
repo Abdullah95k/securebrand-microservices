@@ -131,12 +131,13 @@ func runScheduler(ctx context.Context, cfg *config.Config) error {
 	}
 	return run.Group(ctx, ops.Run, func(ctx context.Context) error {
 		return leader.Run(ctx, db, leaderLease, func(ctx context.Context) error {
-			// Leader-only gauges are read joined on fbs_scheduler_leader, so a
-			// former leader's last values do not linger in dashboards.
+			// A former leader clears the leader-only gauges, so a plain sum()
+			// counts the leader's alone; dashboards also join them on
+			// fbs_scheduler_leader.
 			metrics.SchedulerLeader.Set(1)
 			defer func() {
 				metrics.SchedulerLeader.Set(0)
-				metrics.ConsumerLag.Reset()
+				metrics.ResetLeaderGauges()
 			}()
 			return run.Group(ctx, append(leaderLoops,
 				func(ctx context.Context) error { return scheduler.Every(ctx, "maintenance", time.Hour, maint.Tick) },

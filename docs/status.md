@@ -33,7 +33,7 @@
   - **Video captions (D-056, the owner, 11 Nov):** the caption files videos up to 7 days old link to are read once and sent with the post. Merged ([#86](https://github.com/Abdullah95k/securebrand-microservices/pull/86)).
   - **Backfill:** merged ([#84](https://github.com/Abdullah95k/securebrand-microservices/pull/84)). `fbctl contract backfill` and its Job (`contractBackfill.runs`): production, then the pilot's copy. Runs only once analysis skips items it has already analysed.
   - Phase 2 targets 20 Nov.
-- **Discovery (D-054; the master's note of 13 Nov 12:00Z):** the mention checker checks pages first, then accounts mentioned in posts and comments, then comment authors (`fbs_mention_queue{rank}`), with 30% of page loads in production (was 20%). Why checks fail: `fbs_mention_check_failures_total{step,reason}`; people's profiles on the schedule: `fbs_scheduled_kinds`. In a PR. Keyword search stays off (not built) until a feasibility test is decided.
+- **Discovery (D-054; the master's note of 13 Nov 12:00Z):** the mention checker checks pages first, then accounts mentioned in posts and comments, then comment authors (`fbs_mention_queue{rank}`), with 30% of page loads in production (was 20%). Why checks fail: `fbs_mention_check_failures_total{step,reason}`; people's profiles on the schedule: `fbs_scheduled_kinds`. Merged ([#87](https://github.com/Abdullah95k/securebrand-microservices/pull/87)), live since 14:11Z. First read: 19 pages, about 31,700 mentioned accounts and about 558,000 comment authors wait. A former leader scheduler now clears its leader-only gauges, and the backfill Job no longer blocks Argo syncs after a new image: in a PR. Keyword search stays off (not built) until a feasibility test is decided.
 
 ## Production pin
 

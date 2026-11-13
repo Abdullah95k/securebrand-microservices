@@ -3,6 +3,11 @@ REQ-018: one Job per entry of contractBackfill.runs, each running
 `fbctl contract backfill --run <name>`. A run resumes where it stopped and a
 finished one exits at once, so a Job that is re-created sends nothing twice.
 Not a hook: it runs alongside the release, for hours, at its --rate.
+A Job's pod template can't be changed, so a new image would fail every later
+sync while a finished run is still listed (13 Nov). Argo CD deletes and
+re-creates the Job instead (Force + Replace): the new pod resumes the run, or
+exits at once when it is done. With plain Helm, remove a finished run from
+contractBackfill.runs before upgrading.
 */ -}}
 {{- $root := . -}}
 {{- range .Values.contractBackfill.runs }}
@@ -15,6 +20,8 @@ kind: Job
 metadata:
   name: {{ include "fbs.fullname" $root }}-contract-backfill-{{ .name }}
   labels: {{- include "fbs.labels" $root | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-options: Force=true,Replace=true
 spec:
   # suspend: true stops the run's pod; false again resumes it where it stopped.
   suspend: {{ .suspend | default false }}

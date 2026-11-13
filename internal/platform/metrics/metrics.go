@@ -35,6 +35,22 @@ func counter(name, help string) prometheus.Counter {
 	return c
 }
 
+// ResetLeaderGauges clears what only the leader scheduler publishes, when a
+// scheduler stops being the leader: a former leader's last values would
+// otherwise stay beside the new leader's, and a plain sum() would count the
+// list, the queue and the schedule twice (as after the database outage of
+// 13 Nov). Series go; plain gauges read 0, as on every non-leader.
+func ResetLeaderGauges() {
+	for _, v := range []*prometheus.GaugeVec{ConsumerLag, MentionAccounts, MentionQueue, ScheduledKinds,
+		ScheduleLag, PageTier, BudgetUsed, BudgetProjected, BudgetLimit} {
+		v.Reset()
+	}
+	for _, g := range []prometheus.Gauge{MentionChecksUsed, MentionEvents, AIMDCeiling, FleetRPS,
+		BudgetBackfillPaused, BudgetStretch, FleetBlockRate} {
+		g.Set(0)
+	}
+}
+
 func gauge(name, help string) prometheus.Gauge {
 	g := prometheus.NewGauge(prometheus.GaugeOpts{Namespace: "fbs", Name: name, Help: help})
 	Registry.MustRegister(g)
