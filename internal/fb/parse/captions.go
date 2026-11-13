@@ -105,3 +105,76 @@ func captionLabel(p string) string {
 	}
 	return "other"
 }
+
+// CaptionRef is a caption file a video links to (D-056).
+type CaptionRef struct {
+	Locale string // Facebook's locale, for example ar_AR; empty when not given
+	URL    string
+	// Source: "auto" (Facebook's speech-to-text), "uploader", or empty.
+	Source string
+}
+
+// CaptionRefs reads the caption files a video node links to, where the
+// caption probe found them: video_available_captions_locales[] (with each
+// track's locale) and captions_url, on the node itself or on its
+// video_grid_renderer.video.
+func CaptionRefs(n gjson.Result) []CaptionRef {
+	var out []CaptionRef
+	for _, v := range []gjson.Result{n, n.Get("video_grid_renderer.video")} {
+		if !v.IsObject() {
+			continue
+		}
+		v.Get("video_available_captions_locales").ForEach(func(_, l gjson.Result) bool {
+			if u := l.Get("captions_url").String(); strings.HasPrefix(u, "http") {
+				out = append(out, CaptionRef{Locale: l.Get("locale").String(), URL: u, Source: captionSource(l)})
+			}
+			return true
+		})
+		if u := v.Get("captions_url").String(); strings.HasPrefix(u, "http") {
+			out = append(out, CaptionRef{URL: u})
+		}
+	}
+	return out
+}
+
+// captionSource reads who made a track from the fields Facebook may give
+// for it; empty when none says.
+func captionSource(l gjson.Result) string {
+	for _, k := range []string{"localized_creation_method", "creation_method", "caption_source", "caption_type"} {
+		s := strings.ToLower(l.Get(k).String())
+		switch {
+		case s == "":
+			continue
+		case strings.Contains(s, "auto") || strings.Contains(s, "asr") || strings.Contains(s, "machine"):
+			return "auto"
+		case strings.Contains(s, "upload") || strings.Contains(s, "creator") || strings.Contains(s, "manual"):
+			return "uploader"
+		}
+	}
+	if l.Get("is_auto_generated").Bool() {
+		return "auto"
+	}
+	return ""
+}
+
+// dedupeCaptions keeps one ref per link, and one link-only ref only when no
+// track names its locale (captions_url is usually one of the tracks).
+func dedupeCaptions(refs []CaptionRef) []CaptionRef {
+	seen := map[string]bool{}
+	var out []CaptionRef
+	hasLocale := false
+	for _, r := range refs {
+		if r.Locale != "" {
+			hasLocale = true
+		}
+	}
+	for _, r := range refs {
+		key := strings.SplitN(r.URL, "?", 2)[0]
+		if seen[key] || (r.Locale == "" && hasLocale) {
+			continue
+		}
+		seen[key] = true
+		out = append(out, r)
+	}
+	return out
+}

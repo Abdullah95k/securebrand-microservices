@@ -271,6 +271,13 @@ Sends what is already stored: pages, posts, comments and their count history (`d
 5. **Pace:** `--rate` events a second, 500 by default. Lower it if the platform's writer or analysis falls behind.
 6. **Pause and resume:** `suspend: true` on the run's entry stops its pod; `suspend: false` resumes it where it stopped. Use it to keep a consumer's queue under its limit (analysis pauses all new comments when its comment queue reaches 1.5 million), then resume once it has drained. `--rate` can't change on a Job once it is created: to change it, pause the run, then add an entry with a new `name`, `run` set to the old entry's name, and the new rate (it resumes from the same position), and remove the old entry.
 
+## Video captions and page pictures
+
+* **Captions (D-056):** a post up to 7 days old whose video links to caption files has them read once, in the timeline read that finds it: one request each to Facebook's file servers, not GraphQL. They're stored on the post (`posts.captions`, `captions_state`) and sent with it on `content.post.v1` (`captions`).
+  * `fbs_fb_requests_total{query="video_captions"}` by class: `ok`, `none` (no file, empty, or refused; not tried again), `transport` or `error` (tried again on the next read).
+  * `fbs_caption_fields_total` and `fbs_video_nodes_total` show where caption links appear in the video data fbs reads.
+* **Page pictures (D-061):** each daily profile read of a monitored page (kind `page`) queues its profile picture and cover for analysis, as media kinds `profile_pic` and `cover` with owner `page`. A picture's media ID follows its file, so an unchanged picture is never downloaded again. People's profiles and comment authors are never downloaded.
+
 ## Media backlog / TTL expiries
 
 * `fbs_media_deleted_total{reason="ttl_expired"}` rising: the analysis service

@@ -170,6 +170,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.admin(w, r)
 	case strings.HasPrefix(r.URL.Path, "/media/"):
 		s.media(w, r)
+	case strings.HasPrefix(r.URL.Path, "/captions/"):
+		s.captions(w, r)
 	case strings.HasPrefix(r.URL.Path, "/rsrc.php/"):
 		s.bundle(w)
 	case r.URL.Path == "/api/graphql/" && r.Method == http.MethodPost:
@@ -563,6 +565,20 @@ func (s *Server) replies(rd *renderer, vars map[string]any) []byte {
 			"page_info": obj{"has_next_page": end < len(c.Replies), "end_cursor": cursor("r", c.ID, end)},
 		},
 	}}, "extensions": obj{"is_final": true}})
+}
+
+// captions serves a video's caption file (SRT), synthetic text only; a
+// name starting "gone_" is a file Facebook no longer has.
+func (s *Server) captions(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/captions/")
+	if strings.HasPrefix(name, "gone_") || !strings.HasSuffix(name, ".srt") {
+		http.NotFound(w, r)
+		return
+	}
+	id := strings.TrimSuffix(strings.TrimSuffix(name, ".srt"), "_ar")
+	w.Header().Set("Content-Type", "application/x-subrip")
+	_, _ = fmt.Fprintf(w, "1\n00:00:00,000 --> 00:00:02,500\nSynthetic caption line one for video %s\n\n"+
+		"2\n00:00:02,500 --> 00:00:05,000\n<i>Synthetic caption line two</i>\n", id)
 }
 
 func (s *Server) media(w http.ResponseWriter, r *http.Request) {

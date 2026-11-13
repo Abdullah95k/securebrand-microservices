@@ -760,3 +760,33 @@ func TestPageKindReachesCheckedAccounts(t *testing.T) {
 		t.Fatalf("person read: page %q, account %q", p, a)
 	}
 }
+
+// A post's captions are read once (D-056): a later read without them keeps
+// what is stored.
+func TestCaptionsAreKept(t *testing.T) {
+	db := testenv.Postgres(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	if _, err := store.EnsurePartitions(ctx, db, now, store.PartitionWindow{MonthsBack: 1, MonthsAhead: 1, DaysBack: 1, DaysAhead: 1}); err != nil {
+		t.Fatal(err)
+	}
+	w := &Writer{DB: db}
+	created := timestamppb.New(now.Add(-time.Hour))
+	with := &fbv1.Post{Obs: obs(now, "a"), PostId: 77, PageId: 7, CreatedAt: created, Type: fbv1.PostType_POST_TYPE_VIDEO,
+		Captions: []*fbv1.CaptionTrack{{Locale: "ar_AR", Text: "Synthetic line", Source: "auto"}}, CaptionsState: "fetched"}
+	if err := w.Posts(ctx, []*fbv1.Post{with}); err != nil {
+		t.Fatal(err)
+	}
+	without := &fbv1.Post{Obs: obs(now.Add(time.Minute), "b"), PostId: 77, PageId: 7, CreatedAt: created, Type: fbv1.PostType_POST_TYPE_VIDEO}
+	if err := w.Posts(ctx, []*fbv1.Post{without}); err != nil {
+		t.Fatal(err)
+	}
+	var state string
+	var text string
+	if err := db.QueryRow(ctx, `SELECT captions_state, captions->0->>'text' FROM posts WHERE post_id = 77`).Scan(&state, &text); err != nil {
+		t.Fatal(err)
+	}
+	if state != "fetched" || text != "Synthetic line" {
+		t.Fatalf("after a read without captions: %q %q", state, text)
+	}
+}

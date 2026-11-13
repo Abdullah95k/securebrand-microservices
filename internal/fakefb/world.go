@@ -621,6 +621,22 @@ func (w *World) AddMentionPost(pageID int64, text string, at time.Time, tags []T
 	return post, nil
 }
 
+// AddVideoPost publishes a video post on page pageID whose video has the
+// given ID (fakefb lists a caption file for even IDs, and a gone one for odd
+// multiples of 3).
+func (w *World) AddVideoPost(pageID int64, at time.Time, videoID int64) (*Post, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	p, ok := w.pages[pageID]
+	if !ok {
+		return nil, fmt.Errorf("fakefb: no page %d", pageID)
+	}
+	post := w.addPostLocked(p, at, false)
+	post.Type, post.Text, post.Tags, post.LinkURL = "video", "A synthetic video post", nil, ""
+	post.Media = []*MediaItem{{ID: videoID, Kind: "video", Width: 1280, Height: 720, Duration: 12}}
+	return post, nil
+}
+
 // AddMentionComment adds a top-level comment by author on post postID,
 // tagging tags.
 func (w *World) AddMentionComment(postID int64, author Author, text string, tags []Tag) (*Comment, error) {
