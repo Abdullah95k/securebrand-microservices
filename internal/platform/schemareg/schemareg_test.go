@@ -3,14 +3,18 @@ package schemareg
 import (
 	"context"
 	"fmt"
+	"io"
 	"io/fs"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"testing/fstest"
 
@@ -223,6 +227,26 @@ func TestRetriesDroppedConnection(t *testing.T) {
 	subjects, err := c.Subjects(context.Background())
 	if err != nil || len(subjects) != 1 || calls.Load() != 2 {
 		t.Fatalf("%v %v after %d calls", subjects, err, calls.Load())
+	}
+}
+
+// A kept-alive connection closed while a request was being written (which
+// net/http does not replay itself) is retried; other errors are not.
+func TestDropped(t *testing.T) {
+	for _, c := range []struct {
+		err  error
+		want bool
+	}{
+		{nil, false},
+		{&url.Error{Op: "Post", URL: "http://r", Err: &net.OpError{Op: "write", Net: "tcp", Err: net.ErrClosed}}, true},
+		{&url.Error{Op: "Post", URL: "http://r", Err: &net.OpError{Op: "write", Net: "tcp", Err: syscall.EPIPE}}, true},
+		{&url.Error{Op: "Get", URL: "http://r", Err: io.EOF}, true},
+		{&url.Error{Op: "Get", URL: "http://r", Err: context.DeadlineExceeded}, false},
+		{&Error{Status: 409, Message: "incompatible"}, false},
+	} {
+		if got := dropped(c.err); got != c.want {
+			t.Errorf("dropped(%v) = %v, want %v", c.err, got, c.want)
+		}
 	}
 }
 
