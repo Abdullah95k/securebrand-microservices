@@ -54,6 +54,12 @@ const (
 	failTransport    = "transport"
 )
 
+// Steps of a check, for fbs_mention_check_failures_total.
+const (
+	stepPage     = "page"
+	stepTimeline = "timeline"
+)
+
 func (s *CheckStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	d := s.D
 	sc := t.GetCheck()
@@ -134,7 +140,7 @@ func (s *CheckStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	u, err := id.Base.Parse(task.RefPath(ref))
 	if err != nil {
 		unclaim()
-		return s.fail(ctx, t, ref, "bad_reference", false, c)
+		return s.fail(ctx, t, ref, stepPage, "bad_reference", false, c)
 	}
 	pl, err := d.Loader.Load(ctx, id, u.String())
 	if errors.Is(err, session.ErrPaced) {
@@ -145,19 +151,19 @@ func (s *CheckStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 	d.observeLoad(pl, err, t.Lane)
 	countPageLoad(c, pl, err)
 	if err != nil {
-		return s.fail(ctx, t, ref, failTransport, true, c)
+		return s.fail(ctx, t, ref, stepPage, failTransport, true, c)
 	}
 	c["wire_bytes"] += pl.Bytes
 	v, failure := judgeLoad(pl, acc)
 	switch {
 	case failure != "":
-		return s.fail(ctx, t, ref, failure, true, c)
+		return s.fail(ctx, t, ref, stepPage, failure, true, c)
 	case v.Status != "":
 		return s.record(ctx, t, ref, v, c)
 	}
 	page, rep := parse.Page(pl.HTML, 0, mentions.RefID(ref))
 	if !rep.OK() || page == nil {
-		return s.fail(ctx, t, ref, failDrift, true, c)
+		return s.fail(ctx, t, ref, stepPage, failDrift, true, c)
 	}
 	v.ID = page.PageId
 	var signal string
@@ -167,7 +173,7 @@ func (s *CheckStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 		return s.forget(ctx, t, ref, v.ID, c)
 	}
 	if listed, err := mentions.ListedByID(ctx, d.DB, v.ID); err != nil {
-		return s.fail(ctx, t, ref, "database", true, c)
+		return s.fail(ctx, t, ref, stepPage, "database", true, c)
 	} else if listed != "" {
 		metrics.MentionChecks.WithLabelValues("listed").Inc()
 		if err := mentions.MarkListed(ctx, d.DB, ref, listed); err != nil {
@@ -181,16 +187,16 @@ func (s *CheckStage) Run(ctx context.Context, t *taskv1.Task) Outcome {
 		PageID: v.ID, Lane: topics.LaneName(t.Lane), Referer: u.String()})
 	c["requests"]++
 	if err != nil {
-		return s.fail(ctx, t, ref, failTransport, true, c)
+		return s.fail(ctx, t, ref, stepTimeline, failTransport, true, c)
 	}
 	c["wire_bytes"] += resp.BytesIn + resp.BytesOut
 	if resp.Class != detect.OK {
-		return s.fail(ctx, t, ref, resp.Class.String(), true, c)
+		return s.fail(ctx, t, ref, stepTimeline, resp.Class.String(), true, c)
 	}
 	tl, trep := parse.Timeline(resp.Parts, v.ID, id.Base.String())
 	d.GQL.Parsed(resp, trep.OK())
 	if !trep.OK() {
-		return s.fail(ctx, t, ref, failDrift, true, c)
+		return s.fail(ctx, t, ref, stepTimeline, failDrift, true, c)
 	}
 	judgeTimeline(&v, tl)
 	return s.record(ctx, t, ref, v, c)
@@ -265,10 +271,12 @@ func (s *CheckStage) forget(ctx context.Context, t *taskv1.Task, ref string, id 
 	return done(c)
 }
 
-// fail records a failed check: nothing about the account. sent says
-// whether it spent a page load.
-func (s *CheckStage) fail(ctx context.Context, t *taskv1.Task, ref, reason string, sent bool, c map[string]int64) Outcome {
+// fail records a failed check: nothing about the account, which is
+// checked again after the retry backoff. step is what failed (stepPage,
+// stepTimeline); sent says whether it spent a page load.
+func (s *CheckStage) fail(ctx context.Context, t *taskv1.Task, ref, step, reason string, sent bool, c map[string]int64) Outcome {
 	metrics.MentionChecks.WithLabelValues("failed").Inc()
+	metrics.MentionCheckFailures.WithLabelValues(step, reason).Inc()
 	if err := mentions.RecordFailed(ctx, s.D.DB, ref, reason, sent, mentions.Retry{Backoff: s.Cfg.RetryBackoff,
 		MaxBackoff: s.Cfg.RetryMaxBackoff, MaxFailures: s.Cfg.MaxFailures, Park: s.Cfg.RecheckAfter}); err != nil {
 		return retry(t, "", "30s", err.Error(), c)

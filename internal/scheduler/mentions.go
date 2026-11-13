@@ -233,20 +233,56 @@ func allowedBy(now, dayStart time.Time, limit int) int {
 	return min(n, limit)
 }
 
-// Gauges publishes the list by status, the queue and the events waiting.
+// Gauges publishes the list by status, the queue by rank and the events
+// waiting.
 func (m *Mentions) Gauges(ctx context.Context) error {
-	counts, queue, err := mentions.Counts(ctx, m.DB)
+	counts, err := mentions.Counts(ctx, m.DB)
 	if err != nil {
 		return err
 	}
 	for s, n := range counts {
 		metrics.MentionAccounts.WithLabelValues(s).Set(float64(n))
 	}
-	metrics.MentionQueue.Set(float64(queue))
+	queue, err := mentions.QueueByRank(ctx, m.DB)
+	if err != nil {
+		return err
+	}
+	for r, n := range queue {
+		metrics.MentionQueue.WithLabelValues(r).Set(float64(n))
+	}
 	var pending int64
 	if err := m.DB.QueryRow(ctx, `SELECT count(*) FROM mention_events`).Scan(&pending); err != nil {
 		return err
 	}
 	metrics.MentionEvents.Set(float64(pending))
+	return m.scheduledKinds(ctx)
+}
+
+// scheduledKinds publishes the enabled scheduled pages by source and kind:
+// how many people's profiles the mentions flow added, for one.
+func (m *Mentions) scheduledKinds(ctx context.Context) error {
+	rows, err := m.DB.Query(ctx, `SELECT s.source, coalesce(p.kind, 'unknown'), count(*)
+		FROM page_schedule s LEFT JOIN pages p ON p.page_id = s.page_id WHERE s.enabled GROUP BY 1, 2`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type key struct{ source, kind string }
+	seen := map[key]int64{}
+	for rows.Next() {
+		var k key
+		var n int64
+		if err := rows.Scan(&k.source, &k.kind, &n); err != nil {
+			return err
+		}
+		seen[k] = n
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	metrics.ScheduledKinds.Reset() // a pair no longer present reads absent, not its last count
+	for k, n := range seen {
+		metrics.ScheduledKinds.WithLabelValues(k.source, k.kind).Set(float64(n))
+	}
 	return nil
 }

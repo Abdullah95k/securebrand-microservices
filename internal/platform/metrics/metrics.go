@@ -95,12 +95,21 @@ var (
 	// unavailable; listed: on the main list already; failed: a wall, rate
 	// limit or proxy error; suppressed: erased; capped: the daily cap came
 	// first); accounts added; the days each cap (checks, adds) was reached.
-	MentionsFound     = counterVec("mentions_found_total", "Mentions recorded from new posts and comments, by how they mention.", "via")
-	MentionChecks     = counterVec("mention_checks_total", "Account checks by outcome.", "outcome")
-	MentionsAdded     = counterVec("mention_pages_added_total", "Pages and profiles the mentions flow added to the schedule.", "kind")
-	MentionCapHits    = counterVec("mention_cap_hits_total", "Times a mentions daily cap (checks, adds) was reached.", "cap")
-	MentionAccounts   = gaugeVec("mention_accounts", "Checked-accounts list by status (leader scheduler).", "status")
-	MentionQueue      = gauge("mention_queue", "Accounts waiting for a check (leader scheduler).")
+	MentionsFound   = counterVec("mentions_found_total", "Mentions recorded from new posts and comments, by how they mention.", "via")
+	MentionChecks   = counterVec("mention_checks_total", "Account checks by outcome.", "outcome")
+	MentionsAdded   = counterVec("mention_pages_added_total", "Pages and profiles the mentions flow added to the schedule.", "kind")
+	MentionCapHits  = counterVec("mention_cap_hits_total", "Times a mentions daily cap (checks, adds) was reached.", "cap")
+	MentionAccounts = gaugeVec("mention_accounts", "Checked-accounts list by status (leader scheduler).", "status")
+	MentionQueue    = gaugeVec("mention_queue", "Accounts waiting for a check, by rank: page, mentioned, author (leader scheduler).", "rank")
+	// MentionCheckFailures: why checks fail, by the step that failed (page:
+	// the account's page load; timeline: its timeline request) and reason
+	// (a detect class, transport, drift, names_nothing, bad_reference,
+	// database).
+	MentionCheckFailures = counterVec("mention_check_failures_total", "Failed account checks by step and reason.", "step", "reason")
+	// ScheduledKinds: enabled pages on the schedule by how they came (seed,
+	// mention, ...) and what their own page reads as (page, profile: a
+	// person, unknown).
+	ScheduledKinds    = gaugeVec("scheduled_kinds", "Enabled scheduled pages by source and kind (leader scheduler).", "source", "kind")
 	MentionChecksUsed = gauge("mention_checks_used", "Checks started today, against mentions.max_checks_per_day (leader scheduler).")
 	MentionEvents     = gauge("mention_events_pending", "Mention events the persister wrote and the leader has not counted yet.")
 

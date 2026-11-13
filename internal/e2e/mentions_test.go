@@ -9,10 +9,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/abdullah95k/securebrand-microservices/internal/api"
 	"github.com/abdullah95k/securebrand-microservices/internal/config"
 	"github.com/abdullah95k/securebrand-microservices/internal/fakefb"
 	"github.com/abdullah95k/securebrand-microservices/internal/mentions"
+	"github.com/abdullah95k/securebrand-microservices/internal/platform/metrics"
 )
 
 type accountView struct {
@@ -135,6 +138,9 @@ func TestMentionsCheckAccountsAndAddPublicOnes(t *testing.T) {
 	if r.Status != mentions.StatusUnchecked || r.CheckedAt != nil || !r.InQueue || r.Failures != 1 || r.LastError == nil ||
 		*r.LastError != "names_nothing" || r.Checks != 1 {
 		t.Fatalf("an unconfirmed restriction was recorded as a check: %+v", r)
+	}
+	if n := testutil.ToFloat64(metrics.MentionCheckFailures.WithLabelValues("page", "names_nothing")); n < 1 {
+		t.Fatalf("the failed check isn't counted by step and reason: %v", n)
 	}
 	time.Sleep(1100 * time.Millisecond) // retry_backoff
 	queueAndWait("the restriction's second check")

@@ -149,9 +149,15 @@ type Due struct {
 	QueuedAt time.Time
 }
 
-// Pick returns up to n accounts due for a check, highest priority first,
-// rechecks asked for through the API before all. Accounts now on the main
-// list are marked listed instead, and not returned.
+// Ranks of the check queue (mention_rank): accounts typed Page first, then
+// those mentioned in a post or comment, then those only seen as a
+// comment's author; by priority within each.
+var Ranks = []string{"page", "mentioned", "author"}
+
+// Pick returns up to n accounts due for a check, rechecks asked for
+// through the API before all, then by rank (Ranks), highest priority first
+// within a rank. Accounts now on the main list are marked listed instead,
+// and not returned.
 func Pick(ctx context.Context, db DB, n int) ([]Due, error) {
 	if n <= 0 {
 		return nil, nil
@@ -162,9 +168,9 @@ func Pick(ctx context.Context, db DB, n int) ([]Due, error) {
 				WHERE in_queue AND queued_at IS NULL AND requested_at IS NOT NULL AND (retry_at IS NULL OR retry_at <= now())
 				ORDER BY requested_at LIMIT $1)
 			UNION ALL
-			(SELECT account_ref, 1, priority FROM checked_accounts
+			(SELECT account_ref, 1 + mention_rank(kind, vias), priority FROM checked_accounts
 				WHERE in_queue AND queued_at IS NULL AND (retry_at IS NULL OR retry_at <= now())
-				ORDER BY priority DESC LIMIT $1)
+				ORDER BY mention_rank(kind, vias), priority DESC LIMIT $1)
 		), picked AS (
 			SELECT DISTINCT ON (account_ref) account_ref, ord, p FROM due ORDER BY account_ref, ord
 		)

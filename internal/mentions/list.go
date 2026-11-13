@@ -235,13 +235,13 @@ func PagesOf(ctx context.Context, db DB, ref string, limit int) ([]PageCount, er
 	})
 }
 
-// Counts returns the accounts per status, and how many wait in the check
-// queue.
-func Counts(ctx context.Context, db DB) (map[string]int64, int64, error) {
+// Counts returns the accounts per status.
+func Counts(ctx context.Context, db DB) (map[string]int64, error) {
 	rows, err := db.Query(ctx, `SELECT status, count(*) FROM checked_accounts GROUP BY status`)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
+	defer rows.Close()
 	out := map[string]int64{}
 	for _, s := range []string{StatusUnchecked, StatusListed, StatusPublic, StatusPrivate, StatusUnavailable} {
 		out[s] = 0
@@ -250,18 +250,36 @@ func Counts(ctx context.Context, db DB) (map[string]int64, int64, error) {
 		var s string
 		var n int64
 		if err := rows.Scan(&s, &n); err != nil {
-			rows.Close()
-			return nil, 0, err
+			return nil, err
 		}
 		out[s] = n
 	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, 0, err
+	return out, rows.Err()
+}
+
+// QueueByRank counts the accounts waiting for a check, by rank (Ranks).
+func QueueByRank(ctx context.Context, db DB) (map[string]int64, error) {
+	rows, err := db.Query(ctx, `SELECT mention_rank(kind, vias), count(*) FROM checked_accounts
+		WHERE in_queue AND queued_at IS NULL GROUP BY 1`)
+	if err != nil {
+		return nil, err
 	}
-	var queue int64
-	err = db.QueryRow(ctx, `SELECT count(*) FROM checked_accounts WHERE in_queue AND queued_at IS NULL`).Scan(&queue)
-	return out, queue, err
+	defer rows.Close()
+	out := map[string]int64{}
+	for _, r := range Ranks {
+		out[r] = 0
+	}
+	for rows.Next() {
+		var rank int
+		var n int64
+		if err := rows.Scan(&rank, &n); err != nil {
+			return nil, err
+		}
+		if rank >= 0 && rank < len(Ranks) {
+			out[Ranks[rank]] = n
+		}
+	}
+	return out, rows.Err()
 }
 
 // Expire deletes up to 5000 accounts nobody mentioned or checked for days,
