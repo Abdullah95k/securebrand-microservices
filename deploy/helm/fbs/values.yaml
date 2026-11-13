@@ -141,6 +141,9 @@ hooks:
 # A run resumes where it stopped; a finished one exits at once. Remove an
 # entry once its run is done (docs/runbooks/operations.md).
 contractBackfill:
+  # List a run while it runs. Argo CD re-creates a listed Job when the image
+  # changes (a finished run exits at once); with plain Helm, remove a
+  # finished run before upgrading (a Job's template can't change).
   runs: []
   # - name: production
   #   args: ["--rate", "500"]
