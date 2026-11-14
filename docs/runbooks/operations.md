@@ -350,7 +350,7 @@ do. Inspect the DLQ and `GET /v1/jobs/{id}` counters.
 
 ## Schedule and tiers
 
-**A new page's first run (D-068):** a page planned for the first time (added by mentions, discovery, or the API without a backfill) reads only the last `scheduler.first_run_window` (168h) on the scheduled lane (p1); its history, to the page's max age, is queued as a backfill on p2 (`fbs_first_run_history_total`). Every page's fresh posts and comments come before any history; nothing is dropped, and a budget pause of p2 holds the history, not the fresh run. `first_run_window: 0` reads the history on the first p1 run, as before 14 Nov.
+**A new page's first run (D-068, D-076):** a page's first scheduled run reads only the last `scheduler.first_run_window` (168h) on the scheduled lane (p1), and its history runs as a full backfill on p2, behind every page's fresh posts and comments. A page registered through the API (`fbs-pages`) or seeded comes with that backfill; one added by mentions or discovery gets it from the planner, with the same limits (`limits` with `backfill_video_policy`, the page's options and max age; `fbs_first_run_history_total`), so discovered and listed pages are treated alike (D-076). A backfill still running never holds a page's scheduled runs back. Nothing is dropped, and a budget pause of p2 holds the history, not the fresh run. `first_run_window: 0` reads the history on the first p1 run, as before 14 Nov.
 
 **Registering pages in bulk:** `fbctl pages import --api URL --key KEY FILE`, with a file of page URLs, vanity names or ids (one per line, or CSV with a `page` column).
 - It registers 5 pages a second by default (`--rps`) and retries rate limits and server errors.

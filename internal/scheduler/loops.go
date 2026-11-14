@@ -12,7 +12,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	fbv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fb/v1"
@@ -136,10 +135,14 @@ func (p *Planner) Tick(ctx context.Context) error {
 		return nil
 	}
 	for _, d := range list {
+		// The page's last job: a scheduled run still going skips this slot;
+		// a backfill doesn't (its history must not hold back fresh posts,
+		// D-068), and the run after it is the page's first scheduled one.
+		lastKind := ""
 		if d.lastJob != nil {
 			var st string
-			if err := p.DB.QueryRow(ctx, `SELECT status FROM jobs WHERE job_id = $1`, *d.lastJob).Scan(&st); err == nil &&
-				(st == "running" || st == "finalizing" || st == "cancelling") {
+			if err := p.DB.QueryRow(ctx, `SELECT status, kind FROM jobs WHERE job_id = $1`, *d.lastJob).Scan(&st, &lastKind); err == nil &&
+				lastKind != dispatch.KindBackfill && (st == "running" || st == "finalizing" || st == "cancelling") {
 				continue // previous run still going; skip this slot
 			}
 		}
@@ -151,12 +154,20 @@ func (p *Planner) Tick(ctx context.Context) error {
 		if d.maxPosts != nil {
 			lim.MaxPosts = *d.maxPosts
 		}
-		// A page never planned before (D-068): its fresh posts now on p1,
-		// its history behind every page's fresh content on p2.
+		// A page's first scheduled run (D-068) reads only its fresh posts on
+		// p1; its history runs behind every page's fresh content on p2. A
+		// page that came with its backfill (registered through the API, or
+		// seeded) has it already; one added by mentions or discovery gets
+		// the same backfill here, with the same limits (D-076).
 		var history *taskv1.Limits
-		if w := p.Cfg.Scheduler.FirstRunWindow; d.lastJob == nil && w > 0 &&
+		first := d.lastJob == nil || lastKind == dispatch.KindBackfill
+		if w := p.Cfg.Scheduler.FirstRunWindow; first && w > 0 &&
 			(lim.MaxAgeSeconds == 0 || lim.MaxAgeSeconds > int64(w.Seconds())) {
-			history = proto.Clone(lim).(*taskv1.Limits)
+			if d.lastJob == nil {
+				history = task.DefaultLimits(p.Cfg.Limits, true)
+				applyOptions(history, d.options)
+				history.MaxAgeSeconds, history.MaxPosts = lim.MaxAgeSeconds, lim.MaxPosts
+			}
 			lim.MaxAgeSeconds = int64(w.Seconds())
 		}
 		var posts []dispatch.PostRoot
