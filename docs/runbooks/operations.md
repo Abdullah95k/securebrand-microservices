@@ -350,6 +350,8 @@ do. Inspect the DLQ and `GET /v1/jobs/{id}` counters.
 
 ## Schedule and tiers
 
+**A new page's first run (D-068):** a page planned for the first time (added by mentions, discovery, or the API without a backfill) reads only the last `scheduler.first_run_window` (168h) on the scheduled lane (p1); its history, to the page's max age, is queued as a backfill on p2 (`fbs_first_run_history_total`). Every page's fresh posts and comments come before any history; nothing is dropped, and a budget pause of p2 holds the history, not the fresh run. `first_run_window: 0` reads the history on the first p1 run, as before 14 Nov.
+
 **Registering pages in bulk:** `fbctl pages import --api URL --key KEY FILE`, with a file of page URLs, vanity names or ids (one per line, or CSV with a `page` column).
 - It registers 5 pages a second by default (`--rps`) and retries rate limits and server errors.
 - Each new page gets its backfill in the low-priority lane.
@@ -475,7 +477,7 @@ The mentions flow finds every account (page or profile) our posts and comments m
    - A check task not finished after 6 hours is taken for lost and queued again.
 4. **Checking** (the crawler's `check` stage, `--stages ...,check`; Helm `crawler-check`; the pilot's crawler runs it). Logged out, through the identity pool and the exit's page-load gate (`fb.proxy.page_loads`), like any page load, and counted in the traffic budget and AIMD:
    - one page load of the account, then (when it names an account) one timeline request. The check takes an identity whose exit can load a page now (or starts one on such an exit); when none can, it waits up to 30s, then retries later without spending a check;
-   - **public:** logged-out visitors see its posts, or it is a page → added to the main list (`source: mention`, `discovered_via`: why), crawled from the next planner run like a discovered page (scheduled, incremental, no backfill);
+   - **public:** logged-out visitors see its posts, or it is a page → added to the main list (`source: mention`, `discovered_via`: why), crawled from the next planner run like a discovered page (scheduled, incremental: its first run reads the last `scheduler.first_run_window`, 7 days, and its history runs as a backfill on p2, D-068);
    - **private:** it exists but shows no posts logged out (`no_public_posts`, `timeline_hidden`), or its page names nothing twice in a row (`restricted`: restricted to logged-in viewers, or removed);
    - **unavailable:** not found (`not_found`);
    - **failed:** a login wall, a rate limit, a checkpoint, a proxy error, an answer the parsers no longer read, or a first "names nothing" (it may be this exit's country): this says nothing about the account. It stays unchecked and is retried after `retry_backoff` (1h), doubling to `retry_max_backoff` (7 days). After `max_failures` (10) failures in a row it is parked, still unchecked (no result recorded), until a mention after `recheck_after` or a recheck asked for brings it back: an account that walls every time costs no page load every week forever. Walls are never worked around: the gate pauses the exit as for any walled page load.

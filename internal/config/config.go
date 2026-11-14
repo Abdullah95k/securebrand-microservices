@@ -451,6 +451,11 @@ type Scheduler struct {
 	ReaperMaxAge         time.Duration `koanf:"reaper_max_age"`
 	PartitionMonthsAhead int           `koanf:"partition_months_ahead"`
 	IncrementalOverlap   time.Duration `koanf:"incremental_overlap"`
+	// FirstRunWindow: a page's first planned run reads only this far back
+	// on the scheduled lane (p1), and its history (to the page's max age)
+	// runs as a backfill on p2, so fresh content is never delayed by it
+	// (D-068). 0 reads the history on the first p1 run, as before.
+	FirstRunWindow time.Duration `koanf:"first_run_window"`
 	// Adaptive tiers: pages registered without an explicit interval move
 	// between Tiers (highest MinPostsPerDay first) by their posting rate
 	// over RateWindow; pages without a post for DormantAfter use

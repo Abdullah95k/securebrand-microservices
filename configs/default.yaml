@@ -272,6 +272,12 @@ scheduler:
   reaper_max_age: 24h
   partition_months_ahead: 3
   incremental_overlap: 24h
+  # A page's first planned run (a page just added: by mentions, discovery
+  # or the API without a backfill) reads only this far back on the
+  # scheduled lane; its history, to the page's max age, runs as a backfill
+  # on p2, behind every page's fresh posts and comments (D-068). Nothing is
+  # dropped. 0: the first run reads the history itself, on p1.
+  first_run_window: 168h
   # Adaptive tiers for pages registered without schedule.interval_hours:
   # after each job the page's posting rate over rate_window picks the first
   # tier whose min_posts_per_day it reaches. No post for dormant_after puts
