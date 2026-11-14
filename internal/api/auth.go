@@ -8,12 +8,14 @@ import (
 	"encoding/base64"
 	"errors"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/go-redis/redis_rate/v10"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -58,6 +60,81 @@ func GenerateKey() (key, prefix string, hash []byte) {
 	prefix, secret := strings.ToLower(strings.NewReplacer("-", "a", "_", "b").Replace(s[:8])), s[8:]
 	h := sha256.Sum256([]byte(secret))
 	return "fbs_" + prefix + "_" + secret, prefix, h[:]
+}
+
+// keyPrefixRe and keySecretRe are an importable key's two parts
+// (fbs_<prefix>_<secret>): generated here, or by the platform inside the
+// cluster in the same shape.
+var (
+	keyPrefixRe = regexp.MustCompile(`^[a-z0-9]{8}$`)
+	keySecretRe = regexp.MustCompile(`^[A-Za-z0-9_-]{32,128}$`)
+)
+
+// ParseKey splits a key into its prefix and secret, false when it isn't
+// fbs_<8 lowercase letters or digits>_<32 to 128 URL-safe characters>.
+func ParseKey(key string) (prefix, secret string, ok bool) {
+	rest, found := strings.CutPrefix(strings.TrimSpace(key), "fbs_")
+	if !found {
+		return "", "", false
+	}
+	prefix, secret, found = strings.Cut(rest, "_")
+	if !found || !keyPrefixRe.MatchString(prefix) || !keySecretRe.MatchString(secret) {
+		return "", "", false
+	}
+	return prefix, secret, true
+}
+
+// Results of ImportClient.
+const (
+	ImportCreated   = "created"
+	ImportUpdated   = "updated"   // the same key: name, scopes or rate brought to what was asked
+	ImportUnchanged = "unchanged" // the same key, as asked
+	ImportRevoked   = "revoked"   // the same key, revoked: it stays revoked
+)
+
+// ErrKeyClash is a key whose prefix belongs to another key.
+var ErrKeyClash = errors.New("api: a different key already has this prefix")
+
+// ImportClient stores a client for a key made elsewhere (a Secret written
+// inside the cluster), keeping only its hash, as CreateClient does. Run
+// again with the same key it changes nothing, or brings the name, scopes
+// and rate to what is asked; a revoked key is never revived.
+func ImportClient(ctx context.Context, db *pgxpool.Pool, name string, scopes []string, ratePerMinute int, key string) (string, error) {
+	prefix, secret, ok := ParseKey(key)
+	if !ok {
+		return "", errors.New("api: not a key of the form fbs_<8 lowercase letters or digits>_<32 to 128 URL-safe characters>")
+	}
+	h := sha256.Sum256([]byte(secret))
+	var rate *int
+	if ratePerMinute > 0 {
+		rate = &ratePerMinute
+	}
+	var hash []byte
+	var revoked bool
+	err := db.QueryRow(ctx, `SELECT key_hash, revoked_at IS NOT NULL FROM api_clients WHERE key_prefix = $1`, prefix).Scan(&hash, &revoked)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		id, _ := uuid.NewV7()
+		_, err := db.Exec(ctx, `INSERT INTO api_clients (id, name, key_prefix, key_hash, scopes, rate_per_minute)
+			VALUES ($1,$2,$3,$4,$5,$6)`, id, name, prefix, h[:], scopes, rate)
+		return ImportCreated, err
+	case err != nil:
+		return "", err
+	case subtle.ConstantTimeCompare(hash, h[:]) != 1:
+		return "", ErrKeyClash
+	case revoked:
+		return ImportRevoked, nil
+	}
+	tag, err := db.Exec(ctx, `UPDATE api_clients SET name = $2, scopes = $3, rate_per_minute = $4
+		WHERE key_prefix = $1 AND (name, scopes, rate_per_minute) IS DISTINCT FROM ($2, $3::text[], $4::int)`,
+		prefix, name, scopes, rate)
+	if err != nil {
+		return "", err
+	}
+	if tag.RowsAffected() > 0 {
+		return ImportUpdated, nil
+	}
+	return ImportUnchanged, nil
 }
 
 // CreateClient stores a new API client and returns its key.

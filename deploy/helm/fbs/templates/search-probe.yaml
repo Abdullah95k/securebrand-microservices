@@ -1,0 +1,46 @@
+{{- /*
+D-065: the keyword-search feasibility test, once, when searchProbe.run is
+true: `fbs-spike search-probe` loads Facebook's search pages for the
+keywords on one identity of one exit, one page load per interval, and stops
+at the first wall, rate limit or checkpoint. Its log is a JSON report of
+counts (never the keywords). Set run back to false afterwards.
+*/ -}}
+{{- with .Values.searchProbe }}
+{{- if .run }}
+{{- $root := $ }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "fbs.fullname" $root }}-search-probe
+  labels: {{- include "fbs.labels" $root | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-options: Force=true,Replace=true
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 604800
+  template:
+    metadata:
+      # The fbs pods' labels, so the egress policies apply (proxy exits:
+      # networkPolicy.egress.proxyComponents).
+      labels: {{- include "fbs.selector" (dict "root" $root "name" "search-probe") | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      securityContext: {{- toYaml $root.Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: search-probe
+          image: "{{ $root.Values.image.repository }}:{{ $root.Values.image.tag | default $root.Chart.AppVersion }}"
+          command: ["/usr/local/bin/fbs-spike"]
+          args: ["search-probe", "--tier", {{ .tier | quote }}, "--interval", {{ .interval | quote }}, "--json"]
+          {{- $pod := dict "root" $root "name" "search-probe" }}
+          env:
+            {{- include "fbs.env" $pod | nindent 12 }}
+            - name: FBS_SEARCH_KEYWORDS
+              value: {{ join "," .keywords | quote }}
+          {{- include "fbs.envFrom" $root | nindent 10 }}
+          securityContext: {{- toYaml $root.Values.securityContext | nindent 12 }}
+          resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 256Mi}}
+          volumeMounts: {{- include "fbs.volumeMounts" $pod | nindent 12 }}
+      volumes: {{- include "fbs.hookVolumes" $pod | nindent 8 }}
+{{- end }}
+{{- end }}

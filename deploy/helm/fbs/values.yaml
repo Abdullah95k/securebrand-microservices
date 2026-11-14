@@ -62,7 +62,7 @@ secretEnv:
 secretFiles:
   existingSecret: fbs-proxies
   key: proxies.yaml
-  components: [crawler-page, crawler-post, crawler-thread, crawler-retry, crawler-search, crawler-check, registry-sync]
+  components: [crawler-page, crawler-post, crawler-thread, crawler-retry, crawler-search, crawler-check, registry-sync, search-probe]
 # Existing Secret with certificate files (CA, client certificate and key)
 # for config.kafka.tls / config.redis.tls, mounted at mountPath: point
 # ca_file, cert_file and key_file at e.g. /etc/fbs-tls/ca.pem.
@@ -140,6 +140,29 @@ hooks:
 # stored on the unified contract's topics (contract.enabled must be on).
 # A run resumes where it stopped; a finished one exits at once. Remove an
 # entry once its run is done (docs/runbooks/operations.md).
+# The keyword-search feasibility test (D-065): with run: true, one Job runs
+# `fbs-spike search-probe` once: Facebook's search pages for each keyword
+# (two pages each), on one identity of one exit, one page load per
+# interval, stopping at the first wall. The Job's log is a JSON report of
+# counts; keywords are never printed. Set run back to false afterwards.
+searchProbe:
+  run: false
+  keywords: []        # 1 to 5
+  tier: isp
+  interval: 2m
+
+# API keys made by the platform inside the cluster (D-065: the other
+# collectors send Facebook links to POST /v1/discovery/candidates). Each
+# entry imports the key in its Secret (shape: fbs_<8 lowercase letters or
+# digits>_<32 to 128 URL-safe characters>) with `fbctl apikey import`; fbs
+# keeps only its hash. Revoke with `fbctl apikey revoke --prefix <8 chars>`
+# and remove the entry.
+apiKeys: []
+# - name: igs-candidates
+#   scopes: [discovery:write]
+#   secret: {name: fbs-apikey-igs, key: key}
+#   rate: 0               # requests a minute; 0 = api.default_rate_per_minute
+
 contractBackfill:
   # List a run while it runs. Argo CD re-creates a listed Job when the image
   # changes (a finished run exits at once); with plain Helm, remove a
@@ -311,4 +334,4 @@ networkPolicy:
     https: ["0.0.0.0/0"]
     # The proxy exits (CIDRs and ports), for the components that use them.
     proxies: []
-    proxyComponents: [crawler-page, crawler-post, crawler-thread, crawler-search, crawler-check, registry-sync]
+    proxyComponents: [crawler-page, crawler-post, crawler-thread, crawler-search, crawler-check, registry-sync, search-probe]

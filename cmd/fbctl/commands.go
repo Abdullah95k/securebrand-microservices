@@ -134,6 +134,38 @@ func apikeyCreate(ctx context.Context, cfg *config.Config, args []string) error 
 	return nil
 }
 
+// apikeyImport stores a key made elsewhere (by the platform, into a
+// Kubernetes Secret, never printed): only its hash is kept, and nothing of
+// the key is printed. Idempotent: the chart's apiKeys Job runs it on every
+// sync.
+func apikeyImport(ctx context.Context, cfg *config.Config, args []string) error {
+	fs := flag.NewFlagSet("apikey import", flag.ExitOnError)
+	name := fs.String("name", "", "client name")
+	scopes := fs.String("scopes", "", "comma separated scopes")
+	rate := fs.Int("rate", 0, "requests per minute (0 = default)")
+	keyFile := fs.String("key-file", "", "file holding the key (a mounted Secret)")
+	_ = fs.Parse(args)
+	if *name == "" || *scopes == "" || *keyFile == "" {
+		return fmt.Errorf("--name, --scopes and --key-file are required")
+	}
+	b, err := os.ReadFile(*keyFile)
+	if err != nil {
+		return err
+	}
+	db, err := pg.Open(ctx, cfg.Postgres.DSN, 2)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	res, err := api.ImportClient(ctx, db, *name, strings.Split(*scopes, ","), *rate, string(b))
+	if err != nil {
+		return err
+	}
+	prefix, _, _ := api.ParseKey(string(b))
+	printJSON(map[string]any{"name": *name, "key_prefix": prefix, "result": res})
+	return nil
+}
+
 func apikeyRevoke(ctx context.Context, cfg *config.Config, args []string) error {
 	fs := flag.NewFlagSet("apikey revoke", flag.ExitOnError)
 	prefix := fs.String("prefix", "", "key prefix (the part after fbs_)")

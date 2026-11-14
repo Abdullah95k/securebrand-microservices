@@ -69,6 +69,8 @@ type flags struct {
 	timelinePages, postsPerPage, commentPages, threads, mediaSamples, conc, maxBundles, compare  int
 	trimPages, timelineCount                                                                     int
 	maxPostComments                                                                              int64
+	keywords                                                                                     string
+	interval                                                                                     time.Duration
 }
 
 func main() {
@@ -95,6 +97,8 @@ func main() {
 	fs.StringVar(&f.in, "in", "spike-results.jsonl", "results files, comma separated (report); HAR file (har)")
 	fs.BoolVar(&f.asJSON, "json", false, "print JSON (report, preflight, har, check-fixtures)")
 	fs.StringVar(&f.page, "page", "", "page(s), comma separated (docids, capture, preflight)")
+	fs.StringVar(&f.keywords, "keywords", os.Getenv("FBS_SEARCH_KEYWORDS"), "keywords, comma separated (search-probe; never printed)")
+	fs.DurationVar(&f.interval, "interval", 2*time.Minute, "time between page loads (search-probe)")
 	fs.StringVar(&f.name, "name", "sample", "fixture case name (capture, har)")
 	fs.StringVar(&f.dir, "dir", "testdata/fb", "fixture root (capture, check-fixtures)")
 	fs.StringVar(&f.fixturesDir, "fixtures-dir", "", "write HAR response bodies as fixtures under this root (har)")
@@ -168,6 +172,20 @@ func main() {
 			fmt.Print(spike.FormatPreflight(res))
 		}
 		if !res.OK {
+			os.Exit(exitError)
+		}
+	case "search-probe":
+		kws := splitList(f.keywords)
+		if len(kws) == 0 || len(kws) > 5 {
+			fail(fmt.Errorf("search-probe: 1 to 5 keywords (--keywords or FBS_SEARCH_KEYWORDS)"))
+		}
+		res := spike.SearchProbe(ctx, st.Pool, st.Loader, spike.SearchProbeOptions{Keywords: kws, Tier: f.tier, Interval: f.interval})
+		if f.asJSON {
+			printJSON(res)
+		} else {
+			fmt.Print(spike.FormatSearchProbe(res))
+		}
+		if res.Verdict == spike.SearchError {
 			os.Exit(exitError)
 		}
 	case "run":
@@ -659,7 +677,7 @@ func render(ctx context.Context, cfg *config.Config, f flags, st spike.Stack, se
 }
 
 func usage() {
-	cmds := []string{"phase0", "preflight", "docids", "har", "render", "capture", "check-fixtures", "run", "report", "trim", "trim-report", "version"}
+	cmds := []string{"phase0", "preflight", "docids", "har", "render", "capture", "check-fixtures", "run", "report", "search-probe", "trim", "trim-report", "version"}
 	sort.Strings(cmds)
 	fmt.Fprintf(os.Stderr, "usage: fbs-spike <%s> [flags]   (fbs-spike <cmd> -h for flags)\nsee docs/runbooks/phase0-spike.md\n", strings.Join(cmds, "|"))
 	os.Exit(exitUsage)
