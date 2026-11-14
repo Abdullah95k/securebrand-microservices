@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	fbv1 "github.com/abdullah95k/securebrand-microservices/gen/go/securebrand/fb/v1"
@@ -150,6 +151,14 @@ func (p *Planner) Tick(ctx context.Context) error {
 		if d.maxPosts != nil {
 			lim.MaxPosts = *d.maxPosts
 		}
+		// A page never planned before (D-068): its fresh posts now on p1,
+		// its history behind every page's fresh content on p2.
+		var history *taskv1.Limits
+		if w := p.Cfg.Scheduler.FirstRunWindow; d.lastJob == nil && w > 0 &&
+			(lim.MaxAgeSeconds == 0 || lim.MaxAgeSeconds > int64(w.Seconds())) {
+			history = proto.Clone(lim).(*taskv1.Limits)
+			lim.MaxAgeSeconds = int64(w.Seconds())
+		}
 		var posts []dispatch.PostRoot
 		commit := func(context.Context) error { return nil }
 		if p.Adaptive != nil && d.pageID != nil && lim.IncludeComments {
@@ -166,6 +175,16 @@ func (p *Planner) Tick(ctx context.Context) error {
 		}
 		if err := commit(ctx); err != nil {
 			slog.Warn("planner: post refreshes not recorded", "page", d.ref, "err", err)
+		}
+		if history != nil {
+			if _, _, err := p.Dispatch.Create(ctx, dispatch.Request{Kind: dispatch.KindBackfill, Lane: taskv1.Lane_LANE_P2,
+				Mode: "full", PageRef: d.ref, Limits: history}, 0); err != nil {
+				// Its fresh run went out; the history is asked for again through
+				// the API (POST /v1/jobs, backfill) if it matters.
+				slog.Warn("planner: a new page's history was not queued", "page", d.ref, "err", err)
+			} else {
+				metrics.FirstRunHistory.Inc()
+			}
 		}
 		if _, err := p.DB.Exec(ctx, `UPDATE page_schedule SET last_job_id = $2 WHERE page_ref = $1`, d.ref, j.ID); err != nil {
 			return err

@@ -126,6 +126,7 @@ var (
 	// mention, ...) and what their own page reads as (page, profile: a
 	// person, unknown).
 	ScheduledKinds    = gaugeVec("scheduled_kinds", "Enabled scheduled pages by source and kind (leader scheduler).", "source", "kind")
+	FirstRunHistory   = counter("first_run_history_total", "New pages whose history the planner queued as a backfill on p2 (D-068).")
 	MentionInFlight   = gauge("mention_checks_in_flight", "Check tasks queued and not finished, against the page-load share's window (leader scheduler).")
 	MentionChecksUsed = gauge("mention_checks_used", "Checks started today, against mentions.max_checks_per_day (leader scheduler).")
 	MentionEvents     = gauge("mention_events_pending", "Mention events the persister wrote and the leader has not counted yet.")
